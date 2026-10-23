@@ -1142,8 +1142,11 @@ dependencies = [
  "eframe",
  "egui_kittest",
  "ferrite-core",
+ "ferrite-lsp",
+ "lsp-types",
  "notify",
  "rfd",
+ "serde_json",
 ]
 
 [[package]]

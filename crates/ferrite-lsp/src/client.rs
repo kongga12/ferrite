@@ -31,27 +31,43 @@ pub struct ServerCommand {
     pub args: Vec<String>,
 }
 
-/// PATH에서 실행 파일을 찾는다. Windows는 `.exe`·`.cmd`·`.bat`을 붙여 본다.
+/// PATH 다음으로 찾아볼 흔한 설치 위치. macOS에서 Finder로 실행한 앱은 셸의 PATH를 물려받지
+/// 못해(launchd의 최소 PATH만 받음) cargo·Go·Homebrew로 설치한 서버를 PATH로는 못 찾는다.
+fn fallback_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
+        let home = PathBuf::from(home);
+        dirs.extend([".cargo/bin", "go/bin", ".local/bin"].map(|d| home.join(d)));
+    }
+    if !cfg!(windows) {
+        dirs.extend(["/opt/homebrew/bin", "/usr/local/bin"].map(PathBuf::from));
+    }
+    dirs
+}
+
+/// PATH와 흔한 설치 위치에서 실행 파일을 찾는다. Windows는 `.exe`·`.cmd`·`.bat`을 붙여 본다.
 pub fn find_program(name: &str) -> Option<PathBuf> {
     let extensions: &[&str] = if cfg!(windows) {
         &["exe", "cmd", "bat"]
     } else {
         &[""]
     };
-    let paths = std::env::var_os("PATH")?;
-    std::env::split_paths(&paths).find_map(|dir| {
-        extensions
-            .iter()
-            .map(|ext| {
-                let mut file = dir.join(name).into_os_string();
-                if !ext.is_empty() {
-                    file.push(".");
-                    file.push(ext);
-                }
-                PathBuf::from(file)
-            })
-            .find(|p| p.is_file())
-    })
+    let paths = std::env::var_os("PATH").unwrap_or_default();
+    std::env::split_paths(&paths)
+        .chain(fallback_dirs())
+        .find_map(|dir| {
+            extensions
+                .iter()
+                .map(|ext| {
+                    let mut file = dir.join(name).into_os_string();
+                    if !ext.is_empty() {
+                        file.push(".");
+                        file.push(ext);
+                    }
+                    PathBuf::from(file)
+                })
+                .find(|p| p.is_file())
+        })
 }
 
 #[derive(Debug)]

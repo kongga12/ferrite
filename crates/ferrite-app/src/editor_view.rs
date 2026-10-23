@@ -9,6 +9,7 @@ use eframe::egui::{
     text::{CCursor, Galley, LayoutJob},
 };
 use ferrite_core::buffer::{Buffer, Indent};
+use ferrite_lsp::problem::{Problem, Severity};
 use std::sync::Arc;
 
 /// 한 줄에서 그리는 최대 문자 수.
@@ -48,6 +49,8 @@ pub struct EditorOptions<'a> {
     pub comment_token: Option<&'a str>,
     /// 찾기 결과(문자 범위, 시작 순 정렬). 배경을 칠한다.
     pub search_matches: &'a [Range<usize>],
+    /// 언어 서버 진단(시작 순 정렬). 물결 밑줄과 말풍선으로 보여 준다.
+    pub problems: &'a [Problem],
 }
 
 struct Geometry {
@@ -130,9 +133,31 @@ pub fn show(
                 &geom,
                 first..last,
                 styles.as_ref(),
-                opts.search_matches,
+                opts,
                 response.has_focus(),
             );
+            let mut response = response;
+            if response.hovered()
+                && let Some(pointer) = response.hover_pos()
+            {
+                let pos = hit_test(ui, buffer, &geom, pointer);
+                let messages: Vec<String> = opts
+                    .problems
+                    .iter()
+                    .filter(|p| p.range.start <= pos && pos <= p.range.end)
+                    .map(|p| {
+                        let source = if p.source.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" ({})", p.source)
+                        };
+                        format!("[{}] {}{source}", p.severity.label(), p.message)
+                    })
+                    .collect();
+                if !messages.is_empty() {
+                    response = response.on_hover_text_at_pointer(messages.join("\n"));
+                }
+            }
 
             if state.scroll_to_cursor {
                 state.scroll_to_cursor = false;
@@ -438,6 +463,32 @@ fn cursor_rect(ui: &egui::Ui, buffer: &Buffer, state: &EditorState, geom: &Geome
     )
 }
 
+pub fn severity_color(visuals: &egui::Visuals, severity: Severity) -> Color32 {
+    match severity {
+        Severity::Error => visuals.error_fg_color,
+        Severity::Warning => visuals.warn_fg_color,
+        Severity::Info => Color32::from_rgb(0x37, 0x94, 0xFF),
+        Severity::Hint => visuals.weak_text_color(),
+    }
+}
+
+/// 진단 위치 밑의 물결선.
+fn squiggle(painter: &egui::Painter, x0: f32, x1: f32, y: f32, color: Color32) {
+    const AMPLITUDE: f32 = 1.5;
+    const STEP: f32 = 2.0;
+    let mut points = Vec::new();
+    let mut x = x0;
+    let mut up = true;
+    while x <= x1 {
+        points.push(Pos2::new(x, y + if up { -AMPLITUDE } else { AMPLITUDE }));
+        x += STEP;
+        up = !up;
+    }
+    if points.len() >= 2 {
+        painter.add(egui::Shape::line(points, Stroke::new(1.0, color)));
+    }
+}
+
 #[expect(clippy::too_many_arguments)]
 fn paint(
     ui: &egui::Ui,
@@ -447,11 +498,24 @@ fn paint(
     geom: &Geometry,
     lines: Range<usize>,
     styles: Option<&LineStyles>,
-    matches: &[Range<usize>],
+    opts: &EditorOptions<'_>,
     focused: bool,
 ) {
     let visuals = ui.visuals();
     let match_fill = Color32::from_rgba_unmultiplied(230, 180, 0, 70);
+    let matches = opts.search_matches;
+    // 진단은 여러 줄에 걸칠 수 있어 끝 위치로 이분 탐색할 수 없다. 보이는 범위에 걸친 것만 미리 고른다.
+    let visible_end = if lines.end >= buffer.line_count() {
+        buffer.len_chars()
+    } else {
+        buffer.line_start(lines.end)
+    };
+    let visible = buffer.line_start(lines.start)..visible_end;
+    let problems: Vec<&Problem> = opts
+        .problems
+        .iter()
+        .filter(|p| p.range.start <= visible.end && p.range.end >= visible.start)
+        .collect();
     let painter = ui.painter().with_clip_rect(screen_view);
     let text_painter = painter.with_clip_rect(Rect::from_min_max(
         Pos2::new(screen_view.min.x + geom.gutter, screen_view.min.y),
@@ -509,7 +573,32 @@ fn paint(
             fill(m, match_fill);
         }
         fill(&sel, visuals.selection.bg_fill);
+        let x = |pos: usize| {
+            galley
+                .pos_from_cursor(CCursor::new(pos.clamp(start, end) - start))
+                .min
+                .x
+        };
+        let squiggles: Vec<(f32, f32, Color32)> = problems
+            .iter()
+            .filter(|p| p.range.start <= end && p.range.end >= start)
+            .map(|p| {
+                let x0 = x(p.range.start);
+                // 빈 범위(위치 하나)도 보이도록 최소 한 글자 폭을 칠한다.
+                let x1 = x(p.range.end).max(x0 + geom.char_width);
+                (x0, x1, severity_color(visuals, p.severity))
+            })
+            .collect();
         text_painter.galley(Pos2::new(geom.text_x(), y), galley, visuals.text_color());
+        for (x0, x1, color) in squiggles {
+            squiggle(
+                &text_painter,
+                geom.text_x() + x0,
+                geom.text_x() + x1,
+                y + geom.row_height - 2.0,
+                color,
+            );
+        }
     }
 
     // 줄 번호(가로 스크롤과 무관하게 왼쪽에 고정)

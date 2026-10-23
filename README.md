@@ -5,11 +5,12 @@ Rust로 작성한 크로스플랫폼(Windows / macOS / Linux) 경량 IDE.
 
 - 개발 워크플로우와 로드맵: [docs/WORKFLOW.md](docs/WORKFLOW.md)
 
-## 현재 상태: Phase 1 (에디터 코어)
+## 현재 상태: Phase 2 진행 중 (LSP 연동)
 
 - 폴더 열기, 지연 로딩 프로젝트 트리(파일 감시로 자동 갱신), 탭 에디터
 - 트리 우클릭: 새 파일·새 폴더·이름 바꾸기·휴지통으로 삭제
 - 가상화 코드 에디터: 100MB 파일도 스크롤·입력 1ms 미만, 줄 번호, 한글 IME 조합 표시
+- 언어 서버(LSP) 진단: 물결 밑줄·말풍선·문제 목록(상태바의 "오류 N · 경고 M" 클릭). 현재 rust-analyzer로 검증, gopls·clangd·basedpyright·phpactor는 설치되어 있으면 연결
 - 구문 강조(tree-sitter): Rust, Python, Go, C/C++, PHP, Java, SQL, TOML, JSON, YAML, XML, HTML, JavaScript, CSS
 - UTF-8(BOM 포함)·CP949 인코딩과 CRLF 감지·보존, 들여쓰기 방식 감지
 - 원자적 저장, 미저장 변경 확인(탭 닫기, 창 종료), 외부 변경 시 다시 불러오기·충돌 안내

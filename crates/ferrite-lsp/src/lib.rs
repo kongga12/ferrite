@@ -2,5 +2,6 @@
 
 pub mod client;
 pub mod position;
+pub mod problem;
 pub mod transport;
 pub mod uri;

@@ -14,8 +14,11 @@ path = "src/main.rs"
 dirs = "7.0.0"
 eframe.workspace = true
 ferrite-core.workspace = true
+ferrite-lsp.workspace = true
+lsp-types = "0.97"
 notify = "8"
 rfd.workspace = true
+serde_json = "1.0.154"
 
 [dev-dependencies]
 egui_kittest.workspace = true

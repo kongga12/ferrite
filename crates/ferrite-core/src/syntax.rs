@@ -103,6 +103,27 @@ impl Lang {
         }
     }
 
+    /// LSP `languageId`(textDocument/didOpen에 쓰는 표준 식별자).
+    pub fn lsp_id(self) -> &'static str {
+        match self {
+            Lang::Rust => "rust",
+            Lang::Python => "python",
+            Lang::Go => "go",
+            Lang::C => "c",
+            Lang::Cpp => "cpp",
+            Lang::Php => "php",
+            Lang::Java => "java",
+            Lang::Sql => "sql",
+            Lang::Toml => "toml",
+            Lang::Json => "json",
+            Lang::Yaml => "yaml",
+            Lang::Xml => "xml",
+            Lang::Html => "html",
+            Lang::JavaScript => "javascript",
+            Lang::Css => "css",
+        }
+    }
+
     /// 줄 주석 기호. 블록 주석만 있는 언어는 None.
     pub fn line_comment(self) -> Option<&'static str> {
         match self {
