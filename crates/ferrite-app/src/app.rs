@@ -15,7 +15,9 @@ use ferrite_core::{fs_ops, search};
 use crate::editor_view::{self, EditorOptions, EditorState, Styler};
 use crate::file_tree::{FileTree, TreeAction};
 use crate::find_bar::{FindAction, FindBar};
+use crate::lsp_hub::{DocSync, HubUpdate, LspHub, ServerState};
 use crate::watcher::FsWatcher;
+use ferrite_lsp::problem::{Severity, to_problems};
 
 // Modifiers::COMMAND는 macOS에서 Cmd, 그 외 OS에서 Ctrl로 동작한다.
 const OPEN_FOLDER: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::O);
@@ -101,6 +103,16 @@ fn apply_settings(ctx: &egui::Context, settings: &Settings) {
     });
 }
 
+/// 문서 경로를 바꾼다(이름 바꾸기, 다른 이름으로 저장). 언어 서버에서는 옛 경로를 닫고
+/// 다음 동기화 때 새 경로로 다시 연다.
+fn move_document(hub: &mut LspHub, doc: &mut Document, path: PathBuf) {
+    if let Some(lang) = doc.lang {
+        hub.closed(&doc.path, lang);
+    }
+    doc.lsp = DocSync::default();
+    doc.set_path(path);
+}
+
 struct Document {
     path: PathBuf,
     buffer: Buffer,
@@ -119,6 +131,8 @@ struct Document {
     disk_hash: u64,
     /// 저장하지 않은 변경이 있는데 디스크 파일이 밖에서 바뀌었다(사용자 선택 대기).
     external_change: bool,
+    /// 언어 서버 동기화 상태와 진단.
+    lsp: DocSync,
 }
 
 impl Document {
@@ -139,6 +153,7 @@ impl Document {
             view: EditorState::default(),
             disk_hash: 0,
             external_change: false,
+            lsp: DocSync::default(),
         };
         doc.replace_content(&content, &bytes, default_indent);
         Ok(doc)
@@ -162,6 +177,7 @@ impl Document {
         self.format_changed = false;
         self.disk_hash = text_file::content_hash(bytes);
         self.external_change = false;
+        self.lsp.content_replaced();
     }
 
     fn reload(&mut self, default_indent: Indent) -> Result<(), TextFileError> {
@@ -273,6 +289,9 @@ pub struct FerriteApp {
     name_prompt: Option<NamePrompt>,
     /// 휴지통으로 옮기기 전 확인을 기다리는 경로.
     confirm_delete: Option<PathBuf>,
+    hub: LspHub,
+    /// 아래쪽 "문제" 목록을 보이는지.
+    show_problems: bool,
     /// 사용자가 종료를 확정했으면 true. 이후의 창 닫기 요청은 막지 않는다.
     allow_close: bool,
     status: String,
@@ -326,6 +345,8 @@ impl FerriteApp {
             watcher: FsWatcher::new(cc.egui_ctx.clone()).ok(),
             name_prompt: None,
             confirm_delete: None,
+            hub: LspHub::new(cc.egui_ctx.clone()),
+            show_problems: false,
         };
         if let Some(file) = file {
             app.open_file(file);
@@ -434,7 +455,7 @@ impl FerriteApp {
                     } else {
                         path.join(rest)
                     };
-                    doc.set_path(moved);
+                    move_document(&mut self.hub, doc, moved);
                 }
             }
             self.status = format!("이름을 바꿨습니다: {}", path.display());
@@ -551,7 +572,7 @@ impl FerriteApp {
         match doc.save() {
             Ok(()) => {
                 // 이제 파일이 있으니 실제 경로로 확정하고 언어도 다시 고른다.
-                doc.set_path(real_path(&target));
+                move_document(&mut self.hub, doc, real_path(&target));
                 self.invalidate_tree(target.parent());
                 self.status = format!("저장됨: {}", target.display());
             }
@@ -638,6 +659,9 @@ impl FerriteApp {
         let doc = &mut self.docs[index];
         match doc.save() {
             Ok(()) => {
+                if let Some(lang) = doc.lang {
+                    self.hub.saved(&doc.path, lang, &doc.buffer, &mut doc.lsp);
+                }
                 self.status = format!("저장됨: {}", doc.path.display());
                 if settings_path().is_some_and(|p| real_path(&p) == doc.path) {
                     self.settings_changed = true;
@@ -660,7 +684,10 @@ impl FerriteApp {
     }
 
     fn close_tab(&mut self, index: usize) {
-        self.docs.remove(index);
+        let doc = self.docs.remove(index);
+        if let Some(lang) = doc.lang {
+            self.hub.closed(&doc.path, lang);
+        }
         self.active = match self.active {
             _ if self.docs.is_empty() => None,
             Some(a) if a > index => Some(a - 1),
@@ -843,14 +870,116 @@ impl FerriteApp {
         });
     }
 
+    /// 열린 문서를 언어 서버와 맞추고, 서버에서 온 진단·메시지를 반영한다.
+    fn sync_language_servers(&mut self) {
+        self.hub.set_root(self.tree.as_ref().map(FileTree::root));
+        for doc in &mut self.docs {
+            if let Some(lang) = doc.lang {
+                self.hub.sync(&doc.path, lang, &doc.buffer, &mut doc.lsp);
+            }
+        }
+        for update in self.hub.process_events() {
+            match update {
+                HubUpdate::Diagnostics {
+                    path,
+                    diagnostics,
+                    encoding,
+                } => {
+                    if let Some(doc) = self.docs.iter_mut().find(|d| d.path == path) {
+                        doc.lsp.problems = to_problems(doc.buffer.rope(), &diagnostics, encoding);
+                    }
+                }
+                HubUpdate::Message(message) => self.status = message,
+            }
+        }
+    }
+
+    /// 아래쪽 "문제" 목록. 항목을 누르면 그 위치로 이동한다.
+    fn problems_panel(&mut self, ui: &mut egui::Ui) {
+        let (true, Some(index)) = (self.show_problems, self.active) else {
+            return;
+        };
+        let mut jump = None;
+        egui::Panel::bottom("problems")
+            .resizable(true)
+            .default_size(140.0)
+            .show(ui, |ui| {
+                let doc = &self.docs[index];
+                ui.strong(format!("문제 — {}", doc.name()));
+                egui::ScrollArea::vertical()
+                    .auto_shrink(false)
+                    .show(ui, |ui| {
+                        if doc.lsp.problems.is_empty() {
+                            ui.weak("문제가 없습니다");
+                        }
+                        for problem in &doc.lsp.problems {
+                            let start = problem.range.start.min(doc.buffer.len_chars());
+                            let (line, col) = doc.buffer.pos_to_line_col(start);
+                            let message = problem.message.lines().next().unwrap_or_default();
+                            let text = egui::RichText::new(format!(
+                                "{}:{}  [{}] {message}",
+                                line + 1,
+                                col + 1,
+                                problem.severity.label()
+                            ))
+                            .color(editor_view::severity_color(ui.visuals(), problem.severity));
+                            if ui.selectable_label(false, text).clicked() {
+                                jump = Some(start);
+                            }
+                        }
+                    });
+            });
+        if let Some(pos) = jump {
+            let doc = &mut self.docs[index];
+            doc.buffer.move_to(pos, false);
+            doc.view.reveal_cursor();
+            self.focus_editor = true;
+        }
+    }
+
     fn status_bar(&mut self, ui: &mut egui::Ui) {
+        let mut restart = None;
         egui::Panel::bottom("status_bar").show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(&self.status);
-                let Some(doc) = self.active.map(|i| &mut self.docs[i]) else {
-                    return;
-                };
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if let Some(doc) = self.active.map(|i| &mut self.docs[i]) {
+                    let count = |s| doc.lsp.problems.iter().filter(|p| p.severity == s).count();
+                    let (errors, warnings) = (count(Severity::Error), count(Severity::Warning));
+                    if ui
+                        .selectable_label(
+                            self.show_problems,
+                            format!("오류 {errors} · 경고 {warnings}"),
+                        )
+                        .on_hover_text("문제 목록 보기/숨기기")
+                        .clicked()
+                    {
+                        self.show_problems = !self.show_problems;
+                    }
+                    if let Some(lang) = doc.lang
+                        && let Some((name, state)) = self.hub.status(lang)
+                    {
+                        match state {
+                            ServerState::Starting => {
+                                ui.label(format!("{name}: 준비 중…"));
+                            }
+                            ServerState::Ready => {
+                                ui.label(format!("{name}: 준비됨"));
+                            }
+                            ServerState::NotInstalled => {
+                                ui.label(format!("{name}: 설치 안 됨"))
+                                    .on_hover_text(format!(
+                                        "PATH에서 {name}을(를) 찾지 못했습니다"
+                                    ));
+                            }
+                            ServerState::Failed(reason) => {
+                                let text =
+                                    egui::RichText::new(format!("{name}: 오류 (눌러서 다시 시작)"))
+                                        .color(ui.visuals().error_fg_color);
+                                if ui.link(text).on_hover_text(reason.as_str()).clicked() {
+                                    restart = Some(lang);
+                                }
+                            }
+                        }
+                    }
                     let before = (doc.encoding, doc.line_ending);
                     egui::ComboBox::new("line_ending", "줄바꿈")
                         .selected_text(doc.line_ending.label())
@@ -882,9 +1011,16 @@ impl FerriteApp {
                     });
                     let (line, col) = doc.buffer.pos_to_line_col(doc.buffer.selection().head);
                     ui.label(format!("줄 {}, 열 {}", line + 1, col + 1));
+                }
+                // 남은 폭에 상태 메시지를 둔다. 길면 말줄임으로 잘라 오른쪽 항목과 겹치지 않게 한다.
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    ui.add(egui::Label::new(&self.status).truncate());
                 });
             });
         });
+        if let Some(lang) = restart {
+            self.hub.restart(lang);
+        }
     }
 
     fn project_panel(&mut self, ui: &mut egui::Ui) {
@@ -971,6 +1107,7 @@ impl FerriteApp {
                 indent: doc.indent,
                 comment_token: doc.lang.and_then(Lang::line_comment),
                 search_matches: self.find.as_ref().map_or(&[], |f| f.matches()),
+                problems: &doc.lsp.problems,
             };
             let id = ui.make_persistent_id(&doc.path);
             if std::mem::take(&mut self.focus_editor) {
@@ -1079,6 +1216,7 @@ impl FerriteApp {
 impl eframe::App for FerriteApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.process_fs_events();
+        self.sync_language_servers();
         if std::mem::take(&mut self.settings_changed) {
             let (settings, error) = load_settings();
             self.status = error.unwrap_or_else(|| "설정을 적용했습니다".into());
@@ -1095,6 +1233,7 @@ impl eframe::App for FerriteApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.menu_bar(ui);
         self.status_bar(ui);
+        self.problems_panel(ui);
         self.project_panel(ui);
         self.editor(ui);
         self.pending_close_dialog(ui.ctx());
@@ -1378,23 +1517,108 @@ mod tests {
         harness.key_press_modifiers(Modifiers::COMMAND, Key::A);
         harness
             .get_by_role_and_label(Role::TextInput, "이름")
-            .type_text("c.rs");
+            .type_text("c.toml");
         harness.key_press(Key::Enter);
         harness.run();
-        assert!(dir.join("c.rs").is_file() && !dir.join("b.txt").exists());
+        assert!(dir.join("c.toml").is_file() && !dir.join("b.txt").exists());
         let doc = &harness.state().docs[0];
-        assert!(doc.path.ends_with("c.rs"));
-        assert_eq!(doc.lang, Some(Lang::Rust), "확장자가 바뀌면 언어도 바뀐다");
+        assert!(doc.path.ends_with("c.toml"));
+        assert_eq!(
+            doc.lang,
+            Some(Lang::Toml),
+            "확장자가 바뀌면 언어도 바뀐다(서버가 없는 언어로 골라 테스트가 서버를 띄우지 않게)"
+        );
 
         // 삭제는 확인을 거친다(취소하면 그대로)
-        tree_item(&harness, "c.rs").click_secondary();
+        tree_item(&harness, "c.toml").click_secondary();
         harness.run();
         harness.get_by_label("휴지통으로 삭제…").click();
         harness.run();
         harness.get_by_label("취소").click();
         harness.run();
-        assert!(dir.join("c.rs").is_file());
+        assert!(dir.join("c.toml").is_file());
 
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn 언어_서버_진단이_상태바와_문제_목록에_보이고_누르면_이동한다() {
+        let ra_runs = ferrite_lsp::client::find_program("rust-analyzer").is_some_and(|p| {
+            std::process::Command::new(p)
+                .arg("--version")
+                .output()
+                .is_ok_and(|o| o.status.success())
+        });
+        if !ra_runs {
+            assert!(
+                std::env::var_os("CI").is_none(),
+                "CI에는 rust-analyzer가 있어야 합니다"
+            );
+            eprintln!("rust-analyzer가 없어 건너뜁니다");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("ferrite-lsp-ui-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("src")).unwrap();
+        fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"lsp_ui\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        let file = dir.join("src").join("main.rs");
+        fs::write(&file, "fn main() {\n    let 값 = ;\n}\n").unwrap();
+
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(1200.0, 800.0))
+            .build_eframe(|cc| FerriteApp::new(cc, Some(file.clone())));
+        // 첫 실행은 rust-analyzer가 표준 라이브러리를 읽느라 오래 걸릴 수 있다
+        let mut arrived = false;
+        for _ in 0..1200 {
+            harness.run();
+            if !harness.state().docs[0].lsp.problems.is_empty() {
+                arrived = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        assert!(arrived, "진단이 오지 않음: {}", harness.state().status);
+
+        let problem = harness.state().docs[0].lsp.problems[0].clone();
+        assert_eq!(problem.severity, Severity::Error);
+        assert_eq!(
+            harness.state().docs[0]
+                .buffer
+                .pos_to_line_col(problem.range.start)
+                .0,
+            1,
+            "둘째 줄의 문법 오류"
+        );
+
+        // 상태바의 개수를 눌러 문제 목록을 열고, 항목을 누르면 커서가 그 위치로 간다
+        harness.get_by_label_contains(" · 경고").click();
+        harness.run();
+        let (line, col) = harness.state().docs[0]
+            .buffer
+            .pos_to_line_col(problem.range.start);
+        let entry = format!("{}:{}  [오류]", line + 1, col + 1);
+        harness
+            .get_all_by_label_contains(&entry)
+            .next()
+            .expect("문제 목록 항목")
+            .click();
+        harness.run();
+        assert_eq!(
+            harness.state().docs[0].buffer.selection().head,
+            problem.range.start
+        );
+
+        drop(harness);
+        // 서버 프로세스가 작업 폴더를 놓을 때까지 잠시 기다린다(Windows는 쓰는 중인 폴더를 못 지운다)
+        for _ in 0..50 {
+            if fs::remove_dir_all(&dir).is_ok() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
     }
 }

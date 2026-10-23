@@ -10,6 +10,7 @@ publish = false
 
 [workspace.dependencies]
 ferrite-core = { path = "crates/ferrite-core" }
+ferrite-lsp = { path = "crates/ferrite-lsp" }
 eframe = "0.37"
 egui_kittest = { version = "0.37", features = ["eframe"] }
 encoding_rs = "0.8"

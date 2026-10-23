@@ -8,6 +8,7 @@ mod editor_view;
 mod file_tree;
 mod find_bar;
 mod fonts;
+mod lsp_hub;
 mod theme;
 mod watcher;
 

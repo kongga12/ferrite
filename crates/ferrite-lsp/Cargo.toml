@@ -1,0 +1,12 @@
+[package]
+name = "ferrite-lsp"
+description = "Ferrite LSP 클라이언트: 언어 서버 프로세스 실행, JSON-RPC 전송, 위치·URI 변환"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+lsp-types = "0.97"
+ropey.workspace = true
+serde_json = "1.0.154"
