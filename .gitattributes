@@ -1,0 +1,2 @@
+# 3개 OS에서 줄바꿈을 LF로 통일한다(Windows의 core.autocrlf 설정과 무관하게).
+* text=auto eol=lf

@@ -1,0 +1,27 @@
+//! Ferrite: Rust 기반 크로스플랫폼 경량 IDE.
+
+// 릴리스 빌드에서 Windows 콘솔 창을 띄우지 않는다.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+mod app;
+mod file_tree;
+mod fonts;
+mod text_file;
+
+use eframe::egui;
+
+fn main() -> eframe::Result {
+    let project = std::env::args_os().nth(1).map(std::path::PathBuf::from);
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_title("Ferrite")
+            .with_inner_size([1280.0, 800.0])
+            .with_min_inner_size([640.0, 400.0]),
+        ..Default::default()
+    };
+    eframe::run_native(
+        "Ferrite",
+        options,
+        Box::new(|cc| Ok(Box::new(app::FerriteApp::new(cc, project)))),
+    )
+}
