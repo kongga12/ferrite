@@ -11,6 +11,9 @@ mod fonts;
 mod theme;
 mod watcher;
 
+#[cfg(test)]
+mod perf;
+
 use eframe::egui;
 
 fn main() -> eframe::Result {
