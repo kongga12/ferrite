@@ -9,6 +9,7 @@ mod file_tree;
 mod find_bar;
 mod fonts;
 mod lsp_hub;
+mod lsp_ui;
 mod theme;
 mod watcher;
 
