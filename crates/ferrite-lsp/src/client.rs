@@ -103,6 +103,12 @@ pub enum ServerEvent {
         method: String,
         params: Value,
     },
+    /// 앱이 처리하고 `reply`로 답해야 하는 서버 요청(지금은 `workspace/applyEdit`뿐).
+    Request {
+        id: Value,
+        method: String,
+        params: Value,
+    },
     /// 프로세스가 끝났거나 초기화에 실패했다. 사유(stderr 마지막 줄 등)를 담는다.
     Exited(String),
 }
@@ -285,6 +291,11 @@ impl LanguageServer {
             json!({ "textDocument": { "uri": uri } }),
         );
     }
+
+    /// `ServerEvent::Request`에 답한다.
+    pub fn reply(&self, id: Value, result: Value) {
+        self.send(&json!({ "jsonrpc": "2.0", "id": id, "result": result }));
+    }
 }
 
 impl Drop for LanguageServer {
@@ -348,8 +359,27 @@ fn initialize_params(root: &Path) -> Result<Value, String> {
                 "hover": { "contentFormat": ["plaintext", "markdown"] },
                 "definition": { "linkSupport": true },
                 "references": {},
+                "formatting": {},
+                "rename": { "prepareSupport": false },
+                // 코드 액션은 편집을 나중에 받는(resolve) 방식도 지원한다(rust-analyzer 어시스트 등).
+                "codeAction": {
+                    "codeActionLiteralSupport": {
+                        "codeActionKind": { "valueSet": [
+                            "", "quickfix", "refactor", "refactor.extract", "refactor.inline",
+                            "refactor.rewrite", "source", "source.organizeImports",
+                        ] },
+                    },
+                    "resolveSupport": { "properties": ["edit"] },
+                    "dataSupport": true,
+                },
             },
-            "workspace": { "workspaceFolders": true, "configuration": true },
+            // 파일 만들기·이름 바꾸기·지우기(resourceOperations)는 아직 적용하지 못한다고 알린다.
+            "workspace": {
+                "workspaceFolders": true,
+                "configuration": true,
+                "applyEdit": true,
+                "workspaceEdit": { "documentChanges": true, "resourceOperations": [] },
+            },
             "window": { "workDoneProgress": false },
         },
     }))
@@ -381,6 +411,12 @@ fn reader_loop(
         };
         let method = message.get("method").and_then(Value::as_str);
         match (message.get("id"), method) {
+            // 편집 적용 요청은 앱의 문서를 바꿔야 하므로 앱으로 넘기고, 나머지는 바로 답한다.
+            (Some(id), Some("workspace/applyEdit")) => send(ServerEvent::Request {
+                id: id.clone(),
+                method: "workspace/applyEdit".into(),
+                params: message.get("params").cloned().unwrap_or(Value::Null),
+            }),
             (Some(id), Some(method)) => {
                 reply_to_server_request(stdin, id, method, message.get("params"))
             }
