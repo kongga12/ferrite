@@ -60,15 +60,23 @@ fn candidate_paths() -> Vec<PathBuf> {
 
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
 fn candidate_paths() -> Vec<PathBuf> {
-    // 배포판마다 경로가 달라 fontconfig에 한국어 지원 폰트를 먼저 질의한다.
-    let mut paths: Vec<PathBuf> = std::process::Command::new("fc-match")
-        .args(["-f", "%{file}", ":lang=ko"])
+    // 배포판마다 경로가 달라 fontconfig로 찾는다. fc-match는 한글 폰트가 없어도 아무 폰트나
+    // 돌려주므로(한글이 깨짐), 한국어를 실제로 지원하는 폰트만 나열하는 fc-list를 쓴다.
+    let listed = std::process::Command::new("fc-list")
+        .args(["-f", "%{file}\n", ":lang=ko"])
         .output()
         .ok()
         .filter(|out| out.status.success())
-        .map(|out| String::from_utf8_lossy(&out.stdout).into_owned().into())
-        .into_iter()
-        .collect();
+        .map(|out| String::from_utf8_lossy(&out.stdout).into_owned())
+        .unwrap_or_default();
+    let mut paths: Vec<PathBuf> = listed.lines().map(PathBuf::from).collect();
+    // UI용으로 기본 굵기를 먼저 고른다(fc-list 출력 순서는 정해져 있지 않다).
+    paths.sort_by_key(|p| {
+        let name = p.to_string_lossy().to_lowercase();
+        ["bold", "light", "thin", "black", "heavy", "medium"]
+            .iter()
+            .any(|w| name.contains(w))
+    });
     paths.extend([
         "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc".into(),
         "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc".into(),

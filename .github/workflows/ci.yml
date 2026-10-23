@@ -21,10 +21,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Linux 빌드 의존성 설치
         if: runner.os == 'Linux'
+        # fonts-nanum: 러너에 한글 폰트가 없어 UI 테스트가 한글 글리프 누락으로 실패하는 것을 막는다.
         run: |
           sudo apt-get update
           sudo apt-get install -y libgtk-3-dev libxkbcommon-dev libwayland-dev \
-            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev fonts-nanum
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test

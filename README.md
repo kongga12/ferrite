@@ -21,7 +21,7 @@ Rust로 작성한 크로스플랫폼(Windows / macOS / Linux) 경량 IDE.
 |---|---|
 | Windows | Visual Studio Build Tools(C++ 워크로드) |
 | macOS | `xcode-select --install` |
-| Linux (Debian/Ubuntu) | `sudo apt-get install libgtk-3-dev libxkbcommon-dev libwayland-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev` |
+| Linux (Debian/Ubuntu) | `sudo apt-get install libgtk-3-dev libxkbcommon-dev libwayland-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev`<br>한글 폰트가 없으면 `fonts-nanum` 또는 `fonts-noto-cjk`도 설치(없으면 한글이 네모로 보임) |
 
 ```bash
 cargo run --release -- .
