@@ -30,7 +30,7 @@
 - [x] 명령줄로 폴더 열기 (`ferrite <폴더>`)
 - [x] 테스트: 인코딩·저장 단위 테스트 5개, 헤드리스 UI 테스트 1개(egui_kittest, 접근성 검사 포함)
 - [x] 3-OS CI 워크플로 작성 (`.github/workflows/ci.yml`)
-- [ ] GitHub 저장소에 올려 CI 3개 OS 통과 확인 (macOS·Linux 빌드는 아직 검증 전)
+- [x] GitHub 저장소에 올려 CI 3개 OS 통과 확인 (2026-10-23, 실행 39885760694)
 
 **완료 조건**: CI 3개 OS 통과. 한글 CP949 파일을 열어 수정하고 저장했을 때 인코딩과 줄바꿈이 보존된다.
 
@@ -57,31 +57,62 @@
 - **언어 서버 매니저**:
   - OS·아키텍처별 바이너리를 다운로드하고 SHA-256을 검증한 뒤 설치 경로에 둔다.
   - 버전을 고정하고 업데이트를 알린다.
-- 대상 서버: rust-analyzer, gopls, basedpyright, ruff, clangd, phpactor, jdt.ls
+- 대상 서버: rust-analyzer, gopls, basedpyright, ruff, clangd, phpactor, jdt.ls, Spring Boot LS
+- Java:
+  - jdt.ls를 Lombok 에이전트와 함께 띄운다.
+  - Spring Boot LS ↔ jdt.ls 중계를 클라이언트에 구현한다.
 - 서버 크래시 시 재시작(지수 백오프)하고 상태바에 표시
 
 **완료 조건**: 7개 언어에서 완성, 정의 이동, 진단이 3개 OS 모두 동작한다.
 
-### Phase 2b — egov 지원 (JSP · MyBatis)
+### Phase 2b — egov 지원 (JSP · MyBatis · Spring · JPA)
 
-**목표**: egov 프로젝트의 JSP와 MyBatis 매퍼 XML을 IDE 수준으로 다룬다. 오픈소스 언어 서버가 없어 직접 만드는 영역이다.
+**목표**: egov 프로젝트의 JSP, 매퍼 XML, Spring 설정, JPA를 IDE 수준으로 다룬다.
+- 오픈소스 언어 서버가 없거나 부족해 직접 만드는 영역이다.
 
 - `ferrite-egov-ls` 언어 서버 크레이트(Rust, LSP)
-- MyBatis:
+- MyBatis(iBatis 2 sqlMap 포함):
   - Mapper 메서드 ↔ XML 문장 이동
   - 참조 진단(refid, resultMap, namespace)
-  - `${}` SQL Injection 경고
+  - `${}`·`$prop$` SQL Injection 경고
   - `#{}` 속성 완성
 - JSP:
   - HTML·Java·EL 하이라이팅
   - taglib 완성
   - 이스케이프 없는 EL 출력의 XSS 경고
   - 뷰 이름 → JSP 이동
-- 테스트 코퍼스: 실제 egov 3.x·4.x 프로젝트의 JSP·매퍼 XML 표본. 고객사 소스는 저장소에 넣지 않고 로컬 경로로만 참조한다.
+- Spring:
+  - XML 설정의 빈 class·ref·property 검증과 이동
+  - `${}` 플레이스홀더 → 프로퍼티 값 이동
+  - 엔드포인트 목록
+- JPA:
+  - `@Query` 안 엔티티·필드 완성
+  - IDENTITY 미지원 DB(Oracle 11g 등)에서 `@GeneratedValue(IDENTITY)` 경고
+- 테스트 코퍼스: 실제 egov 3.x·4.x 프로젝트 표본. 고객사 소스는 저장소에 넣지 않고 로컬 경로로만 참조한다.
 
 **완료 조건**:
 - egov 3.x·4.x 표본 프로젝트에서 이동과 진단이 동작한다.
-- 코퍼스 기준으로 `${}` 사용과 이스케이프 없는 EL 출력을 빠짐없이 탐지한다.
+- 코퍼스 기준으로 `${}`·`$prop$` 사용과 이스케이프 없는 EL 출력을 빠짐없이 탐지한다.
+
+### Phase 2c — egov 개발도구 (프로젝트·설정·코드 생성)
+
+**목표**: 공식 egov 개발환경(Eclipse)과 VS Code 확장이 제공하는 생성 기능을 3개 OS에서 제공한다.
+- 언어 서버가 필요 없어 Phase 1 이후 언제든 병행할 수 있다.
+
+- 템플릿 엔진: handlebars-rust. 공식 VS Code 확장의 Handlebars 템플릿과 호환된다.
+- 새 egov 프로젝트 마법사:
+  - Web, Template, Boot, MSA, Batch, Mobile, AI RAG
+  - 공식 템플릿 ZIP은 버전을 고정해 내려받고 체크섬을 검증한다.
+- 공통컴포넌트 추가
+- 설정 파일 생성: Datasource, Transaction, ID 생성, Logging, Scheduling, Cache, Property. 출력 형식은 XML·Java Config·YAML·properties 중에서 고른다.
+- CRUD 코드 생성:
+  - VO, Mapper 인터페이스·XML, Service·ServiceImpl, Controller, JSP·Thymeleaf, 테스트
+  - 입력은 수동 필드 정의. Phase 5 이후에는 DB 테이블에서 바로 생성한다.
+- Apache-2.0 템플릿을 포함하거나 변형하면 NOTICE에 출처를 표기한다.
+
+**완료 조건**:
+- Web·Boot Web 템플릿으로 만든 프로젝트가 3개 OS에서 `mvn package`를 통과한다.
+- CRUD 생성 결과가 컴파일되고, 생성된 매퍼 XML이 Phase 2b 진단을 경고 없이 통과한다.
 
 ### Phase 3 — 프로젝트 도구
 
@@ -139,13 +170,13 @@
 ## 4. 진행 순서와 의존 관계
 
 ```
-Phase 0 ─► Phase 1 ─► Phase 2 ─┬─► Phase 2b (egov 지원)
-                               ├─► Phase 4
-                               ├─► Phase 5 (Phase 1 에디터만 필요, 2와 병행 가능)
-                               └─► Phase 3 ─► Phase 6 ─► Phase 7
+Phase 0 ─► Phase 1 ─┬─► Phase 2 ─┬─► Phase 2b (egov 언어 지원)
+                    │            ├─► Phase 4
+                    │            └─► Phase 3 ─► Phase 6 ─► Phase 7
+                    ├─► Phase 2c (egov 생성 도구, 언어 서버 불필요)
+                    └─► Phase 5 (DB, Phase 1 에디터만 필요)
 ```
 
-- Phase 2b(egov 지원)는 egov 개발에 바로 쓰려면 가장 먼저 필요한 기능이다. Phase 2의 LSP 클라이언트가 준비되면 Phase 3·4보다 앞당긴다.
-
-- Phase 5(DB)의 JDBC 사이드카는 Java 작업이라 Phase 2와 병행할 수 있다.
+- Phase 2b·2c(egov 지원)는 egov 개발에 바로 쓰려면 가장 먼저 필요한 기능이다. Phase 3·4보다 앞당긴다.
+- Phase 2c와 Phase 5(DB)의 JDBC 사이드카는 Phase 2와 병행할 수 있다.
 - Phase 7의 패키징 스크립트는 언제든 앞당길 수 있다. 사내 배포가 필요해지는 시점에 진행한다.
