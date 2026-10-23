@@ -8,6 +8,7 @@ Rust로 작성한 크로스플랫폼(Windows / macOS / Linux) 경량 IDE.
 ## 현재 상태: Phase 1 (에디터 코어)
 
 - 폴더 열기, 지연 로딩 프로젝트 트리(파일 감시로 자동 갱신), 탭 에디터
+- 트리 우클릭: 새 파일·새 폴더·이름 바꾸기·휴지통으로 삭제
 - 가상화 코드 에디터: 100MB 파일도 스크롤·입력 1ms 미만, 줄 번호, 한글 IME 조합 표시
 - 구문 강조(tree-sitter): Rust, Python, Go, C/C++, PHP, Java, SQL, TOML, JSON, YAML, XML, HTML, JavaScript, CSS
 - UTF-8(BOM 포함)·CP949 인코딩과 CRLF 감지·보존, 들여쓰기 방식 감지
@@ -18,7 +19,8 @@ Rust로 작성한 크로스플랫폼(Windows / macOS / Linux) 경량 IDE.
 
 | 동작 | 키 |
 |---|---|
-| 폴더 열기 / 저장 / 탭 닫기 | `Ctrl+O` / `Ctrl+S` / `Ctrl+W` |
+| 새 파일 / 폴더 열기 / 탭 닫기 | `Ctrl+N` / `Ctrl+O` / `Ctrl+W` |
+| 저장 / 다른 이름으로 저장 | `Ctrl+S` / `Ctrl+Shift+S` |
 | 찾기 / 바꾸기 / 다음·이전 | `Ctrl+F` / `Ctrl+H` / `F3`·`Shift+F3` |
 | 실행 취소 / 다시 실행 | `Ctrl+Z` / `Ctrl+Y`, `Ctrl+Shift+Z` |
 | 줄 주석 토글 | `Ctrl+/` |

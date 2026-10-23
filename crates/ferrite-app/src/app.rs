@@ -7,13 +7,13 @@ use std::time::Instant;
 
 use eframe::egui::{self, Key, KeyboardShortcut, Modifiers, ViewportCommand};
 use ferrite_core::buffer::{Buffer, Indent, Selection, detect_indent};
-use ferrite_core::search;
 use ferrite_core::settings::{self, Settings, Theme};
 use ferrite_core::syntax::{Lang, MAX_SYNTAX_BYTES, Syntax};
 use ferrite_core::text_file::{self, Encoding, LineEnding, TextContent, TextFileError};
+use ferrite_core::{fs_ops, search};
 
 use crate::editor_view::{self, EditorOptions, EditorState, Styler};
-use crate::file_tree::FileTree;
+use crate::file_tree::{FileTree, TreeAction};
 use crate::find_bar::{FindAction, FindBar};
 use crate::watcher::FsWatcher;
 
@@ -25,6 +25,23 @@ const FIND: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::F)
 const REPLACE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::H);
 const FIND_NEXT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::F3);
 const FIND_PREV: KeyboardShortcut = KeyboardShortcut::new(Modifiers::SHIFT, Key::F3);
+const NEW_FILE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::N);
+const SAVE_AS: KeyboardShortcut =
+    KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::S);
+
+/// 이름을 입력받아 실행할 파일 작업.
+enum NameTarget {
+    NewFile(PathBuf),
+    NewFolder(PathBuf),
+    Rename(PathBuf),
+}
+
+struct NamePrompt {
+    target: NameTarget,
+    name: String,
+    error: Option<String>,
+    focus: bool,
+}
 
 /// OS별 설정 파일 위치(Windows `%APPDATA%`, macOS `~/Library/Application Support`, Linux `~/.config`).
 fn settings_path() -> Option<PathBuf> {
@@ -221,6 +238,19 @@ impl Document {
             name
         }
     }
+
+    /// 이름 바꾸기·다른 이름으로 저장 뒤 경로를 바꾼다. 확장자가 바뀌어 언어가 달라지면 구문 분석도 새로 한다.
+    fn set_path(&mut self, path: PathBuf) {
+        let lang = Lang::from_path(&path);
+        if lang != self.lang {
+            self.lang = lang;
+            self.syntax = lang
+                .filter(|_| self.buffer.rope().len_bytes() <= MAX_SYNTAX_BYTES)
+                .and_then(|l| Syntax::new(l).ok());
+            self.buffer.set_track_syntax_edits(self.syntax.is_some());
+        }
+        self.path = path;
+    }
 }
 
 /// 저장하지 않은 변경 때문에 사용자 확인을 기다리는 닫기 요청.
@@ -240,6 +270,9 @@ pub struct FerriteApp {
     docs: Vec<Document>,
     active: Option<usize>,
     pending_close: Option<PendingClose>,
+    name_prompt: Option<NamePrompt>,
+    /// 휴지통으로 옮기기 전 확인을 기다리는 경로.
+    confirm_delete: Option<PathBuf>,
     /// 사용자가 종료를 확정했으면 true. 이후의 창 닫기 요청은 막지 않는다.
     allow_close: bool,
     status: String,
@@ -291,11 +324,242 @@ impl FerriteApp {
             settings,
             settings_changed: false,
             watcher: FsWatcher::new(cc.egui_ctx.clone()).ok(),
+            name_prompt: None,
+            confirm_delete: None,
         };
         if let Some(file) = file {
             app.open_file(file);
         }
         app
+    }
+
+    /// 대화상자가 떠 있으면 단축키로 문서 목록이 바뀌지 않게 막는다.
+    fn modal_open(&self) -> bool {
+        self.pending_close.is_some() || self.name_prompt.is_some() || self.confirm_delete.is_some()
+    }
+
+    fn handle_tree_action(&mut self, action: TreeAction) {
+        let prompt = |target, name: String| {
+            Some(NamePrompt {
+                target,
+                name,
+                error: None,
+                focus: true,
+            })
+        };
+        match action {
+            TreeAction::Open(path) => self.open_file(path),
+            TreeAction::NewFile(dir) => {
+                self.name_prompt = prompt(NameTarget::NewFile(dir), String::new())
+            }
+            TreeAction::NewFolder(dir) => {
+                self.name_prompt = prompt(NameTarget::NewFolder(dir), String::new());
+            }
+            TreeAction::Rename(path) => {
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                self.name_prompt = prompt(NameTarget::Rename(path), name);
+            }
+            TreeAction::Delete(path) => self.confirm_delete = Some(path),
+        }
+    }
+
+    /// 트리의 폴더 목록 캐시를 버려 바로 다시 읽게 한다(감시 알림보다 먼저 반영).
+    fn invalidate_tree(&mut self, dir: Option<&Path>) {
+        if let (Some(tree), Some(dir)) = (&mut self.tree, dir) {
+            tree.invalidate(dir);
+        }
+    }
+
+    fn name_prompt_dialog(&mut self, ctx: &egui::Context) {
+        let Some(prompt) = &mut self.name_prompt else {
+            return;
+        };
+        let title = match prompt.target {
+            NameTarget::NewFile(_) => "새 파일",
+            NameTarget::NewFolder(_) => "새 폴더",
+            NameTarget::Rename(_) => "이름 바꾸기",
+        };
+        let (mut submit, mut cancel) = (false, false);
+        let modal = egui::Modal::new(egui::Id::unique("name_prompt")).show(ctx, |ui| {
+            ui.heading(title);
+            let label = ui.label("이름");
+            let field = ui
+                .add(egui::TextEdit::singleline(&mut prompt.name).desired_width(320.0))
+                .labelled_by(label.id);
+            if std::mem::take(&mut prompt.focus) {
+                field.request_focus();
+            }
+            submit = field.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+            if let Some(e) = &prompt.error {
+                ui.colored_label(ui.visuals().error_fg_color, e);
+            }
+            ui.horizontal(|ui| {
+                submit |= ui.button("확인").clicked();
+                cancel = ui.button("취소").clicked();
+            });
+        });
+        if cancel || (modal.should_close() && !submit) {
+            self.name_prompt = None;
+            return;
+        }
+        if !submit {
+            return;
+        }
+        let name = prompt.name.trim_end_matches(['\r', '\n']).to_owned();
+        let result = match &prompt.target {
+            NameTarget::NewFile(dir) => fs_ops::create_file(dir, &name).map(|p| (None, p)),
+            NameTarget::NewFolder(dir) => fs_ops::create_dir(dir, &name).map(|p| (None, p)),
+            NameTarget::Rename(old) => fs_ops::rename(old, &name).map(|p| (Some(old.clone()), p)),
+        };
+        let (renamed_from, path) = match result {
+            Ok(done) => done,
+            Err(e) => {
+                prompt.error = Some(e);
+                prompt.focus = true;
+                return;
+            }
+        };
+        let is_new_file = matches!(prompt.target, NameTarget::NewFile(_));
+        self.name_prompt = None;
+        self.invalidate_tree(path.parent());
+        if let Some(old) = renamed_from {
+            // 열린 문서(폴더 이름을 바꿨으면 그 안의 문서들)의 경로도 새 이름으로 옮긴다.
+            for doc in &mut self.docs {
+                if let Ok(rest) = doc.path.strip_prefix(&old) {
+                    let moved = if rest.as_os_str().is_empty() {
+                        path.clone()
+                    } else {
+                        path.join(rest)
+                    };
+                    doc.set_path(moved);
+                }
+            }
+            self.status = format!("이름을 바꿨습니다: {}", path.display());
+        } else if is_new_file {
+            self.open_file(path);
+        } else {
+            self.status = format!("폴더를 만들었습니다: {}", path.display());
+        }
+    }
+
+    fn delete_dialog(&mut self, ctx: &egui::Context) {
+        let Some(path) = &self.confirm_delete else {
+            return;
+        };
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let what = if path.is_dir() {
+            format!("'{name}' 폴더와 그 안의 모든 항목을")
+        } else {
+            format!("'{name}'을(를)")
+        };
+        let (mut confirm, mut cancel) = (false, false);
+        let modal = egui::Modal::new(egui::Id::unique("confirm_delete")).show(ctx, |ui| {
+            ui.heading("휴지통으로 삭제");
+            ui.label(format!(
+                "{what} 휴지통으로 옮길까요? 휴지통에서 되살릴 수 있습니다."
+            ));
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                confirm = ui.button("휴지통으로 이동").clicked();
+                cancel = ui.button("취소").clicked();
+            });
+        });
+        if cancel || (modal.should_close() && !confirm) {
+            self.confirm_delete = None;
+            return;
+        }
+        if !confirm {
+            return;
+        }
+        let Some(path) = self.confirm_delete.take() else {
+            return;
+        };
+        if let Err(e) = fs_ops::move_to_trash(&path) {
+            self.status = e;
+            return;
+        }
+        self.invalidate_tree(path.parent());
+        // 지운 항목의 탭은 닫는다. 저장하지 않은 변경이 있는 탭은 내용을 잃지 않도록 남긴다.
+        let mut kept = 0;
+        for i in (0..self.docs.len()).rev() {
+            if self.docs[i].path.starts_with(&path) {
+                if self.docs[i].is_dirty() {
+                    kept += 1;
+                } else {
+                    self.close_tab(i);
+                }
+            }
+        }
+        self.status = if kept > 0 {
+            format!("휴지통으로 옮겼습니다: {name} (저장하지 않은 탭 {kept}개는 열어 둠)")
+        } else {
+            format!("휴지통으로 옮겼습니다: {name}")
+        };
+    }
+
+    /// 저장 위치를 고르게 해 빈 파일을 만들고 연다. 이미 있는 파일을 고르면 덮어쓰지 않고 연다.
+    fn new_file_dialog(&mut self) {
+        let mut dialog = rfd::FileDialog::new().set_title("새 파일");
+        if let Some(tree) = &self.tree {
+            dialog = dialog.set_directory(tree.root());
+        }
+        let Some(path) = dialog.save_file() else {
+            return;
+        };
+        if !path.exists() {
+            let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else {
+                return;
+            };
+            if let Err(e) = fs_ops::create_file(dir, &name.to_string_lossy()) {
+                self.status = e;
+                return;
+            }
+            self.invalidate_tree(Some(dir));
+        }
+        self.open_file(path);
+    }
+
+    fn save_as_dialog(&mut self, index: usize) {
+        let doc = &self.docs[index];
+        let mut dialog = rfd::FileDialog::new()
+            .set_title("다른 이름으로 저장")
+            .set_file_name(doc.name());
+        if let Some(dir) = doc.path.parent() {
+            dialog = dialog.set_directory(dir);
+        }
+        let Some(target) = dialog.save_file() else {
+            return;
+        };
+        let target = real_path(&target);
+        if self
+            .docs
+            .iter()
+            .enumerate()
+            .any(|(i, d)| i != index && d.path == target)
+        {
+            self.status = format!("다른 탭에 이미 열려 있는 파일입니다: {}", target.display());
+            return;
+        }
+        let doc = &mut self.docs[index];
+        let old = std::mem::replace(&mut doc.path, target.clone());
+        match doc.save() {
+            Ok(()) => {
+                // 이제 파일이 있으니 실제 경로로 확정하고 언어도 다시 고른다.
+                doc.set_path(real_path(&target));
+                self.invalidate_tree(target.parent());
+                self.status = format!("저장됨: {}", target.display());
+            }
+            Err(e) => {
+                doc.path = old;
+                self.status = format!("저장 실패: {}: {e}", target.display());
+            }
+        }
     }
 
     /// 설정 파일이 없으면 템플릿으로 만들고 에디터로 연다.
@@ -409,6 +673,15 @@ impl FerriteApp {
         if ctx.input_mut(|i| i.consume_shortcut(&OPEN_FOLDER)) {
             self.open_folder_dialog();
         }
+        if ctx.input_mut(|i| i.consume_shortcut(&NEW_FILE)) {
+            self.new_file_dialog();
+        }
+        // Ctrl+S는 Shift가 더 눌린 입력과도 맞으므로, Shift가 붙은 단축키를 먼저 확인한다.
+        if ctx.input_mut(|i| i.consume_shortcut(&SAVE_AS))
+            && let Some(i) = self.active
+        {
+            self.save_as_dialog(i);
+        }
         if ctx.input_mut(|i| i.consume_shortcut(&SAVE))
             && let Some(i) = self.active
         {
@@ -499,18 +772,33 @@ impl FerriteApp {
         egui::Panel::top("menu_bar").show(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button("파일", |ui| {
+                    let new_file =
+                        egui::Button::new("새 파일…").shortcut_text(ctx.format_shortcut(&NEW_FILE));
+                    if ui.add(new_file).clicked() {
+                        ui.close();
+                        self.new_file_dialog();
+                    }
                     let open = egui::Button::new("폴더 열기…")
                         .shortcut_text(ctx.format_shortcut(&OPEN_FOLDER));
                     if ui.add(open).clicked() {
                         ui.close();
                         self.open_folder_dialog();
                     }
+                    ui.separator();
                     let save = egui::Button::new("저장").shortcut_text(ctx.format_shortcut(&SAVE));
                     if ui.add_enabled(self.active.is_some(), save).clicked()
                         && let Some(i) = self.active
                     {
                         ui.close();
                         self.save(i);
+                    }
+                    let save_as = egui::Button::new("다른 이름으로 저장…")
+                        .shortcut_text(ctx.format_shortcut(&SAVE_AS));
+                    if ui.add_enabled(self.active.is_some(), save_as).clicked()
+                        && let Some(i) = self.active
+                    {
+                        ui.close();
+                        self.save_as_dialog(i);
                     }
                     let close =
                         egui::Button::new("탭 닫기").shortcut_text(ctx.format_shortcut(&CLOSE_TAB));
@@ -600,7 +888,7 @@ impl FerriteApp {
     }
 
     fn project_panel(&mut self, ui: &mut egui::Ui) {
-        let mut open = None;
+        let mut tree_action = None;
         let mut pick_folder = false;
         egui::Panel::left("project")
             .resizable(true)
@@ -610,7 +898,7 @@ impl FerriteApp {
                     .auto_shrink(false)
                     .show(ui, |ui| match &mut self.tree {
                         Some(tree) => {
-                            open = tree.ui(ui);
+                            tree_action = tree.ui(ui);
                         }
                         None => {
                             pick_folder = ui.button("폴더 열기…").clicked();
@@ -620,8 +908,8 @@ impl FerriteApp {
         if pick_folder {
             self.open_folder_dialog();
         }
-        if let Some(path) = open {
-            self.open_file(path);
+        if let Some(action) = tree_action {
+            self.handle_tree_action(action);
         }
     }
 
@@ -799,7 +1087,7 @@ impl eframe::App for FerriteApp {
         }
         self.intercept_close(ctx);
         // 확인 대화상자가 떠 있는 동안에는 단축키로 탭 목록이 바뀌지 않게 한다.
-        if self.pending_close.is_none() {
+        if !self.modal_open() {
             self.handle_shortcuts(ctx);
         }
     }
@@ -810,6 +1098,8 @@ impl eframe::App for FerriteApp {
         self.project_panel(ui);
         self.editor(ui);
         self.pending_close_dialog(ui.ctx());
+        self.name_prompt_dialog(ui.ctx());
+        self.delete_dialog(ui.ctx());
     }
 }
 
@@ -1023,6 +1313,87 @@ mod tests {
         assert!(!doc.external_change);
         assert!(!doc.is_dirty());
         assert_eq!(fs::read_to_string(&file).unwrap(), doc.buffer.text());
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 같은 이름이 탭과 트리에 함께 보일 때 트리(왼쪽) 항목을 고른다.
+    fn tree_item<'a>(
+        harness: &'a Harness<'_, FerriteApp>,
+        label: &'a str,
+    ) -> egui_kittest::Node<'a> {
+        harness
+            .get_all_by_label(label)
+            .min_by(|a, b| a.rect().min.x.total_cmp(&b.rect().min.x))
+            .expect("트리 항목이 없음")
+    }
+
+    #[test]
+    fn 트리_우클릭으로_파일을_만들고_이름을_바꾼다() {
+        use egui::accesskit::Role;
+
+        let name = format!("ferrite-fileops-ui-{}", std::process::id());
+        let dir = std::env::temp_dir().join(&name);
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(1000.0, 700.0))
+            .build_eframe(|cc| FerriteApp::new(cc, Some(dir.clone())));
+        harness.run();
+
+        // 새 파일: 만들고 바로 연다
+        harness.get_by_label(&name).click_secondary();
+        harness.run();
+        harness.get_by_label("새 파일…").click();
+        harness.run();
+        harness
+            .get_by_role_and_label(Role::TextInput, "이름")
+            .type_text("b.txt");
+        harness.key_press(Key::Enter);
+        harness.run();
+        assert!(dir.join("b.txt").is_file());
+        assert!(harness.state().docs[0].path.ends_with("b.txt"));
+
+        // 잘못된 이름은 대화상자에 오류를 보이고 만들지 않는다
+        harness.get_by_label(&name).click_secondary();
+        harness.run();
+        harness.get_by_label("새 폴더…").click();
+        harness.run();
+        harness
+            .get_by_role_and_label(Role::TextInput, "이름")
+            .type_text("bad:name");
+        harness.key_press(Key::Enter);
+        harness.run();
+        harness.get_by_label_contains("문자는 이름에 쓸 수 없습니다");
+        harness.get_by_label("취소").click();
+        harness.run();
+        assert!(harness.state().name_prompt.is_none());
+
+        // 이름 바꾸기: 열린 탭의 경로도 따라 바뀐다
+        tree_item(&harness, "b.txt").click_secondary();
+        harness.run();
+        harness.get_by_label("이름 바꾸기…").click();
+        harness.run();
+        harness.key_press_modifiers(Modifiers::COMMAND, Key::A);
+        harness
+            .get_by_role_and_label(Role::TextInput, "이름")
+            .type_text("c.rs");
+        harness.key_press(Key::Enter);
+        harness.run();
+        assert!(dir.join("c.rs").is_file() && !dir.join("b.txt").exists());
+        let doc = &harness.state().docs[0];
+        assert!(doc.path.ends_with("c.rs"));
+        assert_eq!(doc.lang, Some(Lang::Rust), "확장자가 바뀌면 언어도 바뀐다");
+
+        // 삭제는 확인을 거친다(취소하면 그대로)
+        tree_item(&harness, "c.rs").click_secondary();
+        harness.run();
+        harness.get_by_label("휴지통으로 삭제…").click();
+        harness.run();
+        harness.get_by_label("취소").click();
+        harness.run();
+        assert!(dir.join("c.rs").is_file());
 
         fs::remove_dir_all(&dir).unwrap();
     }

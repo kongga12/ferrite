@@ -42,22 +42,27 @@ impl FileTree {
         self.children.keys()
     }
 
-    /// 트리를 그리고, 클릭된 파일 경로를 돌려준다.
-    pub fn ui(&mut self, ui: &mut egui::Ui) -> Option<PathBuf> {
-        let mut clicked = None;
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// 트리를 그리고, 사용자가 고른 작업(파일 열기, 우클릭 메뉴)을 돌려준다.
+    pub fn ui(&mut self, ui: &mut egui::Ui) -> Option<TreeAction> {
+        let mut action = None;
         let root = self.root.clone();
         let name = root.file_name().map_or_else(
             || root.display().to_string(),
             |n| n.to_string_lossy().into_owned(),
         );
-        egui::CollapsingHeader::new(name)
+        let header = egui::CollapsingHeader::new(name)
             .id_salt(&root)
             .default_open(true)
-            .show(ui, |ui| self.dir_ui(ui, &root, &mut clicked));
-        clicked
+            .show(ui, |ui| self.dir_ui(ui, &root, &mut action));
+        context_menu(&header.header_response, &root, true, true, &mut action);
+        action
     }
 
-    fn dir_ui(&mut self, ui: &mut egui::Ui, dir: &Path, clicked: &mut Option<PathBuf>) {
+    fn dir_ui(&mut self, ui: &mut egui::Ui, dir: &Path, action: &mut Option<TreeAction>) {
         let listing = self
             .children
             .entry(dir.to_path_buf())
@@ -71,15 +76,67 @@ impl FileTree {
             }
         };
         for entry in entries {
-            if entry.is_dir {
+            let response = if entry.is_dir {
                 egui::CollapsingHeader::new(&entry.name)
                     .id_salt(&entry.path)
-                    .show(ui, |ui| self.dir_ui(ui, &entry.path, clicked));
-            } else if ui.selectable_label(false, &entry.name).clicked() {
-                *clicked = Some(entry.path);
-            }
+                    .show(ui, |ui| self.dir_ui(ui, &entry.path, action))
+                    .header_response
+            } else {
+                let response = ui.selectable_label(false, &entry.name);
+                if response.clicked() {
+                    *action = Some(TreeAction::Open(entry.path.clone()));
+                }
+                response
+            };
+            context_menu(&response, &entry.path, entry.is_dir, false, action);
         }
     }
+}
+
+/// 트리 항목에서 고른 작업. 경로는 대상 항목이고, 새로 만들기는 만들 폴더다.
+pub enum TreeAction {
+    Open(PathBuf),
+    NewFile(PathBuf),
+    NewFolder(PathBuf),
+    Rename(PathBuf),
+    Delete(PathBuf),
+}
+
+/// 우클릭 메뉴. 파일에서 고른 "새 파일"은 그 파일이 있는 폴더에 만든다. 루트는 이름을 바꾸거나 지울 수 없다.
+fn context_menu(
+    response: &egui::Response,
+    path: &Path,
+    is_dir: bool,
+    is_root: bool,
+    action: &mut Option<TreeAction>,
+) {
+    response.context_menu(|ui| {
+        let dir = if is_dir {
+            path.to_path_buf()
+        } else {
+            path.parent()
+                .map_or_else(|| path.to_path_buf(), Path::to_path_buf)
+        };
+        if ui.button("새 파일…").clicked() {
+            *action = Some(TreeAction::NewFile(dir.clone()));
+            ui.close();
+        }
+        if ui.button("새 폴더…").clicked() {
+            *action = Some(TreeAction::NewFolder(dir));
+            ui.close();
+        }
+        if !is_root {
+            ui.separator();
+            if ui.button("이름 바꾸기…").clicked() {
+                *action = Some(TreeAction::Rename(path.to_path_buf()));
+                ui.close();
+            }
+            if ui.button("휴지통으로 삭제…").clicked() {
+                *action = Some(TreeAction::Delete(path.to_path_buf()));
+                ui.close();
+            }
+        }
+    });
 }
 
 /// 디렉터리 먼저, 그다음 이름순(대소문자 무시)으로 정렬한다.
