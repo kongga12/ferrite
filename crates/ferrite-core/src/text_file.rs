@@ -9,8 +9,9 @@ use std::path::Path;
 use encoding_rs::EUC_KR;
 
 /// 편집기로 여는 파일의 최대 크기.
-// ponytail: 파일 전체를 String으로 올리는 방식의 상한. Phase 1 ropey + 가상화 에디터에서 상향.
-pub const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024;
+// ponytail: 파일 전체를 메모리에 올리는 방식의 상한(읽을 때 원본·디코딩·로프로 순간 3배 가까이 쓴다).
+// 더 큰 파일은 메모리 매핑 + 부분 로딩이 필요하다.
+pub const MAX_FILE_SIZE: u64 = 256 * 1024 * 1024;
 
 /// 바이너리 판별 시 검사할 앞부분 길이(git과 같은 휴리스틱).
 const BINARY_SNIFF_LEN: usize = 8000;

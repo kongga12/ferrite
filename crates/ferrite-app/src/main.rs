@@ -7,6 +7,7 @@ mod app;
 mod editor_view;
 mod file_tree;
 mod fonts;
+mod theme;
 
 use eframe::egui;
 

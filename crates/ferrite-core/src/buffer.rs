@@ -95,6 +95,8 @@ pub struct Buffer {
     redo: Vec<Transaction>,
     next_revision: u64,
     last_edit: Option<(EditKind, Instant)>,
+    /// 구문 트리를 쓰는 문서만 변경 기록을 쌓는다(안 쓰면 계속 쌓이기만 하므로).
+    track_syntax_edits: bool,
     syntax_edits: Vec<SyntaxEdit>,
     version: u64,
 }
@@ -109,6 +111,7 @@ impl Buffer {
             redo: Vec::new(),
             next_revision: 1,
             last_edit: None,
+            track_syntax_edits: false,
             syntax_edits: Vec::new(),
             version: 0,
         }
@@ -135,6 +138,11 @@ impl Buffer {
     /// 실행 취소로 저장 시점 상태에 돌아오면 같은 값이 된다.
     pub fn revision(&self) -> u64 {
         self.undo.last().map_or(0, |t| t.revision)
+    }
+
+    pub fn set_track_syntax_edits(&mut self, track: bool) {
+        self.track_syntax_edits = track;
+        self.syntax_edits.clear();
     }
 
     /// 마지막 호출 이후의 변경 목록을 꺼낸다(구문 트리의 증분 갱신용).
@@ -673,14 +681,16 @@ impl Buffer {
         self.rope.remove(start..end);
         self.rope.insert(start, text);
         let new_end_byte = start_byte + text.len();
-        self.syntax_edits.push(SyntaxEdit {
-            start_byte,
-            old_end_byte,
-            new_end_byte,
-            start_point,
-            old_end_point,
-            new_end_point: self.point(new_end_byte),
-        });
+        if self.track_syntax_edits {
+            self.syntax_edits.push(SyntaxEdit {
+                start_byte,
+                old_end_byte,
+                new_end_byte,
+                start_point,
+                old_end_point,
+                new_end_point: self.point(new_end_byte),
+            });
+        }
         self.version += 1;
         Change {
             start,
@@ -909,6 +919,7 @@ mod tests {
     #[test]
     fn 구문_변경_기록은_바이트와_행열() {
         let mut b = buf("가\nb", 3, 3);
+        b.set_track_syntax_edits(true);
         b.insert("c", Instant::now());
         let edits = b.take_syntax_edits();
         assert_eq!(

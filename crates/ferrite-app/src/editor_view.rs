@@ -22,7 +22,7 @@ pub type LineStyles = Vec<Vec<(Range<usize>, Color32)>>;
 
 /// 구문 강조 제공자. 보이는 줄 범위에 대해서만 호출된다.
 pub trait Styler {
-    fn styles(&mut self, buffer: &Buffer, lines: Range<usize>, dark: bool) -> LineStyles;
+    fn styles(&mut self, buffer: &mut Buffer, lines: Range<usize>, dark: bool) -> LineStyles;
 }
 
 /// 문서마다 유지하는 화면 상태.

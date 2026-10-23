@@ -4,9 +4,10 @@ use std::path::PathBuf;
 
 use eframe::egui::{self, Key, KeyboardShortcut, Modifiers, ViewportCommand};
 use ferrite_core::buffer::{Buffer, Indent, detect_indent};
+use ferrite_core::syntax::{Lang, MAX_SYNTAX_BYTES, Syntax};
 use ferrite_core::text_file::{self, Encoding, LineEnding, TextContent, TextFileError};
 
-use crate::editor_view::{self, EditorOptions, EditorState};
+use crate::editor_view::{self, EditorOptions, EditorState, Styler};
 use crate::file_tree::FileTree;
 
 // Modifiers::COMMAND는 macOS에서 Cmd, 그 외 OS에서 Ctrl로 동작한다.
@@ -28,14 +29,22 @@ struct Document {
     saved_revision: u64,
     /// 저장 인코딩·줄바꿈을 바꿨지만 아직 저장하지 않음.
     format_changed: bool,
+    lang: Option<Lang>,
+    /// 언어를 알고 파일이 크지 않을 때만 있다.
+    syntax: Option<Syntax>,
     view: EditorState,
 }
 
 impl Document {
     fn open(path: PathBuf) -> Result<Self, TextFileError> {
         let content = text_file::load(&path)?;
-        let buffer = Buffer::new(&content.text);
+        let mut buffer = Buffer::new(&content.text);
         let indent = detect_indent(buffer.rope(), DEFAULT_INDENT);
+        let lang = Lang::from_path(&path);
+        let syntax = lang
+            .filter(|_| buffer.rope().len_bytes() <= MAX_SYNTAX_BYTES)
+            .and_then(|l| Syntax::new(l).ok());
+        buffer.set_track_syntax_edits(syntax.is_some());
         Ok(Self {
             path,
             saved_revision: buffer.revision(),
@@ -44,6 +53,8 @@ impl Document {
             line_ending: content.line_ending,
             indent,
             format_changed: false,
+            lang,
+            syntax,
             view: EditorState::default(),
         })
     }
@@ -282,6 +293,11 @@ impl FerriteApp {
                         Indent::Tabs => "탭".to_owned(),
                         Indent::Spaces(n) => format!("공백: {n}"),
                     });
+                    ui.label(match (doc.lang, &doc.syntax) {
+                        (Some(lang), Some(_)) => lang.name().to_owned(),
+                        (Some(lang), None) => format!("{} (대용량: 구문 강조 꺼짐)", lang.name()),
+                        (None, _) => "일반 텍스트".to_owned(),
+                    });
                     let (line, col) = doc.buffer.pos_to_line_col(doc.buffer.selection().head);
                     ui.label(format!("줄 {}, 열 {}", line + 1, col + 1));
                 });
@@ -349,10 +365,11 @@ impl FerriteApp {
             let opts = EditorOptions {
                 tab_size: TAB_SIZE,
                 indent: doc.indent,
-                comment_token: None,
+                comment_token: doc.lang.and_then(Lang::line_comment),
             };
             let id = ui.make_persistent_id(&doc.path);
-            let response = editor_view::show(ui, id, &mut doc.buffer, &mut doc.view, &opts, None);
+            let styler = doc.syntax.as_mut().map(|s| s as &mut dyn Styler);
+            let response = editor_view::show(ui, id, &mut doc.buffer, &mut doc.view, &opts, styler);
             if let Some(tab) = active_tab {
                 response.labelled_by(tab);
             }
