@@ -34,6 +34,8 @@ pub struct Problem {
     pub message: String,
     /// 진단을 낸 도구(rustc, clippy 등). 없으면 빈 문자열.
     pub source: String,
+    /// 서버가 보낸 진단 원본. 코드 액션 요청에 그대로 돌려줘야 서버가 빠른 수정을 찾는다.
+    pub raw: Diagnostic,
 }
 
 /// 위치 순으로 정렬해 돌려준다(에디터가 보이는 줄만 빠르게 찾을 수 있게).
@@ -58,6 +60,7 @@ pub fn to_problems(
                 },
                 message: d.message.clone(),
                 source: d.source.clone().unwrap_or_default(),
+                raw: d.clone(),
             }
         })
         .collect();

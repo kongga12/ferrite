@@ -16,9 +16,13 @@ use crate::editor_view::{self, EditorOptions, EditorState, Styler};
 use crate::file_tree::{FileTree, TreeAction};
 use crate::find_bar::{FindAction, FindBar};
 use crate::lsp_hub::{DocSync, HubUpdate, LspHub, ServerState};
-use crate::lsp_ui::{CompletionPopup, Pending, ReferenceList, word_at, word_start};
+use crate::lsp_ui::{ActionMenu, CompletionPopup, Pending, ReferenceList, word_at, word_start};
 use crate::watcher::FsWatcher;
 use ferrite_lsp::client::RpcError;
+use ferrite_lsp::edits::{
+    FileEdit, code_action_params, formatting_params, parse_code_actions, parse_resolved_action,
+    parse_text_edits, parse_workspace_edit, rename_params,
+};
 use ferrite_lsp::features::{
     char_range, completion_params, parse_completion, parse_hover, parse_locations, position_params,
     references_params,
@@ -42,16 +46,36 @@ const SAVE_AS: KeyboardShortcut =
 const COMPLETE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::CTRL, Key::Space);
 const GOTO_DEFINITION: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::F12);
 const FIND_REFERENCES: KeyboardShortcut = KeyboardShortcut::new(Modifiers::SHIFT, Key::F12);
+const FORMAT: KeyboardShortcut =
+    KeyboardShortcut::new(Modifiers::SHIFT.plus(Modifiers::ALT), Key::F);
+const RENAME_SYMBOL: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::F2);
+// 코드 액션: Ctrl+.와 Alt+Enter 두 가지 습관을 모두 받는다.
+const CODE_ACTION: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Period);
+const CODE_ACTION_ALT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::ALT, Key::Enter);
 /// 마우스가 한 자리에 이만큼 머물면 호버 정보를 요청한다.
 const HOVER_DELAY: std::time::Duration = std::time::Duration::from_millis(400);
 
-/// 언어 서버에 보낼 위치 기반 요청 종류.
-#[derive(Clone, Copy, PartialEq, Eq)]
+/// 언어 서버에 보낼 요청 종류. 위치(`pos`)와 함께 보내며, 위치를 쓰지 않는 요청도 있다.
+#[derive(Clone, PartialEq)]
 enum LspRequest {
     Completion(Option<char>),
     Hover,
     Definition,
     References,
+    Format,
+    Rename(String),
+    CodeActions,
+    /// 편집이 나중에 오는 코드 액션의 편집 받기(`codeAction/resolve`).
+    Resolve(Value),
+    /// 서버 명령 실행(`workspace/executeCommand`). 결과 편집은 서버가 applyEdit로 보낸다.
+    Execute(Value),
+}
+
+impl LspRequest {
+    /// 사용자가 직접 부른 요청이면 실패를 상태바에 알린다(호버·입력 중 자동완성은 조용히).
+    fn is_explicit(&self) -> bool {
+        !matches!(self, LspRequest::Hover | LspRequest::Completion(Some(_)))
+    }
 }
 
 /// 서버가 버린 요청(ContentModified 등)을 다시 보내는 최대 횟수.
@@ -63,6 +87,8 @@ struct Retry {
     pos: usize,
     path: PathBuf,
     attempts: u8,
+    /// 요청을 보낸 시점의 버퍼 버전. 편집 응답이 그 사이 바뀐 문서에 적용되지 않게 비교한다.
+    version: u64,
 }
 
 /// 에디터를 그린 프레임에서 언어 서버 기능에 넘길 정보.
@@ -90,6 +116,10 @@ enum NameTarget {
     NewFile(PathBuf),
     NewFolder(PathBuf),
     Rename(PathBuf),
+    /// 코드 기호의 이름 바꾸기(F2). 위치는 활성 문서의 커서.
+    Symbol {
+        pos: usize,
+    },
 }
 
 struct NamePrompt {
@@ -349,6 +379,7 @@ pub struct FerriteApp {
     /// 응답을 기다리는 언어 서버 요청.
     pending: std::collections::HashMap<(Lang, i64), (Pending, Retry)>,
     completion: Option<CompletionPopup>,
+    actions: Option<ActionMenu>,
     hover: Option<HoverState>,
     references: Option<ReferenceList>,
     /// 사용자가 종료를 확정했으면 true. 이후의 창 닫기 요청은 막지 않는다.
@@ -408,6 +439,7 @@ impl FerriteApp {
             show_problems: false,
             pending: std::collections::HashMap::new(),
             completion: None,
+            actions: None,
             hover: None,
             references: None,
         };
@@ -465,6 +497,7 @@ impl FerriteApp {
             NameTarget::NewFile(_) => "새 파일",
             NameTarget::NewFolder(_) => "새 폴더",
             NameTarget::Rename(_) => "이름 바꾸기",
+            NameTarget::Symbol { .. } => "기호 이름 바꾸기 (모든 사용처)",
         };
         let (mut submit, mut cancel) = (false, false);
         let modal = egui::Modal::new(egui::Id::unique("name_prompt")).show(ctx, |ui| {
@@ -493,7 +526,19 @@ impl FerriteApp {
             return;
         }
         let name = prompt.name.trim_end_matches(['\r', '\n']).to_owned();
+        // 기호 이름 바꾸기는 파일 작업이 아니라 언어 서버에 맡긴다(결과는 응답에서 적용).
+        if let NameTarget::Symbol { pos } = prompt.target {
+            if name.trim().is_empty() {
+                prompt.error = Some("이름을 입력하세요".into());
+                prompt.focus = true;
+                return;
+            }
+            self.name_prompt = None;
+            self.lsp_request(LspRequest::Rename(name), pos);
+            return;
+        }
         let result = match &prompt.target {
+            NameTarget::Symbol { .. } => return,
             NameTarget::NewFile(dir) => fs_ops::create_file(dir, &name).map(|p| (None, p)),
             NameTarget::NewFolder(dir) => fs_ops::create_dir(dir, &name).map(|p| (None, p)),
             NameTarget::Rename(old) => fs_ops::rename(old, &name).map(|p| (Some(old.clone()), p)),
@@ -805,6 +850,37 @@ impl FerriteApp {
         if ctx.input_mut(|i| i.consume_shortcut(&COMPLETE)) {
             self.request_at_cursor(LspRequest::Completion(None));
         }
+        if ctx.input_mut(|i| i.consume_shortcut(&FORMAT)) {
+            self.request_at_cursor(LspRequest::Format);
+        }
+        if ctx.input_mut(|i| i.consume_shortcut(&RENAME_SYMBOL)) {
+            self.open_symbol_rename();
+        }
+        if ctx
+            .input_mut(|i| i.consume_shortcut(&CODE_ACTION) || i.consume_shortcut(&CODE_ACTION_ALT))
+        {
+            self.request_at_cursor(LspRequest::CodeActions);
+        }
+    }
+
+    /// 커서 위치 기호의 새 이름을 묻는다(F2).
+    fn open_symbol_rename(&mut self) {
+        let Some(i) = self.active else {
+            return;
+        };
+        let buffer = &self.docs[i].buffer;
+        let pos = buffer.selection().head;
+        let name = word_at(buffer, pos);
+        if name.is_empty() {
+            self.status = "이름을 바꿀 기호 위에 커서를 두세요".into();
+            return;
+        }
+        self.name_prompt = Some(NamePrompt {
+            target: NameTarget::Symbol { pos },
+            name,
+            error: None,
+            focus: true,
+        });
     }
 
     fn request_at_cursor(&mut self, kind: LspRequest) {
@@ -830,7 +906,7 @@ impl FerriteApp {
         let path = doc.path.clone();
         // 로프 복제는 내부 노드를 공유하므로 싸다.
         let rope = doc.buffer.rope().clone();
-        let (method, pending) = match kind {
+        let (method, pending) = match &kind {
             LspRequest::Completion(_) => (
                 "textDocument/completion",
                 Pending::Completion {
@@ -852,15 +928,44 @@ impl FerriteApp {
                     name: word_at(&doc.buffer, pos),
                 },
             ),
+            LspRequest::Format => (
+                "textDocument/formatting",
+                Pending::Format { path: path.clone() },
+            ),
+            LspRequest::Rename(_) => ("textDocument/rename", Pending::Rename),
+            LspRequest::CodeActions => (
+                "textDocument/codeAction",
+                Pending::CodeActions { path: path.clone() },
+            ),
+            LspRequest::Resolve(_) => ("codeAction/resolve", Pending::Resolve),
+            LspRequest::Execute(_) => ("workspace/executeCommand", Pending::Execute),
         };
-        let params = |encoding: PositionEncoding| match kind {
+        // 코드 액션은 선택 범위(없으면 커서)에 걸친 진단 원본을 함께 보낸다.
+        let selection = doc.buffer.selection().range();
+        let diagnostics: Vec<lsp_types::Diagnostic> = doc
+            .lsp
+            .problems
+            .iter()
+            .filter(|p| p.range.start <= selection.end && selection.start <= p.range.end)
+            .map(|p| p.raw.clone())
+            .collect();
+        let (tab_size, insert_spaces) =
+            (self.settings.tab_size, !matches!(doc.indent, Indent::Tabs));
+        let params = |encoding: PositionEncoding| match &kind {
             LspRequest::Completion(trigger) => {
-                completion_params(&path, &rope, pos, encoding, trigger)
+                completion_params(&path, &rope, pos, encoding, *trigger)
             }
             LspRequest::References => references_params(&path, &rope, pos, encoding),
             LspRequest::Hover | LspRequest::Definition => {
                 position_params(&path, &rope, pos, encoding)
             }
+            LspRequest::Format => formatting_params(&path, tab_size, insert_spaces),
+            LspRequest::Rename(name) => rename_params(&path, &rope, pos, encoding, name),
+            LspRequest::CodeActions => {
+                code_action_params(&path, &rope, selection.clone(), encoding, &diagnostics)
+            }
+            LspRequest::Resolve(action) => Some(action.clone()),
+            LspRequest::Execute(command) => Some(command.clone()),
         };
         match self
             .hub
@@ -872,15 +977,11 @@ impl FerriteApp {
                     pos,
                     path: doc.path.clone(),
                     attempts,
+                    version: doc.buffer.version(),
                 };
                 self.pending.insert((lang, id), (pending, retry));
             }
-            // 호버·자동입력 자동완성은 조용히 넘어간다. 사용자가 직접 부른 기능만 알린다.
-            None if matches!(
-                kind,
-                LspRequest::Definition | LspRequest::References | LspRequest::Completion(None)
-            ) =>
-            {
+            None if kind.is_explicit() => {
                 self.status = "언어 서버가 준비되지 않았습니다".into();
             }
             None => {}
@@ -908,7 +1009,7 @@ impl FerriteApp {
             }
             Err(e) => {
                 // 호버·자동완성 실패는 흔하고(위치가 맞지 않음 등) 알릴 필요가 없다.
-                if matches!(pending, Pending::Definition | Pending::References { .. }) {
+                if !matches!(pending, Pending::Hover { .. } | Pending::Completion { .. }) {
                     self.status = format!("언어 서버 오류: {e}");
                 }
                 return;
@@ -946,7 +1047,151 @@ impl FerriteApp {
                     self.references = Some(ReferenceList::new(&name, targets, encoding, root));
                 }
             }
+            Pending::Format { path } => {
+                let edits = parse_text_edits(&result);
+                if edits.is_empty() {
+                    self.status = "포맷할 내용이 없습니다".into();
+                } else if self.edit_still_valid(&retry) {
+                    let file = FileEdit {
+                        path,
+                        edits,
+                        version: None,
+                    };
+                    if self
+                        .apply_workspace_edit(lang, vec![file], encoding)
+                        .is_some()
+                    {
+                        self.status = "포맷했습니다".into();
+                    }
+                }
+            }
+            Pending::Rename => {
+                if !self.edit_still_valid(&retry) {
+                    return;
+                }
+                let edits = parse_workspace_edit(&result);
+                match self.apply_workspace_edit(lang, edits, encoding) {
+                    Some((_, 0)) => self.status = "바꿀 곳이 없습니다".into(),
+                    Some((files, changes)) => {
+                        self.status = format!(
+                            "이름을 바꿨습니다: 파일 {files}개, {changes}곳(저장하지 않음)"
+                        );
+                    }
+                    None => {}
+                }
+            }
+            Pending::CodeActions { path } => {
+                let items = parse_code_actions(&result);
+                if items.is_empty() {
+                    self.status = "가능한 코드 액션이 없습니다".into();
+                } else {
+                    self.actions = Some(ActionMenu::new(path, items, encoding, retry.version));
+                }
+            }
+            Pending::Resolve => {
+                if !self.edit_still_valid(&retry) {
+                    return;
+                }
+                let (edits, command) = parse_resolved_action(&result);
+                if self.apply_workspace_edit(lang, edits, encoding).is_some()
+                    && let Some(command) = command
+                {
+                    self.request_at_cursor(LspRequest::Execute(command));
+                }
+            }
+            // 명령의 결과 편집은 서버가 workspace/applyEdit로 따로 보낸다.
+            Pending::Execute => {}
         }
+    }
+
+    /// 요청한 뒤 그 문서가 바뀌지 않았는지. 바뀌었으면 서버가 옛 내용 기준으로 계산한 편집이라
+    /// 적용하면 엉뚱한 곳을 고치게 되므로(실제로 겹친 응답에서 코드가 깨졌다) 버리고 알린다.
+    fn edit_still_valid(&mut self, retry: &Retry) -> bool {
+        let unchanged = self
+            .docs
+            .iter()
+            .find(|d| d.path == retry.path)
+            .is_some_and(|d| d.buffer.version() == retry.version);
+        if !unchanged {
+            self.status =
+                "요청 뒤에 문서가 바뀌어 결과를 적용하지 않았습니다. 다시 시도하세요".into();
+        }
+        unchanged
+    }
+
+    /// 고른 코드 액션을 실행한다: 편집이 있으면 적용하고, 명령이 있으면 서버에 실행을 요청하고,
+    /// 편집이 아직 없으면 resolve로 받아 온다.
+    fn run_code_action(&mut self, menu: ActionMenu) {
+        let (path, encoding, version) = (menu.path.clone(), menu.encoding, menu.version);
+        let Some(action) = menu.take_selected() else {
+            return;
+        };
+        let doc = self.docs.iter().find(|d| d.path == path);
+        let Some(lang) = doc.and_then(|d| d.lang) else {
+            return;
+        };
+        if doc.is_some_and(|d| d.buffer.version() != version) {
+            self.status = "메뉴를 연 뒤 문서가 바뀌었습니다. 코드 액션을 다시 여세요".into();
+            return;
+        }
+        if !action.edit.is_empty()
+            && self
+                .apply_workspace_edit(lang, action.edit, encoding)
+                .is_none()
+        {
+            return;
+        }
+        if let Some(unresolved) = action.unresolved {
+            self.request_at_cursor(LspRequest::Resolve(unresolved));
+        } else if let Some(command) = action.command {
+            self.request_at_cursor(LspRequest::Execute(command));
+        }
+    }
+
+    /// 여러 파일 편집을 적용한다. 열려 있지 않은 파일은 탭으로 열어 버퍼에만 반영하고
+    /// 저장하지 않는다(사용자가 확인하고 저장하도록). 원래 보던 탭으로 돌아온다.
+    /// 서버가 편집에 붙인 문서 버전이 지금과 다르면 하나도 적용하지 않고 None.
+    /// 적용했으면 (바뀐 파일 수, 바뀐 곳 수).
+    fn apply_workspace_edit(
+        &mut self,
+        lang: Lang,
+        edits: Vec<FileEdit>,
+        encoding: PositionEncoding,
+    ) -> Option<(usize, usize)> {
+        let stale = edits.iter().any(|f| {
+            f.version.is_some_and(|v| {
+                self.hub
+                    .document_version(lang, &real_path(&f.path))
+                    .is_some_and(|current| current != v)
+            })
+        });
+        if stale {
+            self.status =
+                "서버의 편집이 지금 문서와 맞지 않아 적용하지 않았습니다. 다시 시도하세요".into();
+            return None;
+        }
+        let original = self.active.map(|i| self.docs[i].path.clone());
+        let (mut files, mut changes) = (0, 0);
+        for file in edits.into_iter().filter(|f| !f.edits.is_empty()) {
+            self.open_file(file.path.clone());
+            let target = real_path(&file.path);
+            let Some(doc) = self.docs.iter_mut().find(|d| d.path == target) else {
+                continue;
+            };
+            let rope = doc.buffer.rope().clone();
+            let ranges: Vec<(std::ops::Range<usize>, String)> = file
+                .edits
+                .into_iter()
+                .map(|(range, text)| (char_range(&rope, range, encoding), text))
+                .collect();
+            files += 1;
+            changes += ranges.len();
+            doc.buffer.replace_ranges(ranges, Instant::now());
+        }
+        if let Some(original) = original {
+            self.active = self.docs.iter().position(|d| d.path == original);
+        }
+        Some((files, changes))
     }
 
     /// 다른 파일일 수도 있는 위치로 이동한다(열려 있지 않으면 연다).
@@ -1110,6 +1355,31 @@ impl FerriteApp {
                         }
                     }
                 });
+                ui.menu_button("코드", |ui| {
+                    let items: [(&str, KeyboardShortcut, Option<LspRequest>); 6] = [
+                        ("정의로 이동", GOTO_DEFINITION, Some(LspRequest::Definition)),
+                        ("참조 찾기", FIND_REFERENCES, Some(LspRequest::References)),
+                        ("자동완성", COMPLETE, Some(LspRequest::Completion(None))),
+                        (
+                            "코드 액션 (Alt+Enter)",
+                            CODE_ACTION,
+                            Some(LspRequest::CodeActions),
+                        ),
+                        ("문서 포맷", FORMAT, Some(LspRequest::Format)),
+                        ("기호 이름 바꾸기", RENAME_SYMBOL, None),
+                    ];
+                    for (label, shortcut, request) in items {
+                        let item =
+                            egui::Button::new(label).shortcut_text(ctx.format_shortcut(&shortcut));
+                        if ui.add_enabled(self.active.is_some(), item).clicked() {
+                            ui.close();
+                            match request {
+                                Some(request) => self.request_at_cursor(request),
+                                None => self.open_symbol_rename(),
+                            }
+                        }
+                    }
+                });
             });
         });
     }
@@ -1140,6 +1410,16 @@ impl FerriteApp {
                     result,
                     encoding,
                 } => self.on_lsp_response(lang, id, result, encoding),
+                HubUpdate::ApplyEdit {
+                    lang,
+                    id,
+                    edits,
+                    encoding,
+                } => {
+                    self.apply_workspace_edit(lang, edits, encoding);
+                    self.hub
+                        .reply(lang, id, serde_json::json!({ "applied": true }));
+                }
             }
         }
     }
@@ -1299,12 +1579,28 @@ impl FerriteApp {
         }
     }
 
-    /// 자동완성 팝업이 열려 있으면 이동·적용·닫기 키를 에디터보다 먼저 가로챈다.
+    /// 자동완성 팝업·코드 액션 메뉴가 열려 있으면 이동·적용·닫기 키를 에디터보다 먼저 가로챈다.
     fn handle_popup_keys(&mut self, ctx: &egui::Context) {
+        let pressed = |key| ctx.input_mut(|i| i.consume_key(Modifiers::NONE, key));
+        if let Some(menu) = &mut self.actions {
+            if pressed(Key::ArrowDown) {
+                menu.move_selection(true);
+            }
+            if pressed(Key::ArrowUp) {
+                menu.move_selection(false);
+            }
+            if pressed(Key::Escape) {
+                self.actions = None;
+            } else if pressed(Key::Enter)
+                && let Some(menu) = self.actions.take()
+            {
+                self.run_code_action(menu);
+            }
+            return;
+        }
         if self.completion.is_none() {
             return;
         }
-        let pressed = |key| ctx.input_mut(|i| i.consume_key(Modifiers::NONE, key));
         if pressed(Key::Escape) {
             self.completion = None;
             return;
@@ -1361,6 +1657,16 @@ impl FerriteApp {
             && popup.ui(ctx, frame.cursor_rect.left_bottom())
         {
             self.accept_completion();
+            self.focus_editor = true;
+        }
+        if self.actions.as_ref().is_some_and(|m| m.path != frame.path) {
+            self.actions = None;
+        }
+        if let Some(menu) = &mut self.actions
+            && menu.ui(ctx, frame.cursor_rect.left_bottom())
+            && let Some(menu) = self.actions.take()
+        {
+            self.run_code_action(menu);
             self.focus_editor = true;
         }
         match frame.hover_pos {
@@ -2154,6 +2460,112 @@ mod tests {
         let refs = harness.state().references.as_ref().unwrap();
         assert!(refs.title.contains("length"), "{}", refs.title);
         assert!(refs.items.len() >= 2, "정의와 호출이 모두 있어야 한다");
+
+        drop(harness);
+        remove_project(&dir);
+    }
+
+    /// `act`를 하고 몇 프레임 돌려 `done`이 될 때까지 되풀이한다(최대 약 60초).
+    /// 서버가 준비 중이면 빈 결과나 일시적 오류를 주므로, 사용자가 다시 시도하듯 반복한다.
+    fn retry_until(
+        harness: &mut Harness<'_, FerriteApp>,
+        act: &dyn Fn(&mut Harness<'_, FerriteApp>),
+        done: &dyn Fn(&Harness<'_, FerriteApp>) -> bool,
+    ) -> bool {
+        for _ in 0..60 {
+            act(harness);
+            for _ in 0..20 {
+                harness.run();
+                if done(harness) {
+                    return true;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        }
+        false
+    }
+
+    #[test]
+    fn 기호_이름_바꾸기와_포맷과_코드_액션() {
+        use egui::accesskit::Role;
+
+        if !rust_analyzer_runs() {
+            return;
+        }
+        let text = "fn length() -> i32 {\n    1\n}\n\nfn main() {\n    let  n   =  length();\n    let _ = n;\n}\n";
+        let (dir, file) = cargo_project("edits", text);
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(1200.0, 800.0))
+            .build_eframe(|cc| FerriteApp::new(cc, Some(file.clone())));
+        assert!(
+            run_until_slow(&mut harness, |app| {
+                matches!(app.hub.status(Lang::Rust), Some((_, ServerState::Ready)))
+            }),
+            "서버 준비 시간 초과"
+        );
+        let doc_text = |h: &Harness<'_, FerriteApp>| h.state().docs[0].buffer.text();
+
+        // F2: 정의와 호출을 함께 바꾼다
+        let on_name = text.find("fn length").unwrap() + 4;
+        let renamed = retry_until(
+            &mut harness,
+            &|h| {
+                h.state_mut().docs[0]
+                    .buffer
+                    .set_selection(Selection::caret(on_name));
+                h.key_press(Key::F2);
+                h.run();
+                h.key_press_modifiers(Modifiers::COMMAND, Key::A);
+                h.get_by_role_and_label(Role::TextInput, "이름")
+                    .type_text("size");
+                h.key_press(Key::Enter);
+            },
+            &|h| doc_text(h).contains("fn size()") && doc_text(h).contains("size();"),
+        );
+        assert!(renamed, "이름 바꾸기 실패: {}", harness.state().status);
+        assert!(
+            harness.state().docs[0].is_dirty(),
+            "바꾼 결과는 저장하지 않은 상태로 둔다"
+        );
+
+        // Shift+Alt+F: rustfmt 규칙으로 정리
+        let formatted = retry_until(
+            &mut harness,
+            &|h| h.key_press_modifiers(Modifiers::SHIFT.plus(Modifiers::ALT), Key::F),
+            &|h| doc_text(h).contains("    let n = size();"),
+        );
+        assert!(
+            formatted,
+            "포맷 실패: {}\n{}",
+            harness.state().status,
+            doc_text(&harness)
+        );
+
+        // Ctrl+.: 코드 액션 메뉴를 열고 첫 항목을 실행하면 문서가 바뀐다
+        let on_n = doc_text(&harness).find("let n").unwrap() + 4;
+        let opened = retry_until(
+            &mut harness,
+            &|h| {
+                h.state_mut().docs[0]
+                    .buffer
+                    .set_selection(Selection::caret(on_n));
+                h.key_press_modifiers(Modifiers::COMMAND, Key::Period);
+            },
+            &|h| h.state().actions.is_some(),
+        );
+        assert!(
+            opened,
+            "코드 액션 메뉴가 열리지 않음: {}",
+            harness.state().status
+        );
+        let before = harness.state().docs[0].buffer.version();
+        harness.key_press(Key::Enter);
+        assert!(
+            run_until_slow(&mut harness, |app| app.docs[0].buffer.version() != before),
+            "코드 액션이 적용되지 않음: {}",
+            harness.state().status
+        );
+        assert!(harness.state().actions.is_none());
 
         drop(harness);
         remove_project(&dir);

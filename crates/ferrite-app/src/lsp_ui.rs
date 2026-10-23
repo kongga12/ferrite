@@ -1,4 +1,4 @@
-//! 언어 서버 기능의 화면 요소: 자동완성 팝업, 참조 목록.
+//! 언어 서버 기능의 화면 요소: 자동완성 팝업, 코드 액션 메뉴, 참조 목록.
 
 use std::collections::HashMap;
 use std::ops::Range;
@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 use eframe::egui;
 use ferrite_core::buffer::Buffer;
+use ferrite_lsp::edits::CodeActionItem;
 use ferrite_lsp::features::{Completion, Target};
 use ferrite_lsp::position::PositionEncoding;
 
@@ -19,6 +20,86 @@ pub enum Pending {
     Hover { path: PathBuf, pos: usize },
     Definition,
     References { name: String },
+    Format { path: PathBuf },
+    Rename,
+    CodeActions { path: PathBuf },
+    Resolve,
+    Execute,
+}
+
+/// 코드 액션 목록(`Ctrl+.`, `Alt+Enter`). 커서 아래에 띄우고 키보드·마우스로 고른다.
+pub struct ActionMenu {
+    pub path: PathBuf,
+    pub items: Vec<CodeActionItem>,
+    pub encoding: PositionEncoding,
+    /// 목록을 요청한 시점의 버퍼 버전. 실행할 때 문서가 바뀌었으면 편집을 적용하지 않는다.
+    pub version: u64,
+    selected: usize,
+}
+
+impl ActionMenu {
+    pub fn new(
+        path: PathBuf,
+        items: Vec<CodeActionItem>,
+        encoding: PositionEncoding,
+        version: u64,
+    ) -> Self {
+        Self {
+            path,
+            items,
+            encoding,
+            version,
+            selected: 0,
+        }
+    }
+
+    pub fn move_selection(&mut self, down: bool) {
+        let n = self.items.len();
+        if n > 0 {
+            self.selected = if down {
+                (self.selected + 1) % n
+            } else {
+                (self.selected + n - 1) % n
+            };
+        }
+    }
+
+    pub fn take_selected(self) -> Option<CodeActionItem> {
+        self.items.into_iter().nth(self.selected)
+    }
+
+    /// 목록을 그린다. 항목을 클릭하면 true(실행해야 함).
+    pub fn ui(&mut self, ctx: &egui::Context, at: egui::Pos2) -> bool {
+        let mut clicked = None;
+        egui::Area::new(egui::Id::unique("code_action_menu"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(at)
+            .show(ctx, |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.set_width(POPUP_WIDTH);
+                    egui::ScrollArea::vertical()
+                        .max_height(240.0)
+                        .show(ui, |ui| {
+                            for (row, item) in self.items.iter().enumerate() {
+                                let marker = if item.preferred { "★ " } else { "" };
+                                if ui
+                                    .selectable_label(
+                                        row == self.selected,
+                                        format!("{marker}{}", item.title),
+                                    )
+                                    .clicked()
+                                {
+                                    clicked = Some(row);
+                                }
+                            }
+                        });
+                });
+            });
+        if let Some(row) = clicked {
+            self.selected = row;
+        }
+        clicked.is_some()
+    }
 }
 
 fn is_word(c: char) -> bool {
