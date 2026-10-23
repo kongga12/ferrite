@@ -3,9 +3,9 @@
 use std::path::PathBuf;
 
 use eframe::egui::{self, Key, KeyboardShortcut, Modifiers, ViewportCommand};
+use ferrite_core::text_file::{self, Encoding, LineEnding, TextContent};
 
 use crate::file_tree::FileTree;
-use crate::text_file::{self, Encoding, LineEnding, TextContent};
 
 // Modifiers::COMMAND는 macOS에서 Cmd, 그 외 OS에서 Ctrl로 동작한다.
 const OPEN_FOLDER: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::O);

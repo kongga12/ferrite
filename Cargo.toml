@@ -1,15 +1,16 @@
-[package]
-name = "ferrite"
+[workspace]
+members = ["crates/*"]
+resolver = "3"
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
-description = "Rust 기반 크로스플랫폼 경량 IDE"
 license = "MIT OR Apache-2.0"
 publish = false
 
-[dependencies]
+[workspace.dependencies]
+ferrite-core = { path = "crates/ferrite-core" }
 eframe = "0.37"
+egui_kittest = { version = "0.37", features = ["eframe"] }
 encoding_rs = "0.8"
 rfd = "0.17"
-
-[dev-dependencies]
-egui_kittest = { version = "0.37", features = ["eframe"] }

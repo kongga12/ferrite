@@ -6,7 +6,6 @@
 mod app;
 mod file_tree;
 mod fonts;
-mod text_file;
 
 use eframe::egui;
 

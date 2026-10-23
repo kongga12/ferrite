@@ -1094,13 +1094,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b97b65636e5b9ef369943878ac74335ba1c55c1cb6adbf1e2c293c624248d693"
 
 [[package]]
-name = "ferrite"
+name = "ferrite-app"
 version = "0.1.0"
 dependencies = [
  "eframe",
  "egui_kittest",
- "encoding_rs",
+ "ferrite-core",
  "rfd",
+]
+
+[[package]]
+name = "ferrite-core"
+version = "0.1.0"
+dependencies = [
+ "encoding_rs",
 ]
 
 [[package]]

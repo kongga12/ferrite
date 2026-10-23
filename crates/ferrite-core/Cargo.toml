@@ -1,0 +1,10 @@
+[package]
+name = "ferrite-core"
+description = "Ferrite 코어: UI에 의존하지 않는 문서·편집·구문 분석 로직"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+encoding_rs.workspace = true
