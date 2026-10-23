@@ -9,6 +9,7 @@ mod file_tree;
 mod find_bar;
 mod fonts;
 mod theme;
+mod watcher;
 
 use eframe::egui;
 

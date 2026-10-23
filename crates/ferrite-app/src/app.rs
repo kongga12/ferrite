@@ -1,17 +1,21 @@
 //! 메인 창: 메뉴바, 프로젝트 트리, 탭 에디터, 상태바, 미저장 변경 확인.
 
-use std::path::PathBuf;
+use std::collections::HashSet;
+use std::io;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use eframe::egui::{self, Key, KeyboardShortcut, Modifiers, ViewportCommand};
 use ferrite_core::buffer::{Buffer, Indent, Selection, detect_indent};
 use ferrite_core::search;
+use ferrite_core::settings::{self, Settings, Theme};
 use ferrite_core::syntax::{Lang, MAX_SYNTAX_BYTES, Syntax};
 use ferrite_core::text_file::{self, Encoding, LineEnding, TextContent, TextFileError};
 
 use crate::editor_view::{self, EditorOptions, EditorState, Styler};
 use crate::file_tree::FileTree;
 use crate::find_bar::{FindAction, FindBar};
+use crate::watcher::FsWatcher;
 
 // Modifiers::COMMAND는 macOS에서 Cmd, 그 외 OS에서 Ctrl로 동작한다.
 const OPEN_FOLDER: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::O);
@@ -22,9 +26,45 @@ const REPLACE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key:
 const FIND_NEXT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::F3);
 const FIND_PREV: KeyboardShortcut = KeyboardShortcut::new(Modifiers::SHIFT, Key::F3);
 
-/// 들여쓰기 방식을 감지하지 못했을 때 쓰는 기본값.
-const DEFAULT_INDENT: Indent = Indent::Spaces(4);
-const TAB_SIZE: usize = 4;
+/// OS별 설정 파일 위치(Windows `%APPDATA%`, macOS `~/Library/Application Support`, Linux `~/.config`).
+fn settings_path() -> Option<PathBuf> {
+    Some(dirs::config_dir()?.join("ferrite").join("settings.toml"))
+}
+
+/// 설정 파일을 읽는다. 없으면 기본값, 잘못되었으면 기본값과 오류 메시지.
+fn load_settings() -> (Settings, Option<String>) {
+    let Some(path) = settings_path() else {
+        return (Settings::default(), None);
+    };
+    match std::fs::read_to_string(&path) {
+        Ok(text) => match Settings::parse(&text) {
+            Ok(s) => (s, None),
+            Err(e) => (
+                Settings::default(),
+                Some(format!("설정 오류(기본값 사용): {e}")),
+            ),
+        },
+        Err(e) if e.kind() == io::ErrorKind::NotFound => (Settings::default(), None),
+        Err(e) => (
+            Settings::default(),
+            Some(format!("설정 파일을 읽지 못했습니다: {e}")),
+        ),
+    }
+}
+
+fn apply_settings(ctx: &egui::Context, settings: &Settings) {
+    ctx.set_theme(match settings.theme {
+        Theme::System => egui::ThemePreference::System,
+        Theme::Dark => egui::ThemePreference::Dark,
+        Theme::Light => egui::ThemePreference::Light,
+    });
+    let size = settings.font_size;
+    ctx.all_styles_mut(|style| {
+        if let Some(font) = style.text_styles.get_mut(&egui::TextStyle::Monospace) {
+            font.size = size;
+        }
+    });
+}
 
 struct Document {
     path: PathBuf,
@@ -40,30 +80,60 @@ struct Document {
     /// 언어를 알고 파일이 크지 않을 때만 있다.
     syntax: Option<Syntax>,
     view: EditorState,
+    /// 마지막으로 읽거나 쓴 디스크 내용의 해시. 자기 저장으로 생긴 변경 알림을 걸러낸다.
+    disk_hash: u64,
+    /// 저장하지 않은 변경이 있는데 디스크 파일이 밖에서 바뀌었다(사용자 선택 대기).
+    external_change: bool,
 }
 
 impl Document {
-    fn open(path: PathBuf) -> Result<Self, TextFileError> {
-        let content = text_file::load(&path)?;
-        let mut buffer = Buffer::new(&content.text);
-        let indent = detect_indent(buffer.rope(), DEFAULT_INDENT);
+    fn open(path: PathBuf, default_indent: Indent) -> Result<Self, TextFileError> {
+        let bytes = text_file::read(&path)?;
+        let content = text_file::decode(&bytes)?;
         let lang = Lang::from_path(&path);
-        let syntax = lang
-            .filter(|_| buffer.rope().len_bytes() <= MAX_SYNTAX_BYTES)
-            .and_then(|l| Syntax::new(l).ok());
-        buffer.set_track_syntax_edits(syntax.is_some());
-        Ok(Self {
+        let mut doc = Self {
             path,
-            saved_revision: buffer.revision(),
-            buffer,
+            buffer: Buffer::new(""),
             encoding: content.encoding,
             line_ending: content.line_ending,
-            indent,
+            indent: default_indent,
+            saved_revision: 0,
             format_changed: false,
             lang,
-            syntax,
+            syntax: None,
             view: EditorState::default(),
-        })
+            disk_hash: 0,
+            external_change: false,
+        };
+        doc.replace_content(&content, &bytes, default_indent);
+        Ok(doc)
+    }
+
+    /// 디스크에서 읽은 내용으로 버퍼를 새로 만든다(처음 열 때, 다시 불러올 때). 커서 위치는 최대한 유지한다.
+    fn replace_content(&mut self, content: &TextContent, bytes: &[u8], default_indent: Indent) {
+        let head = self.buffer.selection().head;
+        let mut buffer = Buffer::new(&content.text);
+        buffer.move_to(head.min(buffer.len_chars()), false);
+        self.indent = detect_indent(buffer.rope(), default_indent);
+        self.syntax = self
+            .lang
+            .filter(|_| buffer.rope().len_bytes() <= MAX_SYNTAX_BYTES)
+            .and_then(|l| Syntax::new(l).ok());
+        buffer.set_track_syntax_edits(self.syntax.is_some());
+        self.saved_revision = buffer.revision();
+        self.buffer = buffer;
+        self.encoding = content.encoding;
+        self.line_ending = content.line_ending;
+        self.format_changed = false;
+        self.disk_hash = text_file::content_hash(bytes);
+        self.external_change = false;
+    }
+
+    fn reload(&mut self, default_indent: Indent) -> Result<(), TextFileError> {
+        let bytes = text_file::read(&self.path)?;
+        let content = text_file::decode(&bytes)?;
+        self.replace_content(&content, &bytes, default_indent);
+        Ok(())
     }
 
     fn save(&mut self) -> Result<(), TextFileError> {
@@ -72,21 +142,61 @@ impl Document {
             encoding: self.encoding,
             line_ending: self.line_ending,
         };
-        text_file::save(&self.path, &content)?;
+        let bytes = text_file::encode(&content)?;
+        text_file::write_atomic(&self.path, &bytes)?;
         self.saved_revision = self.buffer.revision();
         self.format_changed = false;
+        self.disk_hash = text_file::content_hash(&bytes);
+        self.external_change = false;
         Ok(())
+    }
+
+    /// 디스크 파일이 바뀌었다는 알림을 처리하고, 사용자에게 알릴 내용을 돌려준다.
+    /// 저장하지 않은 변경이 없으면 다시 불러오고, 있으면 충돌로 표시해 사용자가 고르게 한다.
+    fn on_disk_changed(&mut self, default_indent: Indent) -> Option<String> {
+        let name = self.name();
+        let bytes = match text_file::read(&self.path) {
+            Ok(bytes) => bytes,
+            Err(TextFileError::Io(e)) if e.kind() == io::ErrorKind::NotFound => {
+                return Some(format!(
+                    "디스크에서 삭제되었습니다: {name} (저장하면 다시 만듭니다)"
+                ));
+            }
+            Err(e) => return Some(format!("바뀐 파일을 읽지 못했습니다: {name}: {e}")),
+        };
+        let hash = text_file::content_hash(&bytes);
+        if hash == self.disk_hash {
+            return None;
+        }
+        if self.is_dirty() {
+            self.disk_hash = hash;
+            self.external_change = true;
+            return Some(format!(
+                "디스크의 {name}이(가) 바뀌었습니다. 저장하지 않은 변경과 충돌합니다"
+            ));
+        }
+        match text_file::decode(&bytes) {
+            Ok(content) => {
+                self.replace_content(&content, &bytes, default_indent);
+                Some(format!("디스크에서 다시 불러왔습니다: {name}"))
+            }
+            Err(e) => Some(format!("바뀐 파일을 읽지 못했습니다: {name}: {e}")),
+        }
     }
 
     fn is_dirty(&self) -> bool {
         self.buffer.revision() != self.saved_revision || self.format_changed
     }
 
-    fn title(&self) -> String {
-        let name = self.path.file_name().map_or_else(
+    fn name(&self) -> String {
+        self.path.file_name().map_or_else(
             || self.path.display().to_string(),
             |n| n.to_string_lossy().into_owned(),
-        );
+        )
+    }
+
+    fn title(&self) -> String {
+        let name = self.name();
         if self.is_dirty() {
             format!("● {name}")
         } else {
@@ -118,12 +228,20 @@ pub struct FerriteApp {
     find: Option<FindBar>,
     /// 다음 프레임에 에디터로 키보드 포커스를 돌려준다(찾기 막대를 닫은 뒤 등).
     focus_editor: bool,
+    settings: Settings,
+    /// 설정 파일을 저장해 다음 프레임에 다시 적용해야 한다.
+    settings_changed: bool,
+    /// 감시를 시작하지 못한 환경(권한 등)에서는 없다. 그래도 편집은 된다.
+    watcher: Option<FsWatcher>,
 }
 
 impl FerriteApp {
     /// `start`는 명령줄로 받은 시작 경로. 폴더면 프로젝트로, 파일이면 상위 폴더를 프로젝트로 열고 파일을 연다.
     pub fn new(cc: &eframe::CreationContext<'_>, start: Option<PathBuf>) -> Self {
         crate::fonts::install_korean_font(&cc.egui_ctx);
+        let (settings, settings_error) = load_settings();
+        apply_settings(&cc.egui_ctx, &settings);
+        let start = start.map(|p| std::path::absolute(&p).unwrap_or(p));
         let file = start.as_ref().filter(|p| p.is_file()).cloned();
         let project = match &file {
             Some(f) => f.parent().map(PathBuf::from),
@@ -149,14 +267,64 @@ impl FerriteApp {
             active: None,
             pending_close: None,
             allow_close: false,
-            status,
+            status: settings_error.unwrap_or(status),
             find: None,
             focus_editor: false,
+            settings,
+            settings_changed: false,
+            watcher: FsWatcher::new(cc.egui_ctx.clone()).ok(),
         };
         if let Some(file) = file {
             app.open_file(file);
         }
         app
+    }
+
+    /// 설정 파일이 없으면 템플릿으로 만들고 에디터로 연다.
+    fn open_settings(&mut self) {
+        let Some(path) = settings_path() else {
+            self.status = "이 OS에서는 설정 폴더를 찾을 수 없습니다".into();
+            return;
+        };
+        if !path.exists() {
+            let created = path
+                .parent()
+                .map_or(Ok(()), std::fs::create_dir_all)
+                .and_then(|()| text_file::write_atomic(&path, settings::TEMPLATE.as_bytes()));
+            if let Err(e) = created {
+                self.status = format!("설정 파일을 만들지 못했습니다: {e}");
+                return;
+            }
+        }
+        self.open_file(path);
+    }
+
+    /// 감시 알림을 처리하고 감시 목록을 지금 열린 문서·펼친 폴더에 맞춘다.
+    fn process_fs_events(&mut self) {
+        let Some(watcher) = &mut self.watcher else {
+            return;
+        };
+        let changed = watcher.changed_paths();
+        if let Some(tree) = &mut self.tree {
+            for dir in changed.iter().filter_map(|p| p.parent()) {
+                tree.invalidate(dir);
+            }
+        }
+        let default_indent = self.settings.default_indent();
+        for doc in self.docs.iter_mut().filter(|d| changed.contains(&d.path)) {
+            if let Some(message) = doc.on_disk_changed(default_indent) {
+                self.status = message;
+            }
+        }
+        let mut dirs: HashSet<PathBuf> = self
+            .docs
+            .iter()
+            .filter_map(|d| d.path.parent().map(Path::to_path_buf))
+            .collect();
+        if let Some(tree) = &self.tree {
+            dirs.extend(tree.loaded_dirs().cloned());
+        }
+        watcher.sync(dirs);
     }
 
     fn open_folder_dialog(&mut self) {
@@ -167,11 +335,13 @@ impl FerriteApp {
     }
 
     fn open_file(&mut self, path: PathBuf) {
+        // 파일 감시 알림의 경로(절대 경로)와 비교할 수 있게 절대 경로로 둔다.
+        let path = std::path::absolute(&path).unwrap_or(path);
         if let Some(i) = self.docs.iter().position(|d| d.path == path) {
             self.active = Some(i);
             return;
         }
-        match Document::open(path.clone()) {
+        match Document::open(path.clone(), self.settings.default_indent()) {
             Ok(doc) => {
                 self.docs.push(doc);
                 self.active = Some(self.docs.len() - 1);
@@ -186,6 +356,9 @@ impl FerriteApp {
         match doc.save() {
             Ok(()) => {
                 self.status = format!("저장됨: {}", doc.path.display());
+                if settings_path().is_some_and(|p| p == doc.path) {
+                    self.settings_changed = true;
+                }
                 true
             }
             Err(e) => {
@@ -337,6 +510,11 @@ impl FerriteApp {
                         tree.refresh();
                     }
                     ui.separator();
+                    if ui.button("설정 열기").clicked() {
+                        ui.close();
+                        self.open_settings();
+                    }
+                    ui.separator();
                     if ui.button("종료").clicked() {
                         ui.close();
                         ctx.send_viewport_cmd(ViewportCommand::Close);
@@ -431,6 +609,7 @@ impl FerriteApp {
     fn editor(&mut self, ui: &mut egui::Ui) {
         let mut close = None;
         let mut find_action = None;
+        let mut reload = false;
         // 스크린리더가 에디터를 "현재 탭 이름"으로 읽도록 에디터를 활성 탭에 연결한다.
         let mut active_tab = None;
         egui::CentralPanel::default().show(ui, |ui| {
@@ -460,13 +639,28 @@ impl FerriteApp {
                 ui.centered_and_justified(|ui| ui.label("열린 파일이 없습니다"));
                 return;
             };
+            if doc.external_change {
+                ui.horizontal(|ui| {
+                    ui.colored_label(
+                        ui.visuals().warn_fg_color,
+                        "디스크의 파일이 바뀌었습니다. 저장하지 않은 변경이 있습니다.",
+                    );
+                    reload = ui
+                        .button("디스크 내용으로 다시 불러오기 (내 변경 버림)")
+                        .clicked();
+                    if ui.button("무시 (저장하면 디스크 내용을 덮어씀)").clicked() {
+                        doc.external_change = false;
+                    }
+                });
+                ui.separator();
+            }
             if let Some(find) = &mut self.find {
                 find.refresh(&doc.path, &doc.buffer);
                 find_action = find.ui(ui, &doc.buffer);
                 ui.separator();
             }
             let opts = EditorOptions {
-                tab_size: TAB_SIZE,
+                tab_size: self.settings.tab_size,
                 indent: doc.indent,
                 comment_token: doc.lang.and_then(Lang::line_comment),
                 search_matches: self.find.as_ref().map_or(&[], |f| f.matches()),
@@ -483,6 +677,14 @@ impl FerriteApp {
         });
         if let Some(action) = find_action {
             self.run_find_action(action);
+        }
+        if reload && let Some(i) = self.active {
+            let default_indent = self.settings.default_indent();
+            let doc = &mut self.docs[i];
+            self.status = match doc.reload(default_indent) {
+                Ok(()) => format!("디스크에서 다시 불러왔습니다: {}", doc.name()),
+                Err(e) => format!("다시 불러오기 실패: {e}"),
+            };
         }
         if let Some(i) = close {
             self.request_close_tab(i);
@@ -569,6 +771,13 @@ impl FerriteApp {
 
 impl eframe::App for FerriteApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.process_fs_events();
+        if std::mem::take(&mut self.settings_changed) {
+            let (settings, error) = load_settings();
+            self.status = error.unwrap_or_else(|| "설정을 적용했습니다".into());
+            apply_settings(ctx, &settings);
+            self.settings = settings;
+        }
         self.intercept_close(ctx);
         // 확인 대화상자가 떠 있는 동안에는 단축키로 탭 목록이 바뀌지 않게 한다.
         if self.pending_close.is_none() {
@@ -696,6 +905,105 @@ mod tests {
         harness.run();
         assert_eq!(harness.state().docs[0].buffer.text(), "X bar X");
         assert!(harness.state().docs[0].is_dirty());
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 파일 감시 알림은 OS 스레드에서 비동기로 오므로 조건이 맞을 때까지 프레임을 돌린다.
+    fn run_until(
+        harness: &mut Harness<'_, FerriteApp>,
+        done: impl Fn(&FerriteApp) -> bool,
+    ) -> bool {
+        for _ in 0..50 {
+            harness.run();
+            if done(harness.state()) {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        false
+    }
+
+    #[test]
+    fn 디스크에서_바뀐_파일은_다시_불러오고_미저장_변경이_있으면_충돌로_표시한다() {
+        let dir = std::env::temp_dir().join(format!("ferrite-watch-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("a.txt");
+        fs::write(&file, "v1").unwrap();
+
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(1000.0, 700.0))
+            .build_eframe(|cc| FerriteApp::new(cc, Some(file.clone())));
+        harness.run(); // 감시 시작
+
+        // 미저장 변경이 없으면 조용히 다시 불러온다
+        fs::write(&file, "v2").unwrap();
+        assert!(
+            run_until(&mut harness, |app| app.docs[0].buffer.text() == "v2"),
+            "외부 변경이 반영되지 않음"
+        );
+        assert!(!harness.state().docs[0].is_dirty());
+
+        // 미저장 변경이 있으면 덮어쓰지 않고 충돌로 표시한다
+        harness
+            .get_by_role(egui::accesskit::Role::MultilineTextInput)
+            .focus();
+        harness.run();
+        harness
+            .get_by_role(egui::accesskit::Role::MultilineTextInput)
+            .type_text("!");
+        harness.run();
+        fs::write(&file, "v3").unwrap();
+        assert!(
+            run_until(&mut harness, |app| app.docs[0].external_change),
+            "충돌이 표시되지 않음"
+        );
+        assert!(
+            harness.state().docs[0].buffer.text().contains('!'),
+            "내 편집이 보존되어야 한다"
+        );
+
+        // 사용자가 다시 불러오기를 고르면 디스크 내용으로 바뀐다
+        harness
+            .get_by_label("디스크 내용으로 다시 불러오기 (내 변경 버림)")
+            .click();
+        harness.run();
+        assert_eq!(harness.state().docs[0].buffer.text(), "v3");
+        assert!(!harness.state().docs[0].external_change);
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn 자기_저장은_외부_변경으로_취급하지_않는다() {
+        let dir =
+            std::env::temp_dir().join(format!("ferrite-selfsave-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("a.txt");
+        fs::write(&file, "x").unwrap();
+
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(1000.0, 700.0))
+            .build_eframe(|cc| FerriteApp::new(cc, Some(file.clone())));
+        harness.run();
+        let editor = harness.get_by_role(egui::accesskit::Role::MultilineTextInput);
+        editor.focus();
+        harness.run();
+        harness
+            .get_by_role(egui::accesskit::Role::MultilineTextInput)
+            .type_text("y");
+        harness.run();
+        harness.key_press_modifiers(Modifiers::COMMAND, Key::S);
+        harness.run();
+        // 저장으로 생긴 알림이 처리될 시간(1초)을 준다
+        for _ in 0..10 {
+            harness.run();
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        let doc = &harness.state().docs[0];
+        assert!(!doc.external_change);
+        assert!(!doc.is_dirty());
+        assert_eq!(fs::read_to_string(&file).unwrap(), doc.buffer.text());
 
         fs::remove_dir_all(&dir).unwrap();
     }

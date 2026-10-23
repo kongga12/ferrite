@@ -28,9 +28,18 @@ impl FileTree {
         }
     }
 
-    // ponytail: 수동 새로고침. Phase 1에서 notify 파일 감시로 자동 갱신.
     pub fn refresh(&mut self) {
         self.children.clear();
+    }
+
+    /// 한 폴더의 목록 캐시를 버린다. 다음에 그릴 때 다시 읽는다.
+    pub fn invalidate(&mut self, dir: &Path) {
+        self.children.remove(dir);
+    }
+
+    /// 목록을 읽어 둔(펼친 적 있는) 폴더들. 파일 감시 대상이다.
+    pub fn loaded_dirs(&self) -> impl Iterator<Item = &PathBuf> {
+        self.children.keys()
     }
 
     /// 트리를 그리고, 클릭된 파일 경로를 돌려준다.
@@ -79,7 +88,8 @@ fn read_dir_sorted(dir: &Path) -> io::Result<Vec<Entry>> {
     for item in fs::read_dir(dir)? {
         let item = item?;
         let name = item.file_name().to_string_lossy().into_owned();
-        if name == ".git" {
+        // .git과 저장 중 잠깐 생기는 임시 파일은 숨긴다.
+        if name == ".git" || name.ends_with(".ferrite-tmp") {
             continue;
         }
         let path = item.path();

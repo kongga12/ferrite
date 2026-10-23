@@ -2,5 +2,6 @@
 
 pub mod buffer;
 pub mod search;
+pub mod settings;
 pub mod syntax;
 pub mod text_file;
