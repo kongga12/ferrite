@@ -1,19 +1,26 @@
 //! 메인 창: 메뉴바, 프로젝트 트리, 탭 에디터, 상태바, 미저장 변경 확인.
 
 use std::path::PathBuf;
+use std::time::Instant;
 
 use eframe::egui::{self, Key, KeyboardShortcut, Modifiers, ViewportCommand};
-use ferrite_core::buffer::{Buffer, Indent, detect_indent};
+use ferrite_core::buffer::{Buffer, Indent, Selection, detect_indent};
+use ferrite_core::search;
 use ferrite_core::syntax::{Lang, MAX_SYNTAX_BYTES, Syntax};
 use ferrite_core::text_file::{self, Encoding, LineEnding, TextContent, TextFileError};
 
 use crate::editor_view::{self, EditorOptions, EditorState, Styler};
 use crate::file_tree::FileTree;
+use crate::find_bar::{FindAction, FindBar};
 
 // Modifiers::COMMAND는 macOS에서 Cmd, 그 외 OS에서 Ctrl로 동작한다.
 const OPEN_FOLDER: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::O);
 const SAVE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::S);
 const CLOSE_TAB: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::W);
+const FIND: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::F);
+const REPLACE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::H);
+const FIND_NEXT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::F3);
+const FIND_PREV: KeyboardShortcut = KeyboardShortcut::new(Modifiers::SHIFT, Key::F3);
 
 /// 들여쓰기 방식을 감지하지 못했을 때 쓰는 기본값.
 const DEFAULT_INDENT: Indent = Indent::Spaces(4);
@@ -108,6 +115,9 @@ pub struct FerriteApp {
     /// 사용자가 종료를 확정했으면 true. 이후의 창 닫기 요청은 막지 않는다.
     allow_close: bool,
     status: String,
+    find: Option<FindBar>,
+    /// 다음 프레임에 에디터로 키보드 포커스를 돌려준다(찾기 막대를 닫은 뒤 등).
+    focus_editor: bool,
 }
 
 impl FerriteApp {
@@ -140,6 +150,8 @@ impl FerriteApp {
             pending_close: None,
             allow_close: false,
             status,
+            find: None,
+            focus_editor: false,
         };
         if let Some(file) = file {
             app.open_file(file);
@@ -215,6 +227,79 @@ impl FerriteApp {
         {
             self.request_close_tab(i);
         }
+        for (shortcut, replace) in [(FIND, false), (REPLACE, true)] {
+            if ctx.input_mut(|i| i.consume_shortcut(&shortcut)) {
+                self.open_find(replace);
+            }
+        }
+        if self.find.is_some() {
+            if ctx.input_mut(|i| i.consume_shortcut(&FIND_PREV)) {
+                self.run_find_action(FindAction::Prev);
+            }
+            if ctx.input_mut(|i| i.consume_shortcut(&FIND_NEXT)) {
+                self.run_find_action(FindAction::Next);
+            }
+        }
+    }
+
+    fn open_find(&mut self, replace: bool) {
+        match &mut self.find {
+            Some(find) => find.focus(replace),
+            None => {
+                let selected = self
+                    .active
+                    .map(|i| self.docs[i].buffer.selected_text())
+                    .filter(|s| !s.is_empty());
+                self.find = Some(FindBar::new(replace, selected));
+            }
+        }
+    }
+
+    fn run_find_action(&mut self, action: FindAction) {
+        if matches!(action, FindAction::Close) {
+            self.find = None;
+            self.focus_editor = true;
+            return;
+        }
+        let (Some(find), Some(i)) = (&mut self.find, self.active) else {
+            return;
+        };
+        let doc = &mut self.docs[i];
+        let now = Instant::now();
+        match action {
+            FindAction::ReplaceOne => {
+                if let Err(e) =
+                    search::replace_selection(&mut doc.buffer, &find.query, &find.replacement, now)
+                {
+                    self.status = format!("바꾸기 실패: {e}");
+                    return;
+                }
+                find.refresh(&doc.path, &doc.buffer);
+            }
+            FindAction::ReplaceAll => {
+                self.status =
+                    match search::replace_all(&mut doc.buffer, &find.query, &find.replacement, now)
+                    {
+                        Ok(n) => format!("{n}개를 바꿨습니다"),
+                        Err(e) => format!("바꾸기 실패: {e}"),
+                    };
+                return;
+            }
+            _ => {}
+        }
+        let sel = doc.buffer.selection().range();
+        let target = if matches!(action, FindAction::Prev) {
+            search::prev_match(find.matches(), sel.start)
+        } else {
+            search::next_match(find.matches(), sel.end)
+        };
+        if let Some(m) = target {
+            doc.buffer.set_selection(Selection {
+                anchor: m.start,
+                head: m.end,
+            });
+            doc.view.reveal_cursor();
+        }
     }
 
     fn menu_bar(&mut self, ui: &mut egui::Ui) {
@@ -255,6 +340,18 @@ impl FerriteApp {
                     if ui.button("종료").clicked() {
                         ui.close();
                         ctx.send_viewport_cmd(ViewportCommand::Close);
+                    }
+                });
+                ui.menu_button("편집", |ui| {
+                    for (label, shortcut, replace) in
+                        [("찾기", FIND, false), ("바꾸기", REPLACE, true)]
+                    {
+                        let item =
+                            egui::Button::new(label).shortcut_text(ctx.format_shortcut(&shortcut));
+                        if ui.add_enabled(self.active.is_some(), item).clicked() {
+                            ui.close();
+                            self.open_find(replace);
+                        }
                     }
                 });
             });
@@ -333,6 +430,7 @@ impl FerriteApp {
 
     fn editor(&mut self, ui: &mut egui::Ui) {
         let mut close = None;
+        let mut find_action = None;
         // 스크린리더가 에디터를 "현재 탭 이름"으로 읽도록 에디터를 활성 탭에 연결한다.
         let mut active_tab = None;
         egui::CentralPanel::default().show(ui, |ui| {
@@ -362,18 +460,30 @@ impl FerriteApp {
                 ui.centered_and_justified(|ui| ui.label("열린 파일이 없습니다"));
                 return;
             };
+            if let Some(find) = &mut self.find {
+                find.refresh(&doc.path, &doc.buffer);
+                find_action = find.ui(ui, &doc.buffer);
+                ui.separator();
+            }
             let opts = EditorOptions {
                 tab_size: TAB_SIZE,
                 indent: doc.indent,
                 comment_token: doc.lang.and_then(Lang::line_comment),
+                search_matches: self.find.as_ref().map_or(&[], |f| f.matches()),
             };
             let id = ui.make_persistent_id(&doc.path);
+            if std::mem::take(&mut self.focus_editor) {
+                ui.memory_mut(|m| m.request_focus(id));
+            }
             let styler = doc.syntax.as_mut().map(|s| s as &mut dyn Styler);
             let response = editor_view::show(ui, id, &mut doc.buffer, &mut doc.view, &opts, styler);
             if let Some(tab) = active_tab {
                 response.labelled_by(tab);
             }
         });
+        if let Some(action) = find_action {
+            self.run_find_action(action);
+        }
         if let Some(i) = close {
             self.request_close_tab(i);
         }
@@ -534,6 +644,58 @@ mod tests {
             saved.contains('!') && saved.contains("hello"),
             "저장 내용: {saved}"
         );
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn 찾기로_일치_항목을_오가고_모두_바꾼다() {
+        use egui::accesskit::Role;
+
+        let dir = std::env::temp_dir().join(format!("ferrite-find-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("a.txt");
+        fs::write(&file, "foo bar foo").unwrap();
+
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(1000.0, 700.0))
+            .build_eframe(|cc| FerriteApp::new(cc, Some(file.clone())));
+        let selection = |h: &Harness<'_, FerriteApp>| h.state().docs[0].buffer.selection().range();
+
+        // Ctrl/Cmd+F로 열면 검색어 칸에 포커스가 간다
+        harness.key_press_modifiers(Modifiers::COMMAND, Key::F);
+        harness.run();
+        harness
+            .get_by_role_and_label(Role::TextInput, "찾기")
+            .type_text("foo");
+        harness.run();
+        assert_eq!(harness.state().find.as_ref().unwrap().matches().len(), 2);
+
+        // F3은 다음, 끝에서는 처음으로 돌아간다
+        harness.key_press(Key::F3);
+        harness.run();
+        assert_eq!(selection(&harness), 0..3);
+        harness.key_press(Key::F3);
+        harness.run();
+        assert_eq!(selection(&harness), 8..11);
+        harness.key_press(Key::F3);
+        harness.run();
+        assert_eq!(selection(&harness), 0..3);
+
+        // 모두 바꾸기
+        harness.key_press_modifiers(Modifiers::COMMAND, Key::H);
+        harness.run();
+        let field = harness.get_by_role_and_label(Role::TextInput, "바꾸기");
+        field.focus();
+        harness.run();
+        harness
+            .get_by_role_and_label(Role::TextInput, "바꾸기")
+            .type_text("X");
+        harness.run();
+        harness.get_by_label("모두 바꾸기").click();
+        harness.run();
+        assert_eq!(harness.state().docs[0].buffer.text(), "X bar X");
+        assert!(harness.state().docs[0].is_dirty());
 
         fs::remove_dir_all(&dir).unwrap();
     }

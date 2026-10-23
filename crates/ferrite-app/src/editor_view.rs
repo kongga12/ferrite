@@ -35,10 +35,19 @@ pub struct EditorState {
     scroll_to_cursor: bool,
 }
 
+impl EditorState {
+    /// 다음 프레임에 커서가 보이도록 스크롤한다(찾기 결과로 이동할 때 등).
+    pub fn reveal_cursor(&mut self) {
+        self.scroll_to_cursor = true;
+    }
+}
+
 pub struct EditorOptions<'a> {
     pub tab_size: usize,
     pub indent: Indent,
     pub comment_token: Option<&'a str>,
+    /// 찾기 결과(문자 범위, 시작 순 정렬). 배경을 칠한다.
+    pub search_matches: &'a [Range<usize>],
 }
 
 struct Geometry {
@@ -121,6 +130,7 @@ pub fn show(
                 &geom,
                 first..last,
                 styles.as_ref(),
+                opts.search_matches,
                 response.has_focus(),
             );
 
@@ -437,9 +447,11 @@ fn paint(
     geom: &Geometry,
     lines: Range<usize>,
     styles: Option<&LineStyles>,
+    matches: &[Range<usize>],
     focused: bool,
 ) {
     let visuals = ui.visuals();
+    let match_fill = Color32::from_rgba_unmultiplied(230, 180, 0, 70);
     let painter = ui.painter().with_clip_rect(screen_view);
     let text_painter = painter.with_clip_rect(Rect::from_min_max(
         Pos2::new(screen_view.min.x + geom.gutter, screen_view.min.y),
@@ -470,20 +482,33 @@ fn paint(
 
         let start = buffer.line_start(line);
         let end = start + buffer.line_len(line);
-        if sel.start <= end && sel.end > start && !sel.is_empty() {
+        let fill = |range: &Range<usize>, color: Color32| {
+            if range.is_empty() || range.start > end || range.end <= start {
+                return;
+            }
             let x = |pos: usize| galley.pos_from_cursor(CCursor::new(pos - start)).min.x;
-            let x0 = x(sel.start.max(start));
-            // 줄바꿈까지 선택했으면 줄 끝 뒤를 조금 더 칠한다.
-            let x1 = x(sel.end.min(end)) + if sel.end > end { geom.char_width } else { 0.0 };
+            let x0 = x(range.start.max(start));
+            // 줄바꿈까지 걸쳐 있으면 줄 끝 뒤를 조금 더 칠한다.
+            let tail = if range.end > end {
+                geom.char_width
+            } else {
+                0.0
+            };
+            let x1 = x(range.end.min(end)) + tail;
             text_painter.rect_filled(
                 Rect::from_x_y_ranges(
                     geom.text_x() + x0..=geom.text_x() + x1,
                     y..=y + geom.row_height,
                 ),
                 0.0,
-                visuals.selection.bg_fill,
+                color,
             );
+        };
+        let first_match = matches.partition_point(|m| m.end <= start);
+        for m in matches[first_match..].iter().take_while(|m| m.start <= end) {
+            fill(m, match_fill);
         }
+        fill(&sel, visuals.selection.bg_fill);
         text_painter.galley(Pos2::new(geom.text_x(), y), galley, visuals.text_color());
     }
 

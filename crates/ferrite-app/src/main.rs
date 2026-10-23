@@ -6,6 +6,7 @@
 mod app;
 mod editor_view;
 mod file_tree;
+mod find_bar;
 mod fonts;
 mod theme;
 

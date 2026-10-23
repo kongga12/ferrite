@@ -1117,6 +1117,7 @@ name = "ferrite-core"
 version = "0.1.0"
 dependencies = [
  "encoding_rs",
+ "regex",
  "ropey",
  "tree-sitter",
  "tree-sitter-c",
