@@ -220,7 +220,23 @@
   - 코퍼스 확인(로컬, 저장소 밖): 매퍼 1,462개(MyBatis 676, iBatis 786)를 실패 없이 분석했다.
     - 문자열 치환 967곳을 찾았다. 따로 짠 단순 검사기와 파일마다 일치해 누락이 0이다.
     - 테스트: `FERRITE_EGOV_CORPUS=<경로> cargo test -p ferrite-egov --test corpus -- --ignored`
-- [ ] 2b-2 이동: Mapper 인터페이스·DAO 문자열 id ↔ XML 문장, refid·resultMap 정의로 이동, namespace ↔ 인터페이스 진단
+- [x] 2b-2 이동: Mapper 인터페이스·DAO 문자열 id ↔ XML 문장, refid·resultMap 정의로 이동
+  - 정의로 이동(F12·Ctrl+클릭)
+    - XML: `refid`·`resultMap`·`extends`·`select` → 정의(다른 파일 포함), MyBatis 문장 id → Mapper 인터페이스 메서드
+    - Java: Mapper 메서드 선언 → XML 문장
+    - Java 호출: `sampleMapper.selectX(vo)` → XML 문장. 받는 필드·변수의 선언 타입을 import → 같은 패키지 순으로 찾는다(타입 추론 없음).
+    - Java 문자열: DAO 방식 `selectList("ns.id", vo)` → XML 문장. iBatis는 id 그대로도 찾는다.
+  - 진단: XML 문장이 없는 Mapper 메서드(경고, 실행하면 BindingException)
+    - 매퍼 XML의 namespace와 이어진 인터페이스만 본다.
+    - `@Select` 등 SQL 애너테이션 메서드와 default 메서드는 뺀다.
+  - 허브: 요청을 그 기능을 지원한다고 알린 준비된 서버에만 보낸다(lemminx가 없어도 XML 이동이 된다).
+    - 정의 요청은 지원하는 서버 모두에 보내 결과를 합친다. jdt.ls와 egov를 함께 묻는다.
+    - 합친 결과가 여럿이면 목록으로 보여 준다. 커서가 있던 선언 자체는 뺀다.
+  - egov 서버는 위치를 UTF-16으로 주고받는다. 다른 서버의 결과와 합치므로 같은 단위를 쓴다.
+  - 코퍼스 확인(로컬): XML과 이어진 Mapper 인터페이스는 271개, XML이 필요한 메서드는 3,623개다.
+    - 그중 125개(3.5%)는 문장이 없다.
+    - 표본을 직접 확인했더니 모두 XML에 id가 없는 진짜 누락이었다. 일부는 실제로 호출되어 실행하면 오류가 날 코드였다.
+  - 미룸: namespace ↔ 인터페이스 불일치 진단. 문자열 id DAO 방식은 namespace가 임의 문자열이라 오탐이 많다.
 - [ ] 2b-3 `#{}` 속성 완성, resultType·parameterType 클래스 완성
 - [ ] 2b-4 JSP 하이라이팅(HTML + 스크립틀릿 Java + EL), 이스케이프 없는 EL 출력 XSS 경고
 - [ ] 2b-5 JSP taglib 완성, include·뷰 이름 → JSP 이동

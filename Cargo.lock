@@ -1250,6 +1250,7 @@ dependencies = [
  "ropey",
  "serde_json",
  "tree-sitter",
+ "tree-sitter-java",
  "tree-sitter-xml",
 ]
 

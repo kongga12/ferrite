@@ -75,8 +75,8 @@ fn 매퍼를_열면_sql_injection과_참조_진단을_보내고_고치면_지운
     let diagnostics = diagnostics_for(&lsp, "Board_SQL.xml");
     assert_eq!(
         lsp.encoding(),
-        PositionEncoding::Utf8,
-        "클라이언트가 먼저 제안한 UTF-8"
+        PositionEncoding::Utf16,
+        "다른 서버와 결과를 합치므로 그 서버들과 같은 UTF-16"
     );
 
     let rope = Rope::from_str(text);
@@ -109,6 +109,138 @@ fn 매퍼를_열면_sql_injection과_참조_진단을_보내고_고치면_지운
         diagnostics_for(&lsp, "Board_SQL.xml").is_empty(),
         "고치면 지운다"
     );
+
+    drop(lsp);
+    for _ in 0..50 {
+        if fs::remove_dir_all(&root).is_ok() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// 요청의 응답이 올 때까지 기다린다(그사이 온 진단은 버린다).
+fn response(lsp: &LanguageServer, id: i64) -> serde_json::Value {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        for event in lsp.poll_events() {
+            match event {
+                ServerEvent::Response { id: got, result } if got == id => {
+                    return result.unwrap_or_else(|e| panic!("오류 응답: {}", e.message));
+                }
+                ServerEvent::Exited(reason) => panic!("서버가 끝남: {reason}"),
+                _ => {}
+            }
+        }
+        assert!(Instant::now() < deadline, "응답이 오지 않음");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn 매퍼_xml과_java_사이를_정의로_이동하고_xml_문장이_없는_메서드를_경고한다() {
+    use ferrite_lsp::features::{parse_locations, position_params};
+
+    let root = project("nav");
+    let java_dir = root.join("src/main/java/egov/sample");
+    fs::create_dir_all(&java_dir).unwrap();
+    let mappers = root.join("src/main/resources/mapper");
+    let mapper_java = java_dir.join("SampleMapper.java");
+    fs::write(
+        &mapper_java,
+        "package egov.sample;\n\npublic interface SampleMapper {\n    List<SampleVO> selectSampleList(SampleVO vo);\n    int deleteSample(String id);\n}\n",
+    )
+    .unwrap();
+    let service = java_dir.join("SampleServiceImpl.java");
+    let service_text = "package egov.sample;\n\npublic class SampleServiceImpl {\n    private SampleMapper sampleMapper;\n\n    public List<SampleVO> list(SampleVO vo) {\n        dao.list(\"Board.selectBoard\", vo);\n        return sampleMapper.selectSampleList(vo);\n    }\n}\n";
+    fs::write(&service, service_text).unwrap();
+    fs::write(
+        mappers.join("Common_SQL.xml"),
+        "<mapper namespace=\"common\">\n  <sql id=\"paging\">LIMIT 10</sql>\n</mapper>\n",
+    )
+    .unwrap();
+    fs::write(
+        mappers.join("Board_SQL.xml"),
+        "<sqlMap namespace=\"Board\">\n  <select id=\"Board.selectBoard\">SELECT 1</select>\n</sqlMap>\n",
+    )
+    .unwrap();
+    let sample_xml = mappers.join("Sample_SQL.xml");
+    let sample_text = "<mapper namespace=\"egov.sample.SampleMapper\">\n  <select id=\"selectSampleList\">\n    SELECT * FROM sample\n    <include refid=\"common.paging\"/>\n  </select>\n</mapper>\n";
+    fs::write(&sample_xml, sample_text).unwrap();
+
+    let command = ServerCommand {
+        program: env!("CARGO_BIN_EXE_ferrite-egov-ls").into(),
+        ..Default::default()
+    };
+    let mut lsp = LanguageServer::start(&command, &root, || {}).unwrap();
+    let encoding = lsp.encoding();
+    let definition =
+        |lsp: &mut LanguageServer, path: &std::path::Path, text: &str, needle: &str| {
+            let rope = Rope::from_str(text);
+            let char_idx = rope.byte_to_char(text.find(needle).unwrap() + 1);
+            let params = position_params(path, &rope, char_idx, encoding).unwrap();
+            let id = lsp.request("textDocument/definition", params);
+            response(lsp, id)
+        };
+    let lines_of = |result: &serde_json::Value| -> Vec<(String, u32)> {
+        parse_locations(result)
+            .into_iter()
+            .map(|t| {
+                let name = t.path.file_name().unwrap().to_string_lossy().into_owned();
+                (name, t.range.start.line)
+            })
+            .collect()
+    };
+
+    lsp.did_open(&sample_xml, "xml", 1, sample_text);
+    lsp.did_open(&service, "java", 1, service_text);
+    assert_eq!(
+        lines_of(&definition(
+            &mut lsp,
+            &sample_xml,
+            sample_text,
+            "common.paging"
+        )),
+        [("Common_SQL.xml".to_owned(), 1)],
+        "refid → 다른 파일의 <sql>"
+    );
+    assert_eq!(
+        lines_of(&definition(
+            &mut lsp,
+            &sample_xml,
+            sample_text,
+            "selectSampleList"
+        )),
+        [("SampleMapper.java".to_owned(), 3)],
+        "문장 id → Mapper 인터페이스 메서드"
+    );
+    assert_eq!(
+        lines_of(&definition(
+            &mut lsp,
+            &service,
+            service_text,
+            "selectSampleList"
+        )),
+        [("Sample_SQL.xml".to_owned(), 1)],
+        "Mapper 호출 → XML 문장(필드 타입으로 Mapper를 찾음)"
+    );
+    assert_eq!(
+        lines_of(&definition(
+            &mut lsp,
+            &service,
+            service_text,
+            "Board.selectBoard"
+        )),
+        [("Board_SQL.xml".to_owned(), 1)],
+        "DAO 문자열 id → iBatis 문장"
+    );
+
+    let mapper_text = fs::read_to_string(&mapper_java).unwrap();
+    lsp.did_open(&mapper_java, "java", 1, &mapper_text);
+    let warnings = diagnostics_for(&lsp, "SampleMapper.java");
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(warnings[0].message.contains("deleteSample"));
+    assert_eq!(warnings[0].range.start.line, 4);
 
     drop(lsp);
     for _ in 0..50 {

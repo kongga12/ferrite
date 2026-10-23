@@ -328,10 +328,11 @@ pub const SERVERS: &[Server] = &[
         }]),
     },
     Server {
-        // egov 매퍼 진단(SQL Injection, 참조, 중복 id). XML의 주 서버는 lemminx이고 이것은 함께
-        // 붙는 보조 서버다. 다른 에디터는 같은 서버를 단독 실행 파일 `ferrite-egov-ls`로 쓴다.
+        // egov 매퍼 진단(SQL Injection, 참조, 중복 id)과 매퍼 XML ↔ Java 이동. XML의 주 서버는
+        // lemminx, Java는 jdt.ls이고 이것은 함께 붙는 보조 서버다. 다른 에디터는 같은 서버를 단독
+        // 실행 파일 `ferrite-egov-ls`로 쓴다.
         name: "ferrite-egov",
-        languages: &["xml"],
+        languages: &["xml", "java"],
         version: env!("CARGO_PKG_VERSION"),
         program: "ferrite-egov-ls",
         args: &[],

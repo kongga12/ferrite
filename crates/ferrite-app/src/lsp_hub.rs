@@ -17,7 +17,7 @@ use ferrite_lsp::install;
 use ferrite_lsp::position::PositionEncoding;
 use ferrite_lsp::problem::{Problem, to_problems};
 use ferrite_lsp::spring;
-use lsp_types::Diagnostic;
+use lsp_types::{CodeActionProviderCapability, Diagnostic, HoverProviderCapability, OneOf};
 use ropey::Rope;
 use serde_json::{Value, json};
 
@@ -43,6 +43,68 @@ fn restart_after(previous_crashes: usize, uptime: Duration) -> (usize, Option<Du
         previous_crashes + 1
     };
     (crashes, RESTART_DELAYS.get(crashes - 1).copied())
+}
+
+/// 여러 서버에 보내 결과를 합치는 요청. 정의 이동은 서버마다 아는 것이 달라(jdt.ls는 Java,
+/// egov 서버는 매퍼 XML) 모두에게 묻는다.
+const FAN_OUT: [&str; 1] = ["textDocument/definition"];
+
+/// 여러 서버에 보낸 요청 하나. 모두 답하면 합쳐 주 서버의 응답으로 앱에 돌려준다.
+struct FanOut {
+    lang: Lang,
+    /// 주 서버와 그 요청 ID(앱이 기다리는 ID).
+    primary: (&'static str, i64),
+    encoding: PositionEncoding,
+    /// 아직 답하지 않은 (서버, 요청 ID).
+    waiting: HashSet<(&'static str, i64)>,
+    results: Vec<Value>,
+    error: Option<RpcError>,
+}
+
+/// 이 서버가 이 요청을 처리한다고 알렸는가.
+fn supports(lsp: &LanguageServer, method: &str) -> bool {
+    let Some(c) = lsp.capabilities() else {
+        return false;
+    };
+    fn on<T>(provider: Option<OneOf<bool, T>>) -> bool {
+        matches!(provider, Some(OneOf::Left(true) | OneOf::Right(_)))
+    }
+    match method {
+        "textDocument/completion" => c.completion_provider.is_some(),
+        "textDocument/hover" => c
+            .hover_provider
+            .is_some_and(|h| !matches!(h, HoverProviderCapability::Simple(false))),
+        "textDocument/definition" => on(c.definition_provider),
+        "textDocument/references" => on(c.references_provider),
+        "textDocument/formatting" => on(c.document_formatting_provider),
+        "textDocument/rename" => on(c.rename_provider),
+        "textDocument/codeAction" | "codeAction/resolve" => c
+            .code_action_provider
+            .is_some_and(|p| !matches!(p, CodeActionProviderCapability::Simple(false))),
+        "workspace/executeCommand" => c.execute_command_provider.is_some(),
+        _ => true,
+    }
+}
+
+/// 위치 응답들(Location, Location[], LocationLink[], null)을 Location 배열 하나로 합친다.
+/// LocationLink는 대상의 선택 범위를 쓴다. 같은 위치는 한 번만 둔다.
+fn merge_locations(results: &[Value]) -> Value {
+    let mut merged: Vec<Value> = Vec::new();
+    let items = results.iter().flat_map(|r| match r {
+        Value::Array(items) => items.clone(),
+        Value::Null => Vec::new(),
+        single => vec![single.clone()],
+    });
+    for item in items {
+        let location = match item.get("targetUri") {
+            Some(uri) => json!({ "uri": uri, "range": item["targetSelectionRange"] }),
+            None => item,
+        };
+        if !merged.contains(&location) {
+            merged.push(location);
+        }
+    }
+    Value::Array(merged)
 }
 
 /// 서버가 연달아 죽은 횟수와 다시 띄울 시각.
@@ -172,6 +234,8 @@ pub struct LspHub {
     spring_requested: bool,
     /// 실행 중에 죽은 서버(자동 재시작 대기).
     crashes: HashMap<&'static str, Crashes>,
+    /// 여러 서버에 보내고 답을 기다리는 요청.
+    fan_outs: Vec<FanOut>,
     ctx: egui::Context,
 }
 
@@ -186,6 +250,7 @@ impl LspHub {
             internal: HashSet::new(),
             spring_requested: false,
             crashes: HashMap::new(),
+            fan_outs: Vec::new(),
             ctx,
         }
     }
@@ -199,6 +264,7 @@ impl LspHub {
             self.internal.clear();
             self.spring_requested = false;
             self.crashes.clear();
+            self.fan_outs.clear();
             self.root = root.map(Path::to_path_buf);
         }
     }
@@ -241,6 +307,8 @@ impl LspHub {
         self.requests.retain(|k, _| alive(k));
         self.relays.retain(|k, _| alive(k));
         self.internal.retain(alive);
+        // 빠진 서버에 보낸 것이 있는 묶음은 답이 다 올 수 없어 버린다(서버가 죽으면 요청도 사라진다).
+        self.fan_outs.retain(|g| g.waiting.iter().all(alive));
     }
 
     /// 문서를 서버들과 맞춘다. 매 프레임 열린 문서마다 부른다.
@@ -358,23 +426,63 @@ impl LspHub {
         params: impl FnOnce(PositionEncoding) -> Option<Value>,
     ) -> Option<i64> {
         self.sync_inner(path, lang, buffer, sync, true);
-        let spec = catalog::for_language(language_id(lang, path))?;
-        let server = self.servers.get_mut(spec.name)?;
-        let lsp = server.lsp.as_mut().filter(|l| l.is_ready())?;
-        if !server.opened.contains_key(path) {
-            return None;
+        // 이 요청을 처리한다고 알린 준비된 서버들(목록 순서). 첫 서버가 주 서버다.
+        let ready: Vec<&'static str> = catalog::servers_for(language_id(lang, path))
+            .map(|spec| spec.name)
+            .filter(|name| {
+                self.servers.get(name).is_some_and(|s| {
+                    s.opened.contains_key(path)
+                        && s.lsp
+                            .as_ref()
+                            .is_some_and(|l| l.is_ready() && supports(l, method))
+                })
+            })
+            .collect();
+        let (&primary, others) = ready.split_first()?;
+        let encoding = self.servers[primary].lsp.as_ref()?.encoding();
+        let params = params(encoding)?;
+        // 위치 단위가 같은 서버에만 함께 묻는다(합친 결과를 한 단위로 해석하므로).
+        let others: Vec<&'static str> = if FAN_OUT.contains(&method) {
+            others
+                .iter()
+                .copied()
+                .filter(|n| {
+                    self.servers[n]
+                        .lsp
+                        .as_ref()
+                        .is_some_and(|l| l.encoding() == encoding)
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let mut send = |name: &'static str| {
+            let lsp = self.servers.get_mut(name)?.lsp.as_mut()?;
+            Some((name, lsp.request(method, params.clone())))
+        };
+        let first = send(primary)?;
+        if others.is_empty() {
+            self.requests.insert(first, lang);
+        } else {
+            let mut waiting: HashSet<_> = others.into_iter().filter_map(&mut send).collect();
+            waiting.insert(first);
+            self.fan_outs.push(FanOut {
+                lang,
+                primary: first,
+                encoding,
+                waiting,
+                results: Vec::new(),
+                error: None,
+            });
         }
-        let params = params(lsp.encoding())?;
-        let id = lsp.request(method, params);
-        self.requests.insert((spec.name, id), lang);
-        Some(id)
+        Some(first.1)
     }
 
-    /// 입력하면 자동완성을 여는 문자(`.`, `::`의 `:` 등). 주 서버가 알려 준 것.
+    /// 입력하면 자동완성을 여는 문자(`.`, `::`의 `:` 등). 자동완성을 맡는 첫 서버가 알려 준 것.
     pub fn trigger_characters(&self, path: &Path, lang: Lang) -> Vec<char> {
-        let capabilities = catalog::for_language(language_id(lang, path))
-            .and_then(|spec| self.servers.get(spec.name))
-            .and_then(|s| s.lsp.as_ref())
+        let capabilities = catalog::servers_for(language_id(lang, path))
+            .filter_map(|spec| self.servers.get(spec.name)?.lsp.as_ref())
+            .find(|l| supports(l, "textDocument/completion"))
             .and_then(LanguageServer::capabilities);
         capabilities
             .and_then(|c| c.completion_provider)
@@ -519,6 +627,35 @@ impl LspHub {
                         result,
                         encoding,
                     });
+                } else if let Some(i) = self
+                    .fan_outs
+                    .iter()
+                    .position(|g| g.waiting.contains(&(name, id)))
+                {
+                    let group = &mut self.fan_outs[i];
+                    group.waiting.remove(&(name, id));
+                    match result {
+                        Ok(value) => group.results.push(value),
+                        Err(e) if group.primary == (name, id) => group.error = Some(e),
+                        Err(_) => {}
+                    }
+                    if group.waiting.is_empty() {
+                        let group = self.fan_outs.swap_remove(i);
+                        let merged = merge_locations(&group.results);
+                        // 다른 서버가 찾았으면 주 서버의 오류(내용 바뀜 등)는 묻는다.
+                        let result =
+                            match (merged.as_array().is_some_and(Vec::is_empty), group.error) {
+                                (true, Some(error)) => Err(error),
+                                _ => Ok(merged),
+                            };
+                        updates.push(HubUpdate::Response {
+                            lang: group.lang,
+                            server: group.primary.0,
+                            id: group.primary.1,
+                            result,
+                            encoding: group.encoding,
+                        });
+                    }
                 } else if let Some(relay) = self.relays.remove(&(name, id)) {
                     // 중계한 요청이 실패하면 null로 답한다(요청한 서버는 결과 없음으로 처리한다).
                     self.reply(relay.to, relay.id, result.unwrap_or(Value::Null));
@@ -722,6 +859,25 @@ mod tests {
         assert_eq!(
             restart_after(5, STABLE_UPTIME),
             (1, Some(Duration::from_secs(1)))
+        );
+    }
+
+    #[test]
+    fn 여러_서버의_위치_응답을_location_배열로_합친다() {
+        let range = |line: u32| json!({ "start": { "line": line, "character": 0 }, "end": { "line": line, "character": 1 } });
+        let jdt = json!({ "uri": "file:///a/Sample.java", "range": range(3) });
+        let egov = json!([
+            { "targetUri": "file:///a/Sample_SQL.xml", "targetRange": range(0), "targetSelectionRange": range(1) },
+            { "uri": "file:///a/Sample.java", "range": range(3) },
+        ]);
+        let merged = merge_locations(&[jdt, Value::Null, egov]);
+        assert_eq!(
+            merged,
+            json!([
+                { "uri": "file:///a/Sample.java", "range": range(3) },
+                { "uri": "file:///a/Sample_SQL.xml", "range": range(1) },
+            ]),
+            "LocationLink는 선택 범위로, 같은 위치는 한 번만"
         );
     }
 }
