@@ -20,6 +20,8 @@ use crate::uri::{path_to_uri, uri_to_path};
 pub struct FileEdit {
     pub path: PathBuf,
     pub edits: Vec<(LspRange, String)>,
+    /// 서버가 이 편집을 계산한 문서 버전(알려 준 경우). 지금 버전과 다르면 적용하면 안 된다.
+    pub version: Option<i32>,
 }
 
 fn text_edits(edits: Vec<TextEdit>) -> Vec<(LspRange, String)> {
@@ -32,38 +34,43 @@ pub fn parse_workspace_edit(value: &Value) -> Vec<FileEdit> {
     let Ok(edit) = serde_json::from_value::<WorkspaceEdit>(value.clone()) else {
         return Vec::new();
     };
-    let mut by_uri: Vec<(Uri, Vec<(LspRange, String)>)> = Vec::new();
-    let mut push =
-        |uri: Uri, edits: Vec<(LspRange, String)>| match by_uri.iter_mut().find(|(u, _)| *u == uri)
-        {
-            Some((_, existing)) => existing.extend(edits),
-            None => by_uri.push((uri, edits)),
-        };
+    type Collected = (Uri, Vec<(LspRange, String)>, Option<i32>);
+    let mut by_uri: Vec<Collected> = Vec::new();
+    let mut push = |uri: Uri, edits: Vec<(LspRange, String)>, version: Option<i32>| match by_uri
+        .iter_mut()
+        .find(|(u, _, _)| *u == uri)
+    {
+        Some((_, existing, _)) => existing.extend(edits),
+        None => by_uri.push((uri, edits, version)),
+    };
     match edit.document_changes {
         Some(DocumentChanges::Edits(docs)) => {
             for doc in docs {
-                push(doc.text_document.uri, one_of_edits(doc.edits));
+                let version = doc.text_document.version;
+                push(doc.text_document.uri, one_of_edits(doc.edits), version);
             }
         }
         Some(DocumentChanges::Operations(ops)) => {
             for op in ops {
                 if let DocumentChangeOperation::Edit(doc) = op {
-                    push(doc.text_document.uri, one_of_edits(doc.edits));
+                    let version = doc.text_document.version;
+                    push(doc.text_document.uri, one_of_edits(doc.edits), version);
                 }
             }
         }
         None => {
             for (uri, edits) in edit.changes.into_iter().flatten() {
-                push(uri, text_edits(edits));
+                push(uri, text_edits(edits), None);
             }
         }
     }
     by_uri
         .into_iter()
-        .filter_map(|(uri, edits)| {
+        .filter_map(|(uri, edits, version)| {
             Some(FileEdit {
                 path: uri_to_path(&uri)?,
                 edits,
+                version,
             })
         })
         .collect()
@@ -228,6 +235,7 @@ mod tests {
         );
         assert_eq!(parsed[0].edits.len(), 2);
         assert_eq!(parsed[0].edits[1].0.start, Position::new(5, 0));
+        assert_eq!(parsed[0].version, Some(3), "서버가 계산한 문서 버전을 보존");
     }
 
     #[test]

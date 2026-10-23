@@ -14,6 +14,7 @@ Rust로 작성한 크로스플랫폼(Windows / macOS / Linux) 경량 IDE.
   - 진단: 물결 밑줄, 말풍선, 문제 목록(상태바의 "오류 N · 경고 M" 클릭)
   - 자동완성 팝업, 호버 정보
   - 정의로 이동, 참조 목록
+  - 문서 포맷, 기호 이름 바꾸기(여러 파일), 코드 액션(빠른 수정·리팩터링)
 - 구문 강조(tree-sitter): Rust, Python, Go, C/C++, PHP, Java, SQL, TOML, JSON, YAML, XML, HTML, JavaScript, CSS
 - UTF-8(BOM 포함)·CP949 인코딩과 CRLF 감지·보존, 들여쓰기 방식 감지
 - 원자적 저장, 미저장 변경 확인(탭 닫기, 창 종료), 외부 변경 시 다시 불러오기·충돌 안내
@@ -33,6 +34,8 @@ Rust로 작성한 크로스플랫폼(Windows / macOS / Linux) 경량 IDE.
 | 단어 단위 이동·삭제 | `Ctrl+←/→`, `Ctrl+Backspace` (macOS는 `Option`) |
 | 자동완성 열기 | `Ctrl+Space` (macOS도 Ctrl) |
 | 정의로 이동 / 참조 찾기 | `F12`, `Ctrl+클릭` / `Shift+F12` |
+| 문서 포맷 / 기호 이름 바꾸기 | `Shift+Alt+F` / `F2` |
+| 코드 액션 | `Ctrl+.` 또는 `Alt+Enter` |
 
 ### 설정
 

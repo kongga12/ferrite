@@ -11,6 +11,7 @@ use ferrite_core::syntax::{Lang, MAX_SYNTAX_BYTES};
 use ferrite_lsp::client::{
     LanguageServer, RpcError, ServerCommand, ServerEvent, find_program, parse_diagnostics,
 };
+use ferrite_lsp::edits::{FileEdit, parse_workspace_edit};
 use ferrite_lsp::position::PositionEncoding;
 use lsp_types::Diagnostic;
 use serde_json::Value;
@@ -77,6 +78,13 @@ pub enum HubUpdate {
         lang: Lang,
         id: i64,
         result: Result<Value, RpcError>,
+        encoding: PositionEncoding,
+    },
+    /// 서버가 편집 적용을 요청했다(명령 실행 결과 등). 적용한 뒤 `reply`로 답해야 한다.
+    ApplyEdit {
+        lang: Lang,
+        id: Value,
+        edits: Vec<FileEdit>,
         encoding: PositionEncoding,
     },
 }
@@ -219,6 +227,18 @@ impl LspHub {
             .collect()
     }
 
+    /// 서버에 마지막으로 보낸 문서 버전(열지 않은 문서면 None). 서버가 편집에 붙인 버전과 비교한다.
+    pub fn document_version(&self, lang: Lang, path: &Path) -> Option<i32> {
+        self.servers.get(&lang)?.opened.get(path).copied()
+    }
+
+    /// `HubUpdate::ApplyEdit`에 답한다.
+    pub fn reply(&self, lang: Lang, id: Value, result: Value) {
+        if let Some(lsp) = self.servers.get(&lang).and_then(|s| s.lsp.as_ref()) {
+            lsp.reply(id, result);
+        }
+    }
+
     pub fn closed(&mut self, path: &Path, lang: Lang) {
         if let Some(server) = self.servers.get_mut(&lang)
             && server.opened.remove(path).is_some()
@@ -253,6 +273,15 @@ impl LspHub {
                         lang,
                         id,
                         result,
+                        encoding,
+                    }),
+                    ServerEvent::Request { id, params, .. } => updates.push(HubUpdate::ApplyEdit {
+                        lang,
+                        id,
+                        edits: params
+                            .get("edit")
+                            .map(parse_workspace_edit)
+                            .unwrap_or_default(),
                         encoding,
                     }),
                 }
