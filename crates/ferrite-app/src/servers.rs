@@ -46,6 +46,8 @@ struct Job {
 
 /// 창에 보여 줄 설치 상태. PATH 검색이 가볍지 않아 창을 열 때와 작업이 끝날 때만 다시 구한다.
 enum Status {
+    /// Ferrite에 들어 있다(설치·삭제 없음).
+    Builtin,
     Managed(Installed),
     OnPath(PathBuf),
     Missing,
@@ -80,6 +82,7 @@ impl ServerManager {
         self.statuses = SERVERS
             .iter()
             .map(|s| match install::installed(&self.root, s) {
+                _ if matches!(s.source, Source::Builtin(_)) => Status::Builtin,
                 Some(installed) => Status::Managed(installed),
                 None => find_program(s.program).map_or(Status::Missing, Status::OnPath),
             })
@@ -224,6 +227,9 @@ impl ServerManager {
             return;
         }
         match status {
+            Status::Builtin => {
+                ui.label(format!("Ferrite 내장 {}", server.version));
+            }
             Status::Managed(i) if i.is_outdated(server) => {
                 ui.label(format!(
                     "업데이트 있음 ({} → {})",
@@ -304,6 +310,7 @@ pub fn install_hint(server: &Server) -> String {
         }
         Source::Go(_) => "go 필요".into(),
         Source::Pip(_) => "python 필요".into(),
+        Source::Builtin(_) => String::new(),
     }
 }
 

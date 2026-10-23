@@ -14,6 +14,7 @@ path = "src/main.rs"
 dirs = "7.0.0"
 eframe.workspace = true
 ferrite-core.workspace = true
+ferrite-egov.workspace = true
 ferrite-lsp.workspace = true
 ropey.workspace = true
 lsp-types = "0.97"

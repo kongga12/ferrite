@@ -2796,7 +2796,7 @@ mod tests {
         assert!(harness.query_by_label_contains("설치 안 됨").is_none());
 
         drop(harness);
-        fs::remove_dir_all(&dir).unwrap();
+        remove_project(&dir);
     }
 
     #[test]
