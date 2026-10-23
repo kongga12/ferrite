@@ -51,6 +51,19 @@ pub struct EditorOptions<'a> {
     pub search_matches: &'a [Range<usize>],
     /// 언어 서버 진단(시작 순 정렬). 물결 밑줄과 말풍선으로 보여 준다.
     pub problems: &'a [Problem],
+    /// 언어 서버 호버 정보와 그것을 요청한 위치. 마우스가 그 위치에 있으면 말풍선에 함께 보인다.
+    pub hover: Option<(usize, &'a str)>,
+}
+
+/// 앱이 언어 서버 기능을 붙이는 데 쓰는 정보.
+pub struct EditorOutput {
+    pub response: egui::Response,
+    /// 커서의 화면 위치(자동완성 팝업을 띄울 자리).
+    pub cursor_rect: Rect,
+    /// 마우스가 올라가 있는 문자 위치(호버 요청용).
+    pub hover_pos: Option<usize>,
+    /// Ctrl(macOS는 Cmd)+클릭한 문자 위치(정의로 이동).
+    pub ctrl_click: Option<usize>,
 }
 
 struct Geometry {
@@ -80,7 +93,7 @@ pub fn show(
     state: &mut EditorState,
     opts: &EditorOptions<'_>,
     styler: Option<&mut dyn Styler>,
-) -> egui::Response {
+) -> EditorOutput {
     let font_id = egui::TextStyle::Monospace.resolve(ui.style());
     let (row_height, char_width) =
         ui.fonts_mut(|f| (f.row_height(&font_id), f.glyph_width(&font_id, ' ')));
@@ -137,11 +150,17 @@ pub fn show(
                 response.has_focus(),
             );
             let mut response = response;
+            let ctrl_click = (response.clicked() && ui.input(|i| i.modifiers.command))
+                .then(|| response.interact_pointer_pos())
+                .flatten()
+                .map(|p| hit_test(ui, buffer, &geom, p));
+            let mut hover_pos = None;
             if response.hovered()
                 && let Some(pointer) = response.hover_pos()
             {
                 let pos = hit_test(ui, buffer, &geom, pointer);
-                let messages: Vec<String> = opts
+                hover_pos = Some(pos);
+                let mut messages: Vec<String> = opts
                     .problems
                     .iter()
                     .filter(|p| p.range.start <= pos && pos <= p.range.end)
@@ -154,8 +173,13 @@ pub fn show(
                         format!("[{}] {}{source}", p.severity.label(), p.message)
                     })
                     .collect();
+                if let Some((at, text)) = opts.hover
+                    && at == pos
+                {
+                    messages.push(text.to_owned());
+                }
                 if !messages.is_empty() {
-                    response = response.on_hover_text_at_pointer(messages.join("\n"));
+                    response = response.on_hover_text_at_pointer(messages.join("\n\n"));
                 }
             }
 
@@ -167,8 +191,8 @@ pub fn show(
                     None,
                 );
             }
+            let cursor = cursor_rect(ui, buffer, state, &geom);
             if response.has_focus() {
-                let cursor = cursor_rect(ui, buffer, state, &geom);
                 let to_global = ui
                     .ctx()
                     .layer_transform_to_global(ui.layer_id())
@@ -182,7 +206,12 @@ pub fn show(
                     });
                 });
             }
-            response
+            EditorOutput {
+                response,
+                cursor_rect: cursor,
+                hover_pos,
+                ctrl_click,
+            }
         })
         .inner
 }

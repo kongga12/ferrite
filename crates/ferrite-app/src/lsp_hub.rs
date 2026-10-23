@@ -9,7 +9,7 @@ use eframe::egui;
 use ferrite_core::buffer::Buffer;
 use ferrite_core::syntax::{Lang, MAX_SYNTAX_BYTES};
 use ferrite_lsp::client::{
-    LanguageServer, ServerCommand, ServerEvent, find_program, parse_diagnostics,
+    LanguageServer, RpcError, ServerCommand, ServerEvent, find_program, parse_diagnostics,
 };
 use ferrite_lsp::position::PositionEncoding;
 use lsp_types::Diagnostic;
@@ -72,6 +72,13 @@ pub enum HubUpdate {
         encoding: PositionEncoding,
     },
     Message(String),
+    /// `request`로 보낸 요청의 결과.
+    Response {
+        lang: Lang,
+        id: i64,
+        result: Result<Value, RpcError>,
+        encoding: PositionEncoding,
+    },
 }
 
 pub struct LspHub {
@@ -174,6 +181,44 @@ impl LspHub {
         }
     }
 
+    /// 문서 위치 기반 기능 요청을 보낸다. 서버가 준비되지 않았으면 None.
+    /// 요청 전에 보내지 않은 변경을 먼저 보내 서버가 지금 내용을 기준으로 답하게 한다.
+    /// `params`는 서버가 고른 위치 인코딩을 받아 매개변수를 만든다.
+    pub fn request(
+        &mut self,
+        path: &Path,
+        lang: Lang,
+        buffer: &Buffer,
+        sync: &mut DocSync,
+        method: &str,
+        params: impl FnOnce(PositionEncoding) -> Option<Value>,
+    ) -> Option<i64> {
+        self.sync_inner(path, lang, buffer, sync, true);
+        let server = self.servers.get_mut(&lang)?;
+        let lsp = server.lsp.as_mut().filter(|l| l.is_ready())?;
+        if !server.opened.contains_key(path) {
+            return None;
+        }
+        let params = params(lsp.encoding())?;
+        Some(lsp.request(method, params))
+    }
+
+    /// 입력하면 자동완성을 여는 문자(`.`, `::`의 `:` 등). 서버가 알려 준 것.
+    pub fn trigger_characters(&self, lang: Lang) -> Vec<char> {
+        let capabilities = self
+            .servers
+            .get(&lang)
+            .and_then(|s| s.lsp.as_ref())
+            .and_then(LanguageServer::capabilities);
+        capabilities
+            .and_then(|c| c.completion_provider)
+            .and_then(|p| p.trigger_characters)
+            .into_iter()
+            .flatten()
+            .filter_map(|s| s.chars().next())
+            .collect()
+    }
+
     pub fn closed(&mut self, path: &Path, lang: Lang) {
         if let Some(server) = self.servers.get_mut(&lang)
             && server.opened.remove(path).is_some()
@@ -186,7 +231,7 @@ impl LspHub {
     /// 쌓인 서버 이벤트를 처리한다.
     pub fn process_events(&mut self) -> Vec<HubUpdate> {
         let mut updates = Vec::new();
-        for server in self.servers.values_mut() {
+        for (&lang, server) in &mut self.servers {
             let Some(lsp) = &server.lsp else {
                 continue;
             };
@@ -204,7 +249,12 @@ impl LspHub {
                             updates.push(update);
                         }
                     }
-                    ServerEvent::Response { .. } => {}
+                    ServerEvent::Response { id, result } => updates.push(HubUpdate::Response {
+                        lang,
+                        id,
+                        result,
+                        encoding,
+                    }),
                 }
             }
             if matches!(server.state, ServerState::Failed(_)) {

@@ -70,13 +70,34 @@ pub fn find_program(name: &str) -> Option<PathBuf> {
         })
 }
 
+/// 서버가 돌려준 오류 응답.
+#[derive(Debug, Clone)]
+pub struct RpcError {
+    pub code: i64,
+    pub message: String,
+}
+
+impl RpcError {
+    /// 문서가 바뀌는 중이라 서버가 버린 요청(ContentModified, RequestCancelled).
+    /// LSP 명세상 사용자에게 보일 오류가 아니며 같은 요청을 다시 보내면 된다.
+    pub fn is_retryable(&self) -> bool {
+        matches!(self.code, -32801 | -32800)
+    }
+}
+
+impl std::fmt::Display for RpcError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
 #[derive(Debug)]
 pub enum ServerEvent {
     /// 초기화가 끝나 기능을 쓸 수 있다.
     Ready,
     Response {
         id: i64,
-        result: Result<Value, String>,
+        result: Result<Value, RpcError>,
     },
     Notification {
         method: String,
@@ -319,6 +340,14 @@ fn initialize_params(root: &Path) -> Result<Value, String> {
             "textDocument": {
                 "synchronization": { "didSave": true, "dynamicRegistration": false },
                 "publishDiagnostics": { "relatedInformation": false, "versionSupport": true },
+                // 스니펫($1 등)은 아직 펼치지 못하므로 받지 않는다고 알린다.
+                "completion": {
+                    "completionItem": { "snippetSupport": false, "labelDetailsSupport": true },
+                    "contextSupport": true,
+                },
+                "hover": { "contentFormat": ["plaintext", "markdown"] },
+                "definition": { "linkSupport": true },
+                "references": {},
             },
             "workspace": { "workspaceFolders": true, "configuration": true },
             "window": { "workDoneProgress": false },
@@ -357,11 +386,14 @@ fn reader_loop(
             }
             (Some(id), None) => {
                 let result = match message.get("error") {
-                    Some(error) => Err(error
-                        .get("message")
-                        .and_then(Value::as_str)
-                        .unwrap_or("알 수 없는 오류")
-                        .to_owned()),
+                    Some(error) => Err(RpcError {
+                        code: error.get("code").and_then(Value::as_i64).unwrap_or(0),
+                        message: error
+                            .get("message")
+                            .and_then(Value::as_str)
+                            .unwrap_or("알 수 없는 오류")
+                            .to_owned(),
+                    }),
                     None => Ok(message.get("result").cloned().unwrap_or(Value::Null)),
                 };
                 if id.as_i64() == Some(INITIALIZE_ID) {

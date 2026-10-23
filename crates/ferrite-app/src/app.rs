@@ -16,8 +16,16 @@ use crate::editor_view::{self, EditorOptions, EditorState, Styler};
 use crate::file_tree::{FileTree, TreeAction};
 use crate::find_bar::{FindAction, FindBar};
 use crate::lsp_hub::{DocSync, HubUpdate, LspHub, ServerState};
+use crate::lsp_ui::{CompletionPopup, Pending, ReferenceList, word_at, word_start};
 use crate::watcher::FsWatcher;
+use ferrite_lsp::client::RpcError;
+use ferrite_lsp::features::{
+    char_range, completion_params, parse_completion, parse_hover, parse_locations, position_params,
+    references_params,
+};
+use ferrite_lsp::position::PositionEncoding;
 use ferrite_lsp::problem::{Severity, to_problems};
+use serde_json::Value;
 
 // Modifiers::COMMAND는 macOS에서 Cmd, 그 외 OS에서 Ctrl로 동작한다.
 const OPEN_FOLDER: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::O);
@@ -30,6 +38,52 @@ const FIND_PREV: KeyboardShortcut = KeyboardShortcut::new(Modifiers::SHIFT, Key:
 const NEW_FILE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::N);
 const SAVE_AS: KeyboardShortcut =
     KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::S);
+// 자동완성은 macOS에서도 실제 Ctrl 키다(Cmd+Space는 OS 검색).
+const COMPLETE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::CTRL, Key::Space);
+const GOTO_DEFINITION: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::F12);
+const FIND_REFERENCES: KeyboardShortcut = KeyboardShortcut::new(Modifiers::SHIFT, Key::F12);
+/// 마우스가 한 자리에 이만큼 머물면 호버 정보를 요청한다.
+const HOVER_DELAY: std::time::Duration = std::time::Duration::from_millis(400);
+
+/// 언어 서버에 보낼 위치 기반 요청 종류.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LspRequest {
+    Completion(Option<char>),
+    Hover,
+    Definition,
+    References,
+}
+
+/// 서버가 버린 요청(ContentModified 등)을 다시 보내는 최대 횟수.
+const MAX_LSP_RETRIES: u8 = 3;
+
+/// 요청을 다시 보낼 때 필요한 정보.
+struct Retry {
+    kind: LspRequest,
+    pos: usize,
+    path: PathBuf,
+    attempts: u8,
+}
+
+/// 에디터를 그린 프레임에서 언어 서버 기능에 넘길 정보.
+struct EditorFrame {
+    path: PathBuf,
+    focused: bool,
+    cursor_rect: egui::Rect,
+    hover_pos: Option<usize>,
+    ctrl_click: Option<usize>,
+    /// 이번 프레임에 입력된 글자.
+    typed: String,
+}
+
+/// 마우스가 머문 위치와 그 호버 정보.
+struct HoverState {
+    path: PathBuf,
+    pos: usize,
+    since: Instant,
+    requested: bool,
+    text: Option<String>,
+}
 
 /// 이름을 입력받아 실행할 파일 작업.
 enum NameTarget {
@@ -292,6 +346,11 @@ pub struct FerriteApp {
     hub: LspHub,
     /// 아래쪽 "문제" 목록을 보이는지.
     show_problems: bool,
+    /// 응답을 기다리는 언어 서버 요청.
+    pending: std::collections::HashMap<(Lang, i64), (Pending, Retry)>,
+    completion: Option<CompletionPopup>,
+    hover: Option<HoverState>,
+    references: Option<ReferenceList>,
     /// 사용자가 종료를 확정했으면 true. 이후의 창 닫기 요청은 막지 않는다.
     allow_close: bool,
     status: String,
@@ -347,6 +406,10 @@ impl FerriteApp {
             confirm_delete: None,
             hub: LspHub::new(cc.egui_ctx.clone()),
             show_problems: false,
+            pending: std::collections::HashMap::new(),
+            completion: None,
+            hover: None,
+            references: None,
         };
         if let Some(file) = file {
             app.open_file(file);
@@ -732,6 +795,187 @@ impl FerriteApp {
                 self.run_find_action(FindAction::Next);
             }
         }
+        // Shift가 붙은 단축키를 먼저 확인한다(F12가 Shift+F12에도 맞으므로).
+        if ctx.input_mut(|i| i.consume_shortcut(&FIND_REFERENCES)) {
+            self.request_at_cursor(LspRequest::References);
+        }
+        if ctx.input_mut(|i| i.consume_shortcut(&GOTO_DEFINITION)) {
+            self.request_at_cursor(LspRequest::Definition);
+        }
+        if ctx.input_mut(|i| i.consume_shortcut(&COMPLETE)) {
+            self.request_at_cursor(LspRequest::Completion(None));
+        }
+    }
+
+    fn request_at_cursor(&mut self, kind: LspRequest) {
+        if let Some(i) = self.active {
+            let pos = self.docs[i].buffer.selection().head;
+            self.lsp_request(kind, pos);
+        }
+    }
+
+    /// 활성 문서의 `pos` 위치로 언어 서버 요청을 보낸다. 응답은 `on_lsp_response`에서 처리한다.
+    fn lsp_request(&mut self, kind: LspRequest, pos: usize) {
+        self.send_lsp_request(kind, pos, 0);
+    }
+
+    fn send_lsp_request(&mut self, kind: LspRequest, pos: usize, attempts: u8) {
+        let Some(i) = self.active else {
+            return;
+        };
+        let doc = &mut self.docs[i];
+        let Some(lang) = doc.lang else {
+            return;
+        };
+        let path = doc.path.clone();
+        // 로프 복제는 내부 노드를 공유하므로 싸다.
+        let rope = doc.buffer.rope().clone();
+        let (method, pending) = match kind {
+            LspRequest::Completion(_) => (
+                "textDocument/completion",
+                Pending::Completion {
+                    path: path.clone(),
+                    anchor: word_start(&doc.buffer, pos),
+                },
+            ),
+            LspRequest::Hover => (
+                "textDocument/hover",
+                Pending::Hover {
+                    path: path.clone(),
+                    pos,
+                },
+            ),
+            LspRequest::Definition => ("textDocument/definition", Pending::Definition),
+            LspRequest::References => (
+                "textDocument/references",
+                Pending::References {
+                    name: word_at(&doc.buffer, pos),
+                },
+            ),
+        };
+        let params = |encoding: PositionEncoding| match kind {
+            LspRequest::Completion(trigger) => {
+                completion_params(&path, &rope, pos, encoding, trigger)
+            }
+            LspRequest::References => references_params(&path, &rope, pos, encoding),
+            LspRequest::Hover | LspRequest::Definition => {
+                position_params(&path, &rope, pos, encoding)
+            }
+        };
+        match self
+            .hub
+            .request(&doc.path, lang, &doc.buffer, &mut doc.lsp, method, params)
+        {
+            Some(id) => {
+                let retry = Retry {
+                    kind,
+                    pos,
+                    path: doc.path.clone(),
+                    attempts,
+                };
+                self.pending.insert((lang, id), (pending, retry));
+            }
+            // 호버·자동입력 자동완성은 조용히 넘어간다. 사용자가 직접 부른 기능만 알린다.
+            None if matches!(
+                kind,
+                LspRequest::Definition | LspRequest::References | LspRequest::Completion(None)
+            ) =>
+            {
+                self.status = "언어 서버가 준비되지 않았습니다".into();
+            }
+            None => {}
+        }
+    }
+
+    fn on_lsp_response(
+        &mut self,
+        lang: Lang,
+        id: i64,
+        result: Result<Value, RpcError>,
+        encoding: PositionEncoding,
+    ) {
+        let Some((pending, retry)) = self.pending.remove(&(lang, id)) else {
+            return;
+        };
+        let result = match result {
+            Ok(result) => result,
+            // 편집 직후에는 서버가 "내용이 바뀌었다"며 요청을 버린다. 같은 문서면 다시 보낸다.
+            Err(e) if e.is_retryable() && retry.attempts < MAX_LSP_RETRIES => {
+                if self.active.is_some_and(|i| self.docs[i].path == retry.path) {
+                    self.send_lsp_request(retry.kind, retry.pos, retry.attempts + 1);
+                }
+                return;
+            }
+            Err(e) => {
+                // 호버·자동완성 실패는 흔하고(위치가 맞지 않음 등) 알릴 필요가 없다.
+                if matches!(pending, Pending::Definition | Pending::References { .. }) {
+                    self.status = format!("언어 서버 오류: {e}");
+                }
+                return;
+            }
+        };
+        let active = self.active.map(|i| &self.docs[i]);
+        match pending {
+            Pending::Completion { path, anchor } => {
+                // 응답이 오기 전에 다른 문서로 옮겼으면 버린다.
+                let Some(doc) = active.filter(|d| d.path == path) else {
+                    return;
+                };
+                let list = parse_completion(&result, doc.buffer.rope(), encoding);
+                let mut popup = CompletionPopup::new(path, anchor, list.items, list.incomplete);
+                self.completion = popup.refilter(&doc.buffer).then_some(popup);
+            }
+            Pending::Hover { path, pos } => {
+                if let Some(hover) = &mut self.hover
+                    && hover.path == path
+                    && hover.pos == pos
+                {
+                    hover.text = parse_hover(&result);
+                }
+            }
+            Pending::Definition => match parse_locations(&result).into_iter().next() {
+                Some(target) => self.navigate_to(&target.path, target.range, encoding),
+                None => self.status = "정의를 찾지 못했습니다".into(),
+            },
+            Pending::References { name } => {
+                let targets = parse_locations(&result);
+                if targets.is_empty() {
+                    self.status = format!("'{name}'의 참조가 없습니다");
+                } else {
+                    let root = self.tree.as_ref().map(FileTree::root);
+                    self.references = Some(ReferenceList::new(&name, targets, encoding, root));
+                }
+            }
+        }
+    }
+
+    /// 다른 파일일 수도 있는 위치로 이동한다(열려 있지 않으면 연다).
+    fn navigate_to(&mut self, path: &Path, range: lsp_types::Range, encoding: PositionEncoding) {
+        self.open_file(path.to_path_buf());
+        let target = real_path(path);
+        let Some(i) = self.docs.iter().position(|d| d.path == target) else {
+            return;
+        };
+        self.active = Some(i);
+        let doc = &mut self.docs[i];
+        let start = char_range(doc.buffer.rope(), range, encoding).start;
+        doc.buffer.set_selection(Selection::caret(start));
+        doc.view.reveal_cursor();
+        self.focus_editor = true;
+    }
+
+    fn accept_completion(&mut self) {
+        let (Some(popup), Some(i)) = (self.completion.take(), self.active) else {
+            return;
+        };
+        let doc = &mut self.docs[i];
+        if let Some(item) = popup.selected()
+            && doc.path == popup.path
+        {
+            let edits = popup.edits(item, &doc.buffer);
+            doc.buffer.replace_ranges(edits, Instant::now());
+            doc.view.reveal_cursor();
+        }
     }
 
     fn open_find(&mut self, replace: bool) {
@@ -890,6 +1134,12 @@ impl FerriteApp {
                     }
                 }
                 HubUpdate::Message(message) => self.status = message,
+                HubUpdate::Response {
+                    lang,
+                    id,
+                    result,
+                    encoding,
+                } => self.on_lsp_response(lang, id, result, encoding),
             }
         }
     }
@@ -1049,7 +1299,153 @@ impl FerriteApp {
         }
     }
 
+    /// 자동완성 팝업이 열려 있으면 이동·적용·닫기 키를 에디터보다 먼저 가로챈다.
+    fn handle_popup_keys(&mut self, ctx: &egui::Context) {
+        if self.completion.is_none() {
+            return;
+        }
+        let pressed = |key| ctx.input_mut(|i| i.consume_key(Modifiers::NONE, key));
+        if pressed(Key::Escape) {
+            self.completion = None;
+            return;
+        }
+        if pressed(Key::Enter) || pressed(Key::Tab) {
+            self.accept_completion();
+            return;
+        }
+        if let Some(popup) = &mut self.completion {
+            if pressed(Key::ArrowDown) {
+                popup.move_selection(true);
+            }
+            if pressed(Key::ArrowUp) {
+                popup.move_selection(false);
+            }
+        }
+    }
+
+    /// 에디터를 그린 뒤 언어 서버 기능을 이어 붙인다: Ctrl+클릭 정의 이동, 입력에 따른
+    /// 자동완성 요청·다시 거르기, 팝업 그리기, 마우스가 머물면 호버 요청.
+    fn after_editor(&mut self, ctx: &egui::Context, frame: EditorFrame) {
+        let Some(i) = self.active else {
+            return;
+        };
+        if let Some(pos) = frame.ctrl_click {
+            self.lsp_request(LspRequest::Definition, pos);
+        }
+        let lang = self.docs[i].lang;
+        let server_ready =
+            lang.is_some_and(|l| matches!(self.hub.status(l), Some((_, ServerState::Ready))));
+        if frame.focused
+            && server_ready
+            && let (Some(lang), Some(last)) = (lang, frame.typed.chars().last())
+        {
+            let pos = self.docs[i].buffer.selection().head;
+            let popup_open = self
+                .completion
+                .as_ref()
+                .is_some_and(|p| p.path == frame.path);
+            let incomplete = self.completion.as_ref().is_some_and(|p| p.incomplete);
+            if self.hub.trigger_characters(lang).contains(&last) {
+                self.lsp_request(LspRequest::Completion(Some(last)), pos);
+            } else if crate::lsp_ui::is_identifier_char(last) && (!popup_open || incomplete) {
+                self.lsp_request(LspRequest::Completion(None), pos);
+            }
+        }
+        if let Some(popup) = &mut self.completion {
+            let doc = &self.docs[i];
+            if popup.path != doc.path || !popup.refilter(&doc.buffer) {
+                self.completion = None;
+            }
+        }
+        if let Some(popup) = &mut self.completion
+            && popup.ui(ctx, frame.cursor_rect.left_bottom())
+        {
+            self.accept_completion();
+            self.focus_editor = true;
+        }
+        match frame.hover_pos {
+            None => self.hover = None,
+            Some(pos) => {
+                let same = self
+                    .hover
+                    .as_ref()
+                    .is_some_and(|h| h.path == frame.path && h.pos == pos);
+                if !same {
+                    self.hover = Some(HoverState {
+                        path: frame.path.clone(),
+                        pos,
+                        since: Instant::now(),
+                        requested: false,
+                        text: None,
+                    });
+                }
+                if let Some(hover) = &mut self.hover
+                    && !hover.requested
+                {
+                    if hover.since.elapsed() >= HOVER_DELAY {
+                        hover.requested = true;
+                        self.lsp_request(LspRequest::Hover, pos);
+                    } else {
+                        ctx.request_repaint_after(HOVER_DELAY);
+                    }
+                }
+            }
+        }
+    }
+
+    /// 아래쪽 "참조" 목록. 항목을 누르면 그 위치로 이동한다.
+    fn references_panel(&mut self, ui: &mut egui::Ui) {
+        let Some(list) = &self.references else {
+            return;
+        };
+        let (mut jump, mut close) = (None, false);
+        egui::Panel::bottom("references")
+            .resizable(true)
+            .default_size(160.0)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.strong(&list.title);
+                    close = ui.small_button("×").on_hover_text("닫기").clicked();
+                });
+                egui::ScrollArea::vertical()
+                    .auto_shrink(false)
+                    .show(ui, |ui| {
+                        for (n, item) in list.items.iter().enumerate() {
+                            if ui
+                                .selectable_label(
+                                    false,
+                                    egui::RichText::new(&item.label).monospace(),
+                                )
+                                .clicked()
+                            {
+                                jump = Some(n);
+                            }
+                        }
+                    });
+            });
+        if close {
+            self.references = None;
+        } else if let Some(n) = jump {
+            let item = &list.items[n];
+            let (path, range, encoding) =
+                (item.target.path.clone(), item.target.range, list.encoding);
+            self.navigate_to(&path, range, encoding);
+        }
+    }
+
     fn editor(&mut self, ui: &mut egui::Ui) {
+        self.handle_popup_keys(ui.ctx());
+        // 에디터가 처리하기 전에 이번 프레임에 입력된 글자를 본다(자동완성 트리거 판단용).
+        let typed: String = ui.input(|i| {
+            i.events
+                .iter()
+                .filter_map(|e| match e {
+                    egui::Event::Text(t) => Some(t.as_str()),
+                    _ => None,
+                })
+                .collect()
+        });
+        let mut frame = None;
         let mut close = None;
         let mut find_action = None;
         let mut reload = false;
@@ -1108,17 +1504,34 @@ impl FerriteApp {
                 comment_token: doc.lang.and_then(Lang::line_comment),
                 search_matches: self.find.as_ref().map_or(&[], |f| f.matches()),
                 problems: &doc.lsp.problems,
+                hover: self
+                    .hover
+                    .as_ref()
+                    .filter(|h| h.path == doc.path)
+                    .and_then(|h| Some((h.pos, h.text.as_deref()?))),
             };
             let id = ui.make_persistent_id(&doc.path);
             if std::mem::take(&mut self.focus_editor) {
                 ui.memory_mut(|m| m.request_focus(id));
             }
             let styler = doc.syntax.as_mut().map(|s| s as &mut dyn Styler);
-            let response = editor_view::show(ui, id, &mut doc.buffer, &mut doc.view, &opts, styler);
+            let output = editor_view::show(ui, id, &mut doc.buffer, &mut doc.view, &opts, styler);
+            let focused = output.response.has_focus();
             if let Some(tab) = active_tab {
-                response.labelled_by(tab);
+                output.response.labelled_by(tab);
             }
+            frame = Some(EditorFrame {
+                path: doc.path.clone(),
+                focused,
+                cursor_rect: output.cursor_rect,
+                hover_pos: output.hover_pos,
+                ctrl_click: output.ctrl_click,
+                typed,
+            });
         });
+        if let Some(frame) = frame {
+            self.after_editor(ui.ctx(), frame);
+        }
         if let Some(action) = find_action {
             self.run_find_action(action);
         }
@@ -1234,6 +1647,7 @@ impl eframe::App for FerriteApp {
         self.menu_bar(ui);
         self.status_bar(ui);
         self.problems_panel(ui);
+        self.references_panel(ui);
         self.project_panel(ui);
         self.editor(ui);
         self.pending_close_dialog(ui.ctx());
@@ -1543,30 +1957,10 @@ mod tests {
 
     #[test]
     fn 언어_서버_진단이_상태바와_문제_목록에_보이고_누르면_이동한다() {
-        let ra_runs = ferrite_lsp::client::find_program("rust-analyzer").is_some_and(|p| {
-            std::process::Command::new(p)
-                .arg("--version")
-                .output()
-                .is_ok_and(|o| o.status.success())
-        });
-        if !ra_runs {
-            assert!(
-                std::env::var_os("CI").is_none(),
-                "CI에는 rust-analyzer가 있어야 합니다"
-            );
-            eprintln!("rust-analyzer가 없어 건너뜁니다");
+        if !rust_analyzer_runs() {
             return;
         }
-        let dir = std::env::temp_dir().join(format!("ferrite-lsp-ui-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(dir.join("src")).unwrap();
-        fs::write(
-            dir.join("Cargo.toml"),
-            "[package]\nname = \"lsp_ui\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
-        )
-        .unwrap();
-        let file = dir.join("src").join("main.rs");
-        fs::write(&file, "fn main() {\n    let 값 = ;\n}\n").unwrap();
+        let (dir, file) = cargo_project("diag", "fn main() {\n    let 값 = ;\n}\n");
 
         let mut harness = Harness::builder()
             .with_size(egui::vec2(1200.0, 800.0))
@@ -1613,12 +2007,155 @@ mod tests {
         );
 
         drop(harness);
-        // 서버 프로세스가 작업 폴더를 놓을 때까지 잠시 기다린다(Windows는 쓰는 중인 폴더를 못 지운다)
+        remove_project(&dir);
+    }
+
+    /// rust-analyzer가 실제로 실행되는지. 없으면 건너뛰되 CI에서는 실패시킨다.
+    fn rust_analyzer_runs() -> bool {
+        let runs = ferrite_lsp::client::find_program("rust-analyzer").is_some_and(|p| {
+            std::process::Command::new(p)
+                .arg("--version")
+                .output()
+                .is_ok_and(|o| o.status.success())
+        });
+        if !runs {
+            assert!(
+                std::env::var_os("CI").is_none(),
+                "CI에는 rust-analyzer가 있어야 합니다"
+            );
+            eprintln!("rust-analyzer가 없어 건너뜁니다");
+        }
+        runs
+    }
+
+    /// 임시 Cargo 프로젝트를 만들고 (폴더, src/main.rs)를 돌려준다.
+    fn cargo_project(name: &str, main: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("ferrite-lsp-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("src")).unwrap();
+        fs::write(
+            dir.join("Cargo.toml"),
+            format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"),
+        )
+        .unwrap();
+        let file = dir.join("src").join("main.rs");
+        fs::write(&file, main).unwrap();
+        (dir, file)
+    }
+
+    /// 서버 프로세스가 작업 폴더를 놓을 때까지 잠시 기다린다(Windows는 쓰는 중인 폴더를 못 지운다).
+    fn remove_project(dir: &std::path::Path) {
         for _ in 0..50 {
-            if fs::remove_dir_all(&dir).is_ok() {
+            if fs::remove_dir_all(dir).is_ok() {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
+    }
+
+    /// 조건이 맞을 때까지(최대 2분) 프레임을 돌린다. 첫 실행 rust-analyzer는 준비가 오래 걸린다.
+    fn run_until_slow(
+        harness: &mut Harness<'_, FerriteApp>,
+        done: impl Fn(&FerriteApp) -> bool,
+    ) -> bool {
+        for _ in 0..1200 {
+            harness.run();
+            if done(harness.state()) {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        false
+    }
+
+    #[test]
+    fn 자동완성_적용과_정의_이동과_참조_목록() {
+        if !rust_analyzer_runs() {
+            return;
+        }
+        let text = "struct Point {\n    x: i32,\n}\n\nimpl Point {\n    fn length(&self) -> i32 {\n        self.x\n    }\n}\n\nfn main() {\n    let p = Point { x: 1 };\n    p.length();\n    p.le\n}\n";
+        let (dir, file) = cargo_project("nav", text);
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(1200.0, 800.0))
+            .build_eframe(|cc| FerriteApp::new(cc, Some(file.clone())));
+        assert!(
+            run_until_slow(&mut harness, |app| {
+                matches!(app.hub.status(Lang::Rust), Some((_, ServerState::Ready)))
+            }),
+            "서버 준비 시간 초과"
+        );
+        // 이 테스트의 문서는 모두 ASCII라 바이트 위치 = 문자 위치
+        let caret = |h: &mut Harness<'_, FerriteApp>, pos: usize| {
+            h.state_mut().docs[0]
+                .buffer
+                .set_selection(Selection::caret(pos));
+        };
+
+        // 서버는 색인이 끝나기 전에 빈 결과를 돌려줄 수 있다(느린 CI 러너에서 실제로 발생).
+        // 사용자가 다시 누르듯, 원하는 결과가 나올 때까지 같은 키를 다시 누른다(최대 약 60초).
+        let retry_key = |h: &mut Harness<'_, FerriteApp>,
+                         pos: usize,
+                         modifiers: Modifiers,
+                         key: Key,
+                         done: &dyn Fn(&Harness<'_, FerriteApp>) -> bool| {
+            for _ in 0..60 {
+                caret(h, pos);
+                h.key_press_modifiers(modifiers, key);
+                for _ in 0..20 {
+                    h.run();
+                    if done(h) {
+                        return true;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+            }
+            false
+        };
+
+        // 자동완성
+        let end_of_le = text.find("p.le\n").unwrap() + 4;
+        assert!(
+            retry_key(&mut harness, end_of_le, Modifiers::CTRL, Key::Space, &|h| {
+                h.query_by_label_contains("length").is_some()
+            }),
+            "자동완성 팝업에 length가 없음"
+        );
+        harness.key_press(Key::Enter);
+        harness.run();
+        let after = harness.state().docs[0].buffer.text();
+        assert!(
+            after.contains("p.length\n") || after.contains("p.length()\n"),
+            "{after}"
+        );
+        assert!(harness.state().completion.is_none());
+
+        // F12: 호출 위치에서 정의(impl 안의 fn length, 6번째 줄)로 이동
+        let call = text.find("p.length();").unwrap() + 3;
+        assert!(
+            retry_key(&mut harness, call, Modifiers::NONE, Key::F12, &|h| {
+                let buffer = &h.state().docs[0].buffer;
+                buffer.pos_to_line_col(buffer.selection().head).0 == 5
+            }),
+            "정의로 이동하지 않음: {}",
+            harness.state().status
+        );
+
+        // Shift+F12: 참조 목록(정의 + 호출들)
+        assert!(
+            retry_key(&mut harness, call, Modifiers::SHIFT, Key::F12, &|h| {
+                h.state()
+                    .references
+                    .as_ref()
+                    .is_some_and(|r| r.items.len() >= 2)
+            }),
+            "참조 목록이 열리지 않음: {}",
+            harness.state().status
+        );
+        let refs = harness.state().references.as_ref().unwrap();
+        assert!(refs.title.contains("length"), "{}", refs.title);
+        assert!(refs.items.len() >= 2, "정의와 호출이 모두 있어야 한다");
+
+        drop(harness);
+        remove_project(&dir);
     }
 }

@@ -6,8 +6,12 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use ferrite_lsp::client::{
-    LanguageServer, ServerCommand, ServerEvent, find_program, parse_diagnostics,
+    LanguageServer, RpcError, ServerCommand, ServerEvent, find_program, parse_diagnostics,
 };
+use ferrite_lsp::features::{
+    completion_params, parse_completion, parse_hover, parse_locations, position_params,
+};
+use ropey::Rope;
 
 const TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -24,8 +28,22 @@ fn rust_analyzer() -> Option<ServerCommand> {
     })
 }
 
-fn temp_project() -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("ferrite-ra-test-{}", std::process::id()));
+/// rust-analyzer가 없으면 None. CI에서는 반드시 있어야 하므로 실패시킨다.
+fn require_rust_analyzer() -> Option<ServerCommand> {
+    let command = rust_analyzer();
+    if command.is_none() {
+        assert!(
+            std::env::var_os("CI").is_none(),
+            "CI에는 rust-analyzer가 설치되어 있어야 합니다"
+        );
+        eprintln!("rust-analyzer가 없어 건너뜁니다");
+    }
+    command
+}
+
+/// 같은 테스트 바이너리의 테스트는 병렬로 돌므로 이름으로 폴더를 나눈다.
+fn temp_project(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("ferrite-ra-{name}-{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(dir.join("src")).unwrap();
     fs::write(
@@ -47,15 +65,10 @@ fn dunce_like(path: PathBuf) -> PathBuf {
 
 #[test]
 fn rust_analyzer가_문법_오류를_진단으로_보낸다() {
-    let Some(command) = rust_analyzer() else {
-        assert!(
-            std::env::var_os("CI").is_none(),
-            "CI에는 rust-analyzer가 설치되어 있어야 합니다"
-        );
-        eprintln!("rust-analyzer가 없어 건너뜁니다");
+    let Some(command) = require_rust_analyzer() else {
         return;
     };
-    let root = temp_project();
+    let root = temp_project("diagnostics");
     let main = root.join("src").join("main.rs");
     let text = "fn main() {\n    let 이름 = ;\n}\n";
     fs::write(&main, text).unwrap();
@@ -104,6 +117,126 @@ fn rust_analyzer가_문법_오류를_진단으로_보낸다() {
         diagnostics.iter().any(|d| d.range.start.line == 1),
         "둘째 줄의 문법 오류가 있어야 한다: {diagnostics:#?}"
     );
+    drop(server);
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// 요청 하나의 응답을 기다린다(다른 이벤트는 버린다). 오류 응답이면 Err.
+fn wait_response(
+    server: &LanguageServer,
+    id: i64,
+    deadline: Instant,
+) -> Result<serde_json::Value, RpcError> {
+    loop {
+        assert!(Instant::now() < deadline, "응답 시간 초과(요청 {id})");
+        for event in server.poll_events() {
+            match event {
+                ServerEvent::Response { id: got, result } if got == id => return result,
+                ServerEvent::Exited(reason) => panic!("서버 종료: {reason}"),
+                _ => {}
+            }
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// 기대한 결과가 나올 때까지 같은 요청을 다시 보낸다. 서버는 색인이 끝나기 전에 빈 결과를,
+/// 문서가 바뀌는 중에는 ContentModified를 돌려주므로(앱도 재시도한다) 둘 다 다시 시도한다.
+/// 재시도할 수 없는 오류는 바로 실패시킨다.
+fn request_until<T>(
+    server: &mut LanguageServer,
+    method: &str,
+    params: &serde_json::Value,
+    deadline: Instant,
+    accept: impl Fn(&serde_json::Value) -> Option<T>,
+) -> T {
+    loop {
+        let id = server.request(method, params.clone());
+        match wait_response(server, id, deadline) {
+            Ok(result) => {
+                if let Some(found) = accept(&result) {
+                    return found;
+                }
+            }
+            Err(e) if e.is_retryable() => {}
+            Err(e) => panic!("{method} 오류: {e:?}"),
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{method}: 기대한 결과가 오지 않음"
+        );
+        std::thread::sleep(Duration::from_millis(300));
+    }
+}
+
+#[test]
+fn rust_analyzer로_자동완성_호버_정의를_받는다() {
+    let Some(command) = require_rust_analyzer() else {
+        return;
+    };
+    let root = temp_project("features");
+    let main = root.join("src").join("main.rs");
+    let text = "struct Point {\n    x: i32,\n}\n\nimpl Point {\n    fn length(&self) -> i32 {\n        self.x\n    }\n}\n\nfn main() {\n    let p = Point { x: 1 };\n    p.length();\n    p.le\n}\n";
+    fs::write(&main, text).unwrap();
+    let rope = Rope::from_str(text);
+    let at = |needle: &str, offset: usize| rope.byte_to_char(text.find(needle).unwrap() + offset);
+
+    let mut server = LanguageServer::start(&command, &root, || {}).expect("서버 시작");
+    server.did_open(&main, "rust", 1, text);
+    let deadline = Instant::now() + TIMEOUT;
+    while !server.is_ready() {
+        assert!(Instant::now() < deadline, "초기화 시간 초과");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let encoding = server.encoding();
+
+    // 자동완성
+    let after_dot = at("p.le\n", 4);
+    let params = completion_params(&main, &rope, after_dot, encoding, None).unwrap();
+    let completion = request_until(
+        &mut server,
+        "textDocument/completion",
+        &params,
+        deadline,
+        |r| {
+            parse_completion(r, &rope, encoding)
+                .items
+                .into_iter()
+                .find(|c| c.label.starts_with("length"))
+        },
+    );
+    assert_eq!(completion.kind, "함수");
+    assert!(completion.text.starts_with("length"), "{completion:?}");
+
+    // 호버: 타입 이름 위
+    let on_type = at("= Point {", 2);
+    let params = position_params(&main, &rope, on_type, encoding).unwrap();
+    let hover = request_until(
+        &mut server,
+        "textDocument/hover",
+        &params,
+        deadline,
+        parse_hover,
+    );
+    assert!(hover.contains("struct Point"), "{hover}");
+
+    // 정의로 이동: 메서드 호출 → impl 안의 fn length(5번째 줄, 0부터)
+    let on_call = at("p.length()", 3);
+    let params = position_params(&main, &rope, on_call, encoding).unwrap();
+    let targets = request_until(
+        &mut server,
+        "textDocument/definition",
+        &params,
+        deadline,
+        |r| {
+            let targets = parse_locations(r);
+            (!targets.is_empty()).then_some(targets)
+        },
+    );
+    assert_eq!(targets.len(), 1, "{targets:?}");
+    assert_eq!(targets[0].path, main);
+    assert_eq!(targets[0].range.start.line, 5);
+
     drop(server);
     let _ = fs::remove_dir_all(&root);
 }
