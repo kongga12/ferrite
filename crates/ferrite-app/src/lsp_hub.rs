@@ -45,12 +45,13 @@ fn restart_after(previous_crashes: usize, uptime: Duration) -> (usize, Option<Du
     (crashes, RESTART_DELAYS.get(crashes - 1).copied())
 }
 
-/// 여러 서버에 보내 결과를 합치는 요청. 정의 이동은 서버마다 아는 것이 달라(jdt.ls는 Java,
-/// egov 서버는 매퍼 XML) 모두에게 묻는다.
-const FAN_OUT: [&str; 1] = ["textDocument/definition"];
+/// 여러 서버에 보내 결과를 합치는 요청. 서버마다 아는 것이 달라 모두에게 묻는다
+/// (jdt.ls는 Java, lemminx는 XML 구조, egov 서버는 매퍼 XML ↔ Java).
+const FAN_OUT: [&str; 2] = ["textDocument/definition", "textDocument/completion"];
 
 /// 여러 서버에 보낸 요청 하나. 모두 답하면 합쳐 주 서버의 응답으로 앱에 돌려준다.
 struct FanOut {
+    method: &'static str,
     lang: Lang,
     /// 주 서버와 그 요청 ID(앱이 기다리는 ID).
     primary: (&'static str, i64),
@@ -105,6 +106,26 @@ fn merge_locations(results: &[Value]) -> Value {
         }
     }
     Value::Array(merged)
+}
+
+/// 자동완성 응답들(CompletionList, CompletionItem[], null)을 CompletionList 하나로 합친다.
+/// 하나라도 미완성이면 미완성이다(입력이 바뀌면 다시 물어야 한다).
+fn merge_completions(results: &[Value]) -> Value {
+    let mut items = Vec::new();
+    let mut incomplete = false;
+    for result in results {
+        match result {
+            Value::Array(list) => items.extend(list.iter().cloned()),
+            Value::Object(list) => {
+                incomplete |= list.get("isIncomplete").and_then(Value::as_bool) == Some(true);
+                if let Some(Value::Array(list)) = list.get("items") {
+                    items.extend(list.iter().cloned());
+                }
+            }
+            _ => {}
+        }
+    }
+    json!({ "isIncomplete": incomplete, "items": items })
 }
 
 /// 서버가 연달아 죽은 횟수와 다시 띄울 시각.
@@ -442,7 +463,8 @@ impl LspHub {
         let encoding = self.servers[primary].lsp.as_ref()?.encoding();
         let params = params(encoding)?;
         // 위치 단위가 같은 서버에만 함께 묻는다(합친 결과를 한 단위로 해석하므로).
-        let others: Vec<&'static str> = if FAN_OUT.contains(&method) {
+        let fan_out = FAN_OUT.iter().copied().find(|m| *m == method);
+        let others: Vec<&'static str> = if fan_out.is_some() {
             others
                 .iter()
                 .copied()
@@ -467,6 +489,7 @@ impl LspHub {
             let mut waiting: HashSet<_> = others.into_iter().filter_map(&mut send).collect();
             waiting.insert(first);
             self.fan_outs.push(FanOut {
+                method: fan_out?,
                 lang,
                 primary: first,
                 encoding,
@@ -478,19 +501,20 @@ impl LspHub {
         Some(first.1)
     }
 
-    /// 입력하면 자동완성을 여는 문자(`.`, `::`의 `:` 등). 자동완성을 맡는 첫 서버가 알려 준 것.
+    /// 입력하면 자동완성을 여는 문자(`.`, `::`의 `:` 등). 자동완성을 맡는 서버들이 알려 준 것을 합친다
+    /// (요청도 그 서버들에 함께 간다).
     pub fn trigger_characters(&self, path: &Path, lang: Lang) -> Vec<char> {
-        let capabilities = catalog::servers_for(language_id(lang, path))
+        let mut found: Vec<char> = catalog::servers_for(language_id(lang, path))
             .filter_map(|spec| self.servers.get(spec.name)?.lsp.as_ref())
-            .find(|l| supports(l, "textDocument/completion"))
-            .and_then(LanguageServer::capabilities);
-        capabilities
-            .and_then(|c| c.completion_provider)
-            .and_then(|p| p.trigger_characters)
-            .into_iter()
+            .filter(|l| l.is_ready() && supports(l, "textDocument/completion"))
+            .filter_map(LanguageServer::capabilities)
+            .filter_map(|c| c.completion_provider?.trigger_characters)
             .flatten()
             .filter_map(|s| s.chars().next())
-            .collect()
+            .collect();
+        found.sort_unstable();
+        found.dedup();
+        found
     }
 
     /// 이 서버에 마지막으로 보낸 문서 버전(열지 않은 문서면 None). 서버가 편집에 붙인 버전과 비교한다.
@@ -641,13 +665,20 @@ impl LspHub {
                     }
                     if group.waiting.is_empty() {
                         let group = self.fan_outs.swap_remove(i);
-                        let merged = merge_locations(&group.results);
+                        let (merged, empty) = if group.method == "textDocument/completion" {
+                            let merged = merge_completions(&group.results);
+                            let empty = merged["items"].as_array().is_some_and(Vec::is_empty);
+                            (merged, empty)
+                        } else {
+                            let merged = merge_locations(&group.results);
+                            let empty = merged.as_array().is_some_and(Vec::is_empty);
+                            (merged, empty)
+                        };
                         // 다른 서버가 찾았으면 주 서버의 오류(내용 바뀜 등)는 묻는다.
-                        let result =
-                            match (merged.as_array().is_some_and(Vec::is_empty), group.error) {
-                                (true, Some(error)) => Err(error),
-                                _ => Ok(merged),
-                            };
+                        let result = match (empty, group.error) {
+                            (true, Some(error)) => Err(error),
+                            _ => Ok(merged),
+                        };
                         updates.push(HubUpdate::Response {
                             lang: group.lang,
                             server: group.primary.0,
@@ -879,5 +910,23 @@ mod tests {
             ]),
             "LocationLink는 선택 범위로, 같은 위치는 한 번만"
         );
+    }
+
+    #[test]
+    fn 여러_서버의_자동완성을_목록_하나로_합친다() {
+        let merged = merge_completions(&[
+            json!({ "isIncomplete": false, "items": [{ "label": "select" }] }),
+            json!([{ "label": "id" }]),
+            Value::Null,
+            json!({ "isIncomplete": true, "items": [{ "label": "SampleVO" }] }),
+        ]);
+        assert_eq!(merged["isIncomplete"], true, "하나라도 미완성이면 미완성");
+        let labels: Vec<&str> = merged["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["label"].as_str().unwrap())
+            .collect();
+        assert_eq!(labels, ["select", "id", "SampleVO"], "주 서버가 먼저");
     }
 }

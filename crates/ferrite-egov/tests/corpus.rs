@@ -236,8 +236,10 @@ fn 코퍼스의_mapper_인터페이스와_xml_연결_통계() {
                 };
                 if ext == "java" {
                     interfaces.extend(
-                        java::interfaces(&text.text)
+                        java::parse_file(&text.text)
+                            .types
                             .into_iter()
+                            .filter(|t| t.is_interface)
                             .map(|i| (path.clone(), i)),
                     );
                 } else if let Some(m) = mapper::parse(&text.text)
@@ -278,4 +280,119 @@ fn 코퍼스의_mapper_인터페이스와_xml_연결_통계() {
     for line in missing.iter().take(15) {
         eprintln!("  {line}");
     }
+}
+
+/// 매퍼의 parameterType(iBatis parameterClass)이 별칭을 거쳐 프로젝트 클래스로 풀리는 비율.
+/// `#{}` 속성 완성이 실제 코드에서 얼마나 동작하는지 본다.
+#[test]
+#[ignore = "로컬 egov 코퍼스가 필요하다(FERRITE_EGOV_CORPUS)"]
+fn 코퍼스의_parameter_type_해석_통계() {
+    use ferrite_egov::java;
+
+    let Some(root) = std::env::var_os("FERRITE_EGOV_CORPUS") else {
+        eprintln!("FERRITE_EGOV_CORPUS가 없어 건너뜁니다");
+        return;
+    };
+    let (mut total, mut maps, mut in_project, mut outside) = (0, 0, 0, 0);
+    let mut unresolved: std::collections::BTreeMap<String, usize> = Default::default();
+    for project in std::fs::read_dir(&root).unwrap().flatten() {
+        if !project.path().is_dir() {
+            continue;
+        }
+        let mut classes: Vec<String> = Vec::new();
+        let mut aliases = Vec::new();
+        let mut types: Vec<String> = Vec::new();
+        for path in xml_files(&project.path())
+            .into_iter()
+            .chain(java_files(&project.path()))
+        {
+            let Some(text) = text_file::read(&path)
+                .ok()
+                .and_then(|b| text_file::decode(&b).ok())
+            else {
+                continue;
+            };
+            if path.extension().is_some_and(|e| e == "java") {
+                classes.extend(
+                    java::parse_file(&text.text)
+                        .types
+                        .into_iter()
+                        .map(|t| t.fqn),
+                );
+                continue;
+            }
+            aliases.push(mapper::aliases(&text.text));
+            if mapper::parse(&text.text).is_none() {
+                continue;
+            }
+            for key in ["parameterType=\"", "parameterClass=\""] {
+                for (at, _) in text.text.match_indices(key) {
+                    let rest = &text.text[at + key.len()..];
+                    if let Some(end) = rest.find('"') {
+                        types.push(rest[..end].to_owned());
+                    }
+                }
+            }
+        }
+        let alias_refs: Vec<&mapper::Aliases> = aliases.iter().collect();
+        let class_refs: Vec<&str> = classes.iter().map(String::as_str).collect();
+        for ty in types {
+            total += 1;
+            let lower = ty.to_lowercase();
+            if [
+                "map",
+                "hashmap",
+                "java.util.map",
+                "java.util.hashmap",
+                "egovmap",
+            ]
+            .contains(&lower.as_str())
+                || lower.ends_with(".egovmap")
+                || lower.ends_with("map") && !lower.contains('.')
+            {
+                maps += 1;
+                continue;
+            }
+            let fqn = mapper::resolve_alias(&ty, &alias_refs, &class_refs);
+            if class_refs.contains(&fqn.as_str()) {
+                in_project += 1;
+            } else if fqn.contains('.') {
+                outside += 1;
+            } else {
+                *unresolved.entry(ty).or_default() += 1;
+            }
+        }
+    }
+    let unresolved_total: usize = unresolved.values().sum();
+    eprintln!(
+        "parameterType {total}개: 프로젝트 클래스로 풀림 {in_project}, Map 계열 {maps}, 프로젝트 밖 클래스(java.lang 등) {outside}, 못 풂 {unresolved_total}"
+    );
+    let mut top: Vec<_> = unresolved.into_iter().collect();
+    top.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+    for (ty, n) in top.iter().take(10) {
+        eprintln!("  못 푼 이름 {ty}: {n}");
+    }
+}
+
+fn java_files(root: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            match entry.file_type() {
+                Ok(kind) if kind.is_dir() => {
+                    if !SKIP_DIRS.iter().any(|s| entry.file_name() == *s) {
+                        stack.push(path);
+                    }
+                }
+                Ok(_) if path.extension().is_some_and(|e| e == "java") => found.push(path),
+                _ => {}
+            }
+        }
+    }
+    found
 }

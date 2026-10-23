@@ -250,3 +250,145 @@ fn 매퍼_xml과_java_사이를_정의로_이동하고_xml_문장이_없는_메�
         std::thread::sleep(Duration::from_millis(100));
     }
 }
+
+#[test]
+fn 매퍼에서_vo_필드와_param_이름과_클래스_이름을_완성한다() {
+    use ferrite_lsp::features::{completion_params, parse_completion};
+
+    let root = project("complete");
+    let java = |path: &str, text: &str| {
+        let file = root.join("src/main/java").join(path);
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(file, text).unwrap();
+    };
+    java(
+        "egov/com/ComDefaultVO.java",
+        "package egov.com;\npublic class ComDefaultVO {\n    private int pageIndex;\n}\n",
+    );
+    java(
+        "egov/sample/SampleVO.java",
+        "package egov.sample;\nimport egov.com.ComDefaultVO;\npublic class SampleVO extends ComDefaultVO {\n    private static final long serialVersionUID = 1L;\n    private String id;\n    private UserVO user;\n}\n",
+    );
+    java(
+        "egov/sample/UserVO.java",
+        "package egov.sample;\npublic class UserVO {\n    private String userNm;\n}\n",
+    );
+    java(
+        "egov/sample/SampleMapper.java",
+        "package egov.sample;\npublic interface SampleMapper {\n    List<SampleVO> selectList(SampleVO vo);\n    int update(@Param(\"key\") String key, @Param(\"vo\") SampleVO vo);\n}\n",
+    );
+    let resources = root.join("src/main/resources");
+    fs::write(
+        resources.join("mybatis-config.xml"),
+        "<configuration><typeAliases><package name=\"egov.sample\"/></typeAliases></configuration>\n",
+    )
+    .unwrap();
+
+    let command = ServerCommand {
+        program: env!("CARGO_BIN_EXE_ferrite-egov-ls").into(),
+        ..Default::default()
+    };
+    let mut lsp = LanguageServer::start(&command, &root, || {}).unwrap();
+    let encoding = lsp.encoding();
+    // `|` 자리에서 자동완성한다. 문서마다 새 파일로 연다.
+    let mut serial = 0;
+    let mut complete = |lsp: &mut LanguageServer, marked: &str| {
+        serial += 1;
+        let file = resources.join(format!("mapper/Doc{serial}_SQL.xml"));
+        let offset = marked.find('|').unwrap();
+        let text = marked.replace('|', "");
+        lsp.did_open(&file, "xml", 1, &text);
+        let rope = Rope::from_str(&text);
+        let params =
+            completion_params(&file, &rope, rope.byte_to_char(offset), encoding, None).unwrap();
+        let id = lsp.request("textDocument/completion", params);
+        let result = response(lsp, id);
+        let list = parse_completion(&result, &rope, encoding);
+        let mut labels: Vec<String> = list.items.iter().map(|c| c.label.clone()).collect();
+        labels.sort();
+        (labels, list.items)
+    };
+    let mapper = |body: &str| {
+        format!("<mapper namespace=\"egov.sample.SampleMapper\">\n{body}\n</mapper>\n")
+    };
+
+    let (labels, _) = complete(
+        &mut lsp,
+        &mapper(
+            "<select id=\"other\" parameterType=\"sampleVO\">SELECT * WHERE id = #{|}</select>",
+        ),
+    );
+    assert_eq!(
+        labels,
+        ["id", "pageIndex", "user"],
+        "패키지 별칭, 상속 필드, static 제외"
+    );
+
+    let (labels, _) = complete(
+        &mut lsp,
+        &mapper("<select id=\"selectList\">SELECT * WHERE nm = #{user.|}</select>"),
+    );
+    assert_eq!(
+        labels,
+        ["userNm"],
+        "parameterType이 없으면 Mapper 메서드 매개변수, 점으로 내려가기"
+    );
+
+    let (labels, _) = complete(
+        &mut lsp,
+        &mapper("<update id=\"update\">SET a = #{|}</update>"),
+    );
+    assert_eq!(labels, ["key", "vo"], "@Param 이름");
+    let (labels, _) = complete(
+        &mut lsp,
+        &mapper("<update id=\"update\">SET a = #{vo.|}</update>"),
+    );
+    assert_eq!(labels, ["id", "pageIndex", "user"]);
+
+    let (_, items) = complete(
+        &mut lsp,
+        &mapper("<select id=\"a\" resultType=\"Sample|\">SELECT 1</select>"),
+    );
+    let vo = items
+        .iter()
+        .find(|c| c.label == "SampleVO")
+        .expect("SampleVO 후보");
+    assert_eq!(vo.text, "egov.sample.SampleVO", "고르면 FQN");
+    assert!(vo.range.is_some(), "속성값 전체를 바꾼다");
+    assert!(
+        items.iter().all(|c| c.label != "UserVO"),
+        "친 값으로 거른다"
+    );
+
+    let (labels, _) = complete(
+        &mut lsp,
+        &mapper(
+            "<resultMap id=\"m\" type=\"egov.sample.UserVO\">\n  <result property=\"|\" column=\"user_nm\"/>\n</resultMap>",
+        ),
+    );
+    assert_eq!(labels, ["userNm"], "resultMap property");
+
+    let (labels, _) = complete(
+        &mut lsp,
+        "<sqlMap namespace=\"Sample\">\n<typeAlias alias=\"searchVO\" type=\"egov.sample.SampleVO\"/>\n<select id=\"s\" parameterClass=\"searchVO\">WHERE a = #id# AND b = #|</select>\n</sqlMap>\n",
+    );
+    assert_eq!(
+        labels,
+        ["id", "pageIndex", "user"],
+        "iBatis #…#, sqlMap typeAlias"
+    );
+
+    let (labels, _) = complete(
+        &mut lsp,
+        &mapper("<select id=\"m\" parameterType=\"hashmap\">WHERE a = #{|}</select>"),
+    );
+    assert!(labels.is_empty(), "Map은 속성을 알 수 없다");
+
+    drop(lsp);
+    for _ in 0..50 {
+        if fs::remove_dir_all(&root).is_ok() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}

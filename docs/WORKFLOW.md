@@ -237,7 +237,21 @@
     - 그중 125개(3.5%)는 문장이 없다.
     - 표본을 직접 확인했더니 모두 XML에 id가 없는 진짜 누락이었다. 일부는 실제로 호출되어 실행하면 오류가 날 코드였다.
   - 미룸: namespace ↔ 인터페이스 불일치 진단. 문자열 id DAO 방식은 namespace가 임의 문자열이라 오탐이 많다.
-- [ ] 2b-3 `#{}` 속성 완성, resultType·parameterType 클래스 완성
+- [x] 2b-3 `#{}` 속성 완성, resultType·parameterType 클래스 완성
+  - `#{}`(iBatis `#…#`) 안: VO 필드 완성. 상속 필드를 포함하고 static은 뺀다. `#{user.`처럼 점으로 하위 필드로 내려간다.
+    - 타입은 문장의 parameterType(parameterClass)이다. 없으면 namespace 인터페이스 메서드의 매개변수에서 찾고, `@Param`이 있으면 그 이름이 첫 조각이다.
+    - Map 계열(map·hashmap·EgovMap)은 속성을 알 수 없어 후보가 없다.
+  - 별칭: iBatis sqlMap의 `typeAlias`, MyBatis 설정의 `typeAlias`·`package` 스캔.
+    - 그다음 프로젝트에서 단순 이름이 같은 클래스를 찾는다(대소문자 무시).
+  - 클래스 이름 속성값(resultType·parameterType·type·ofType·javaType·resultClass·parameterClass·class)
+    - 프로젝트 클래스·별칭·MyBatis 기본 별칭을 보여 준다. 고르면 속성값 전체를 FQN으로 바꾼다. 200개를 넘으면 미완성 목록이다.
+  - resultMap 안 `property`: resultMap 타입의 필드
+  - 문맥은 커서 앞 텍스트로 판단한다(입력 중인 XML은 따옴표가 닫히지 않아 트리가 깨지기 쉽다).
+  - Java 색인을 클래스까지 넓혔다: 필드, 상위 클래스, 메서드 매개변수, `@Param`.
+  - 허브: 자동완성도 지원하는 서버 모두에 묻고 합친다(XML은 lemminx + egov). 트리거 문자도 합친다.
+  - 코퍼스(로컬): parameterType 10,634건을 풀었다.
+    - 프로젝트 VO로 풀린 것 7,411건, Map 1,060건, 프로젝트 밖 클래스 1,991건이다.
+    - 못 푼 172건은 대부분 String·long 같은 기본 타입 별칭이다. 실제로 못 찾은 VO 이름은 `juVO` 6건이다.
 - [ ] 2b-4 JSP 하이라이팅(HTML + 스크립틀릿 Java + EL), 이스케이프 없는 EL 출력 XSS 경고
 - [ ] 2b-5 JSP taglib 완성, include·뷰 이름 → JSP 이동
 - [ ] 2b-6 Spring XML 설정·JPA 보완(Spring Boot LS가 다루지 못하는 부분)

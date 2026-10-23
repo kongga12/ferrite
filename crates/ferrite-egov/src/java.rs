@@ -1,37 +1,97 @@
-//! Java 쪽 분석: Mapper 인터페이스 색인과, 커서가 가리키는 매퍼 문장 찾기.
-//! 타입 추론은 하지 않는다. egov 코드의 관례(필드·지역 변수의 선언 타입, import, 같은 패키지)로
-//! 호출 대상 Mapper를 알아낸다.
+//! Java 쪽 분석: 타입 색인(Mapper 인터페이스, VO 클래스의 필드·상속, 메서드 매개변수)과
+//! 커서가 가리키는 매퍼 문장 찾기.
+//! 타입 추론은 하지 않는다. egov 코드의 관례(선언 타입, import, 같은 패키지)로 타입을 알아낸다.
 
 use std::ops::Range;
 
 use tree_sitter::{Node, Parser, Tree};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Field {
+    pub name: String,
+    /// 선언 타입의 단순 이름(제네릭 바깥 타입).
+    pub ty: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Param {
+    pub name: String,
+    pub ty: String,
+    /// `@Param("x")`로 붙인 이름. MyBatis는 이 이름으로 `#{x}`를 찾는다.
+    pub bound: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Method {
     pub name: String,
     /// 메서드 이름의 바이트 범위.
     pub range: Range<usize>,
-    /// XML 문장이 필요 없는 메서드: `@Select` 같은 SQL 애너테이션을 달았거나 본문이 있다
-    /// (default·static 메서드).
+    /// XML 문장이 필요한가. `@Select` 같은 SQL 애너테이션을 달았거나 본문이 있으면(default·static)
+    /// 필요 없다.
     pub needs_statement: bool,
+    pub params: Vec<Param>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Interface {
-    /// 패키지를 붙인 이름. MyBatis 매퍼의 namespace와 같아야 연결된다.
+pub struct TypeDecl {
+    /// 패키지를 붙인 이름. MyBatis 매퍼의 namespace·parameterType과 같아야 연결된다.
     pub fqn: String,
+    pub is_interface: bool,
+    /// `extends`로 쓴 상위 클래스 이름(쓴 그대로, 제네릭 바깥).
+    pub superclass: Option<String>,
+    /// 인스턴스 필드(static 제외).
+    pub fields: Vec<Field>,
     pub methods: Vec<Method>,
 }
 
-/// 한 파일에서 모은 인터페이스. 인터페이스가 없는 파일은 색인할 필요가 없다.
-pub fn interfaces(text: &str) -> Vec<Interface> {
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct JavaFile {
+    pub package: Option<String>,
+    /// `import a.b.C;`의 `a.b.C`(static·`*` 제외).
+    pub imports: Vec<String>,
+    pub types: Vec<TypeDecl>,
+}
+
+impl JavaFile {
+    /// 이 파일에서 쓴 타입 이름을 FQN으로: 점이 있으면 그대로, import(정확히 일치), 같은 패키지 순.
+    pub fn resolve(&self, name: &str) -> String {
+        if name.contains('.') {
+            return name.to_owned();
+        }
+        let suffix = format!(".{name}");
+        self.imports
+            .iter()
+            .find(|i| i.ends_with(&suffix))
+            .cloned()
+            .unwrap_or_else(|| qualify(self.package.as_deref(), name))
+    }
+}
+
+/// 파일 하나를 분석한다. 실패하면 빈 결과.
+pub fn parse_file(text: &str) -> JavaFile {
     let Some(tree) = parse(text) else {
-        return Vec::new();
+        return JavaFile::default();
     };
-    let package = package(tree.root_node(), text);
-    let mut found = Vec::new();
-    collect_interfaces(tree.root_node(), text, package.as_deref(), &mut found);
-    found
+    let root = tree.root_node();
+    let package = package(root, text);
+    let imports = children(root)
+        .filter(|n| n.kind() == "import_declaration")
+        // `import static`과 `import a.b.*`는 타입 하나를 가리키지 않는다.
+        .filter(|n| !children(*n).any(|c| matches!(c.kind(), "static" | "asterisk")))
+        .filter_map(|n| {
+            children(n)
+                .find(|c| matches!(c.kind(), "identifier" | "scoped_identifier"))
+                .and_then(|c| c.utf8_text(text.as_bytes()).ok())
+                .map(str::to_owned)
+        })
+        .collect();
+    let mut types = Vec::new();
+    collect_types(root, text, package.as_deref(), &mut types);
+    JavaFile {
+        package,
+        imports,
+        types,
+    }
 }
 
 /// 커서가 가리키는 매퍼 문장을 찾을 단서.
@@ -48,7 +108,6 @@ pub fn target_at(text: &str, offset: usize) -> Option<Target> {
     let tree = parse(text)?;
     let root = tree.root_node();
     let node = root.descendant_for_byte_range(offset, offset)?;
-    let package = package(root, text);
     match node.kind() {
         "string_fragment" => {
             let id = node.utf8_text(text.as_bytes()).ok()?;
@@ -58,13 +117,18 @@ pub fn target_at(text: &str, offset: usize) -> Option<Target> {
         "identifier" => {
             let parent = node.parent()?;
             let name = node.utf8_text(text.as_bytes()).ok()?.to_owned();
+            let file = || JavaFile {
+                package: package(root, text),
+                imports: parse_file(text).imports,
+                types: Vec::new(),
+            };
             match parent.kind() {
                 // 인터페이스에 선언한 메서드 이름.
                 "method_declaration" if parent.child_by_field_name("name") == Some(node) => {
                     let interface = ancestor(parent, "interface_declaration")?;
                     let simple = field_text(interface, "name", text)?;
                     Some(Target::Method {
-                        namespace: qualify(package.as_deref(), simple),
+                        namespace: qualify(package(root, text).as_deref(), simple),
                         name,
                     })
                 }
@@ -78,7 +142,7 @@ pub fn target_at(text: &str, offset: usize) -> Option<Target> {
                     };
                     let simple = declared_type(root, variable, text)?;
                     Some(Target::Method {
-                        namespace: resolve(root, text, package.as_deref(), &simple),
+                        namespace: file().resolve(&simple),
                         name,
                     })
                 }
@@ -132,40 +196,79 @@ fn qualify(package: Option<&str>, simple: &str) -> String {
     }
 }
 
-fn collect_interfaces(
-    node: Node<'_>,
-    text: &str,
-    package: Option<&str>,
-    found: &mut Vec<Interface>,
-) {
-    if node.kind() == "interface_declaration"
+fn modifiers<'a>(node: Node<'a>) -> Option<Node<'a>> {
+    children(node).find(|n| n.kind() == "modifiers")
+}
+
+/// 애너테이션 이름들(마지막 이름만: `org.x.Param` → `Param`)과 그 첫 문자열 인자.
+fn annotations<'t>(node: Node<'_>, text: &'t str) -> Vec<(&'t str, Option<&'t str>)> {
+    let Some(modifiers) = modifiers(node) else {
+        return Vec::new();
+    };
+    children(modifiers)
+        .filter(|n| matches!(n.kind(), "annotation" | "marker_annotation"))
+        .filter_map(|a| {
+            let name = field_text(a, "name", text)?;
+            let argument = a.child_by_field_name("arguments").and_then(|args| {
+                children(args)
+                    .find(|n| n.kind() == "string_literal")
+                    .and_then(|s| children(s).find(|n| n.kind() == "string_fragment"))
+                    .and_then(|s| s.utf8_text(text.as_bytes()).ok())
+            });
+            Some((name.rsplit('.').next().unwrap_or(name), argument))
+        })
+        .collect()
+}
+
+fn is_static(node: Node<'_>) -> bool {
+    modifiers(node).is_some_and(|m| children(m).any(|c| c.kind() == "static"))
+}
+
+fn collect_types(node: Node<'_>, text: &str, package: Option<&str>, found: &mut Vec<TypeDecl>) {
+    let is_interface = node.kind() == "interface_declaration";
+    if (is_interface || node.kind() == "class_declaration")
         && let Some(simple) = field_text(node, "name", text)
         && let Some(body) = node.child_by_field_name("body")
     {
-        let methods = children(body)
-            .filter(|n| n.kind() == "method_declaration")
-            .filter_map(|method| {
-                let name = method.child_by_field_name("name")?;
-                Some(Method {
-                    name: name.utf8_text(text.as_bytes()).ok()?.to_owned(),
-                    range: name.byte_range(),
-                    needs_statement: method.child_by_field_name("body").is_none()
-                        && !has_sql_annotation(method, text),
-                })
+        let superclass = node
+            .child_by_field_name("superclass")
+            .and_then(|s| children(s).find(|c| c.is_named()))
+            .and_then(|ty| simple_type_name(ty, text));
+        let fields = children(body)
+            .filter(|n| n.kind() == "field_declaration" && !is_static(*n))
+            .flat_map(|declaration| {
+                let ty = declaration
+                    .child_by_field_name("type")
+                    .and_then(|t| simple_type_name(t, text))
+                    .unwrap_or_default();
+                children(declaration)
+                    .filter(|d| d.kind() == "variable_declarator")
+                    .filter_map(|d| field_text(d, "name", text))
+                    .map(move |name| Field {
+                        name: name.to_owned(),
+                        ty: ty.clone(),
+                    })
+                    .collect::<Vec<_>>()
             })
             .collect();
-        found.push(Interface {
+        let methods = children(body)
+            .filter(|n| n.kind() == "method_declaration")
+            .filter_map(|method| method_of(method, text))
+            .collect();
+        found.push(TypeDecl {
             fqn: qualify(package, simple),
+            is_interface,
+            superclass,
+            fields,
             methods,
         });
     }
     for child in children(node) {
-        collect_interfaces(child, text, package, found);
+        collect_types(child, text, package, found);
     }
 }
 
-/// MyBatis 애너테이션(`@Select`, `@InsertProvider` 등)으로 SQL을 직접 단 메서드인가.
-fn has_sql_annotation(method: Node<'_>, text: &str) -> bool {
+fn method_of(method: Node<'_>, text: &str) -> Option<Method> {
     const SQL: [&str; 8] = [
         "Select",
         "Insert",
@@ -176,13 +279,34 @@ fn has_sql_annotation(method: Node<'_>, text: &str) -> bool {
         "UpdateProvider",
         "DeleteProvider",
     ];
-    let Some(modifiers) = children(method).find(|n| n.kind() == "modifiers") else {
-        return false;
-    };
-    children(modifiers)
-        .filter(|n| matches!(n.kind(), "annotation" | "marker_annotation"))
-        .filter_map(|a| field_text(a, "name", text))
-        .any(|name| SQL.contains(&name.rsplit('.').next().unwrap_or(name)))
+    let name = method.child_by_field_name("name")?;
+    let annotated = annotations(method, text)
+        .iter()
+        .any(|(a, _)| SQL.contains(a));
+    let params = method
+        .child_by_field_name("parameters")
+        .map(|list| {
+            children(list)
+                .filter(|p| p.kind() == "formal_parameter")
+                .filter_map(|p| {
+                    Some(Param {
+                        name: field_text(p, "name", text)?.to_owned(),
+                        ty: simple_type_name(p.child_by_field_name("type")?, text)?,
+                        bound: annotations(p, text)
+                            .into_iter()
+                            .find(|(a, _)| *a == "Param")
+                            .and_then(|(_, value)| value.map(str::to_owned)),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(Method {
+        name: name.utf8_text(text.as_bytes()).ok()?.to_owned(),
+        range: name.byte_range(),
+        needs_statement: method.child_by_field_name("body").is_none() && !annotated,
+        params,
+    })
 }
 
 /// 파일 안에서 이 이름으로 선언한 필드·지역 변수·매개변수의 타입(단순 이름).
@@ -208,29 +332,13 @@ fn declared_type(root: Node<'_>, variable: &str, text: &str) -> Option<String> {
     None
 }
 
-/// `SampleMapper`, `a.b.SampleMapper`, `List<X>`에서 바깥 타입의 단순 이름.
+/// `SampleMapper`, `a.b.SampleMapper`, `List<X>`에서 바깥 타입 이름(점이 있으면 그대로 둔다).
 fn simple_type_name(ty: Node<'_>, text: &str) -> Option<String> {
     let name_node = match ty.kind() {
         "generic_type" => children(ty).next()?,
         _ => ty,
     };
-    let full = name_node.utf8_text(text.as_bytes()).ok()?;
-    Some(full.rsplit('.').next().unwrap_or(full).to_owned())
-}
-
-/// 단순 이름을 import(정확히 일치) → 같은 패키지 순으로 정규화한다.
-fn resolve(root: Node<'_>, text: &str, package: Option<&str>, simple: &str) -> String {
-    let suffix = format!(".{simple}");
-    children(root)
-        .filter(|n| n.kind() == "import_declaration")
-        .filter_map(|import| {
-            children(import)
-                .find(|n| matches!(n.kind(), "identifier" | "scoped_identifier"))
-                .and_then(|n| n.utf8_text(text.as_bytes()).ok())
-        })
-        .find(|fqn| fqn.ends_with(&suffix))
-        .map(str::to_owned)
-        .unwrap_or_else(|| qualify(package, simple))
+    Some(name_node.utf8_text(text.as_bytes()).ok()?.to_owned())
 }
 
 #[cfg(test)]
@@ -240,6 +348,9 @@ mod tests {
     const MAPPER: &str = r#"package egov.sample.service.impl;
 
 import org.apache.ibatis.annotations.Select;
+import org.apache.ibatis.annotations.Param;
+import static java.util.Collections.emptyList;
+import egov.com.*;
 
 @Mapper("sampleMapper")
 public interface SampleMapper {
@@ -247,6 +358,7 @@ public interface SampleMapper {
     @Select("SELECT 1")
     int selectOne();
     default int helper() { return 0; }
+    int updateName(@Param("id") String id, @Param("name") String name);
 }
 "#;
 
@@ -267,12 +379,33 @@ public class SampleServiceImpl {
 }
 "#;
 
+    const VO: &str = r#"package egov.sample.service;
+
+import egov.com.cmm.ComDefaultVO;
+
+public class SampleVO extends ComDefaultVO implements Serializable {
+    private static final long serialVersionUID = 1L;
+    private String id;
+    private String name, description;
+    private List<FileVO> files;
+}
+"#;
+
     #[test]
-    fn 인터페이스와_xml이_필요한_메서드를_모은다() {
-        let found = interfaces(MAPPER);
-        assert_eq!(found.len(), 1);
-        assert_eq!(found[0].fqn, "egov.sample.service.impl.SampleMapper");
-        let methods: Vec<(&str, bool)> = found[0]
+    fn 인터페이스와_xml이_필요한_메서드와_매개변수를_모은다() {
+        let file = parse_file(MAPPER);
+        assert_eq!(
+            file.imports,
+            [
+                "org.apache.ibatis.annotations.Select",
+                "org.apache.ibatis.annotations.Param"
+            ],
+            "static·* import 제외"
+        );
+        let mapper = &file.types[0];
+        assert!(mapper.is_interface);
+        assert_eq!(mapper.fqn, "egov.sample.service.impl.SampleMapper");
+        let methods: Vec<(&str, bool)> = mapper
             .methods
             .iter()
             .map(|m| (m.name.as_str(), m.needs_statement))
@@ -282,15 +415,54 @@ public class SampleServiceImpl {
             [
                 ("selectSampleList", true),
                 ("selectOne", false),
-                ("helper", false)
+                ("helper", false),
+                ("updateName", true)
             ],
             "@Select와 default 메서드는 XML 문장이 필요 없다"
         );
+        assert_eq!(&MAPPER[mapper.methods[0].range.clone()], "selectSampleList");
+        assert_eq!(mapper.methods[0].params[0].ty, "SampleVO");
+        let bound: Vec<_> = mapper.methods[3]
+            .params
+            .iter()
+            .map(|p| p.bound.as_deref())
+            .collect();
+        assert_eq!(bound, [Some("id"), Some("name")]);
+        assert!(parse_file(SERVICE).types.iter().all(|t| !t.is_interface));
+    }
+
+    #[test]
+    fn vo의_인스턴스_필드와_상위_클래스를_모은다() {
+        let file = parse_file(VO);
+        let vo = &file.types[0];
+        assert_eq!(vo.fqn, "egov.sample.service.SampleVO");
+        assert_eq!(vo.superclass.as_deref(), Some("ComDefaultVO"));
+        let fields: Vec<(&str, &str)> = vo
+            .fields
+            .iter()
+            .map(|f| (f.name.as_str(), f.ty.as_str()))
+            .collect();
         assert_eq!(
-            &MAPPER[found[0].methods[0].range.clone()],
-            "selectSampleList"
+            fields,
+            [
+                ("id", "String"),
+                ("name", "String"),
+                ("description", "String"),
+                ("files", "List")
+            ],
+            "static 상수 제외, 한 줄 여러 선언"
         );
-        assert!(interfaces(SERVICE).is_empty());
+        assert_eq!(
+            file.resolve("ComDefaultVO"),
+            "egov.com.cmm.ComDefaultVO",
+            "import"
+        );
+        assert_eq!(
+            file.resolve("FileVO"),
+            "egov.sample.service.FileVO",
+            "같은 패키지"
+        );
+        assert_eq!(file.resolve("a.b.C"), "a.b.C");
     }
 
     #[test]
