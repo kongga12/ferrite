@@ -62,6 +62,27 @@
 
 **완료 조건**: 7개 언어에서 완성, 정의 이동, 진단이 3개 OS 모두 동작한다.
 
+### Phase 2b — egov 지원 (JSP · MyBatis)
+
+**목표**: egov 프로젝트의 JSP와 MyBatis 매퍼 XML을 IDE 수준으로 다룬다. 오픈소스 언어 서버가 없어 직접 만드는 영역이다.
+
+- `ferrite-egov-ls` 언어 서버 크레이트(Rust, LSP)
+- MyBatis:
+  - Mapper 메서드 ↔ XML 문장 이동
+  - 참조 진단(refid, resultMap, namespace)
+  - `${}` SQL Injection 경고
+  - `#{}` 속성 완성
+- JSP:
+  - HTML·Java·EL 하이라이팅
+  - taglib 완성
+  - 이스케이프 없는 EL 출력의 XSS 경고
+  - 뷰 이름 → JSP 이동
+- 테스트 코퍼스: 실제 egov 3.x·4.x 프로젝트의 JSP·매퍼 XML 표본. 고객사 소스는 저장소에 넣지 않고 로컬 경로로만 참조한다.
+
+**완료 조건**:
+- egov 3.x·4.x 표본 프로젝트에서 이동과 진단이 동작한다.
+- 코퍼스 기준으로 `${}` 사용과 이스케이프 없는 EL 출력을 빠짐없이 탐지한다.
+
 ### Phase 3 — 프로젝트 도구
 
 - 통합 터미널: portable-pty + alacritty_terminal. 여러 탭 지원. Windows ConPTY 검증
@@ -87,6 +108,7 @@
   - stdio JSON-RPC로 통신한다.
   - 쿼리는 반드시 PreparedStatement 파라미터 바인딩으로 실행한다.
 - 스키마 브라우저, SQL 콘솔(실행 계획 포함), 결과 그리드(가상 스크롤, CSV 내보내기)
+- Phase 2b와 연결: 매퍼 XML SQL의 테이블·컬럼 완성과 존재 여부 검증
 - 쿼리 취소, 대용량 결과 페이징, 트랜잭션 모드(수동/자동 커밋) 표시
 
 **완료 조건**: 5종 DB에 연결해 조회, 편집, 커밋, 롤백이 동작한다. 100만 행 결과를 스크롤할 때 메모리가 상한을 넘지 않는다.
@@ -117,10 +139,13 @@
 ## 4. 진행 순서와 의존 관계
 
 ```
-Phase 0 ─► Phase 1 ─► Phase 2 ─┬─► Phase 4
+Phase 0 ─► Phase 1 ─► Phase 2 ─┬─► Phase 2b (egov 지원)
+                               ├─► Phase 4
                                ├─► Phase 5 (Phase 1 에디터만 필요, 2와 병행 가능)
                                └─► Phase 3 ─► Phase 6 ─► Phase 7
 ```
+
+- Phase 2b(egov 지원)는 egov 개발에 바로 쓰려면 가장 먼저 필요한 기능이다. Phase 2의 LSP 클라이언트가 준비되면 Phase 3·4보다 앞당긴다.
 
 - Phase 5(DB)의 JDBC 사이드카는 Java 작업이라 Phase 2와 병행할 수 있다.
 - Phase 7의 패키징 스크립트는 언제든 앞당길 수 있다. 사내 배포가 필요해지는 시점에 진행한다.
