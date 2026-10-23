@@ -1,15 +1,29 @@
-//! Eclipse jdt.ls 실행. 공식 실행 스크립트(`bin/jdtls.py`)와 같은 JVM 인자로 equinox 런처를 띄우고,
-//! 설치 폴더에 lombok.jar가 있으면 에이전트로 붙인다.
+//! Java 언어 서버 실행.
+//! - jdt.ls: 공식 실행 스크립트(`bin/jdtls.py`)와 같은 JVM 인자로 equinox 런처를 띄우고, 설치 폴더에
+//!   lombok.jar가 있으면 에이전트로 붙인다. Spring Boot LS가 있으면 그 jdt.ls 확장 번들을 싣는다.
+//! - Spring Boot LS: VS Code 확장(vscode-spring-boot)과 같은 JVM 인자로 띄운다.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+use serde_json::{Value, json};
+
 use crate::client::{ServerCommand, find_program, hide_console};
+use crate::uri::path_to_uri;
 
 /// 목록에 고정한 jdt.ls(1.61.0)를 띄우는 데 필요한 최소 Java 버전. 프로젝트가 쓰는 Java(egov는
 /// 8·11도 흔하다)와는 별개로, 서버 프로세스만 이 버전 이상이면 된다. jdt.ls 1.62부터는 25다.
 pub const MIN_JAVA: u32 = 21;
 pub const LOMBOK_JAR: &str = "lombok.jar";
+/// Spring Boot LS가 jdt.ls에 싣는 확장 번들(vscode-spring-boot의 `javaExtensions`). vsix를 푼
+/// 폴더 기준. 이 번들이 있어야 jdt.ls가 `sts.java.*` 명령(클래스패스·타입 조회)을 처리한다.
+const SPRING_BUNDLES: [&str; 5] = [
+    "extension/jars/io.projectreactor.reactor-core.jar",
+    "extension/jars/org.reactivestreams.reactive-streams.jar",
+    "extension/jars/jdt-ls-commons.jar",
+    "extension/jars/jdt-ls-extension.jar",
+    "extension/jars/sts-gradle-tooling.jar",
+];
 
 /// `java -version` 출력에서 주 버전. `1.8.0_402` → 8, `21.0.11` → 21.
 pub fn parse_java_version(output: &str) -> Option<u32> {
@@ -58,13 +72,26 @@ fn java_version(java: &Path) -> Option<u32> {
     parse_java_version(&String::from_utf8_lossy(&output.stderr))
 }
 
+/// Spring Boot LS 설치 폴더에서 jdt.ls에 실을 번들. 하나라도 없으면 빈 목록(반쪽만 실으면
+/// jdt.ls가 번들을 못 풀어 오류를 낸다).
+pub fn spring_bundles(spring_dir: &Path) -> Vec<PathBuf> {
+    let bundles: Vec<PathBuf> = SPRING_BUNDLES.iter().map(|b| spring_dir.join(b)).collect();
+    if bundles.iter().all(|b| b.is_file()) {
+        bundles
+    } else {
+        Vec::new()
+    }
+}
+
 /// 설치 폴더 `dir`의 jdt.ls를 띄우는 명령. `data`는 프로젝트별 작업 폴더(색인, 빌드 상태).
+/// `bundles`는 함께 실을 jdt.ls 확장(Spring Boot LS 중계용).
 pub fn jdtls_command(
     java: PathBuf,
     java_major: u32,
     dir: &Path,
     launcher: &Path,
     data: &Path,
+    bundles: &[PathBuf],
 ) -> ServerCommand {
     let config = match std::env::consts::OS {
         "windows" => "config_win",
@@ -119,9 +146,40 @@ pub fn jdtls_command(
     args.push(launcher.to_string_lossy().into_owned());
     args.push("-data".into());
     args.push(data.to_string_lossy().into_owned());
+    let init_options = if bundles.is_empty() {
+        Value::Null
+    } else {
+        json!({ "bundles": bundles })
+    };
     ServerCommand {
         program: java,
         args,
+        init_options,
+    }
+}
+
+/// Spring Boot LS를 띄우는 명령. 로그는 `log`로 보낸다(표준 출력은 LSP 통신에 쓰므로).
+/// `project`는 작업 폴더로 알린다. jdt.ls 클래스패스 연동은 시작한 뒤 클라이언트가 켠다.
+pub fn spring_boot_command(java: PathBuf, jar: &Path, log: &Path, project: &Path) -> ServerCommand {
+    let args = [
+        // ponytail: 힙은 VS Code 확장 기본값. 큰 프로젝트용 조정은 필요해지면 settings.toml로.
+        "-Xmx1024m".to_owned(),
+        "-Dsts.lsp.client=vscode".into(),
+        "-Dspring.config.location=classpath:/application.properties".into(),
+        "-Djdk.util.zip.disableZip64ExtraFieldValidation=true".into(),
+        "-Dspring.main.web-application-type=NONE".into(),
+        "-Dspring.profiles.active=file-logging".into(),
+        format!("-Dlogging.file.name={}", log.display()),
+        "-Dlogging.level.root=warn".into(),
+        "-Xlog:jni+resolve=off".into(),
+        "-jar".into(),
+        jar.to_string_lossy().into_owned(),
+    ];
+    let folders: Vec<_> = path_to_uri(project).into_iter().collect();
+    ServerCommand {
+        program: java,
+        args: args.to_vec(),
+        init_options: json!({ "workspaceFolders": folders, "enableJdtClasspath": false }),
     }
 }
 
@@ -153,7 +211,7 @@ mod tests {
         let launcher = dir.join("plugins/org.eclipse.equinox.launcher_1.7.0.jar");
         let data = dir.join("data");
 
-        let without = jdtls_command("java".into(), 21, &dir, &launcher, &data);
+        let without = jdtls_command("java".into(), 21, &dir, &launcher, &data, &[]);
         assert!(!without.args.iter().any(|a| a.starts_with("-javaagent:")));
         assert!(
             !without
@@ -178,7 +236,14 @@ mod tests {
         assert_eq!(tail[3], data.to_string_lossy());
 
         fs::write(dir.join(LOMBOK_JAR), b"").unwrap();
-        let with = jdtls_command("java".into(), 25, &dir, &launcher, &data);
+        let with = jdtls_command(
+            "java".into(),
+            25,
+            &dir,
+            &launcher,
+            &data,
+            &[dir.join("b.jar")],
+        );
         let agent = with
             .args
             .iter()
@@ -195,6 +260,54 @@ mod tests {
                 .any(|a| a.contains("maxGeneralEntitySizeLimit")),
             "JDK 24 이상"
         );
+        assert!(
+            without.init_options.is_null(),
+            "번들이 없으면 초기화 옵션도 없다"
+        );
+        let bundles = with.init_options["bundles"].as_array().unwrap();
+        assert!(bundles[0].as_str().unwrap().ends_with("b.jar"));
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn spring_번들은_다섯_개가_모두_있을_때만_싣는다() {
+        let dir =
+            std::env::temp_dir().join(format!("ferrite-spring-bundles-{}", std::process::id()));
+        fs::create_dir_all(dir.join("extension/jars")).unwrap();
+        for bundle in &SPRING_BUNDLES[..4] {
+            fs::write(dir.join(bundle), b"").unwrap();
+        }
+        assert!(
+            spring_bundles(&dir).is_empty(),
+            "하나라도 빠지면 싣지 않는다"
+        );
+        fs::write(dir.join(SPRING_BUNDLES[4]), b"").unwrap();
+        assert_eq!(spring_bundles(&dir).len(), 5);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn spring_boot_ls는_로그를_파일로_보내고_작업_폴더를_알린다() {
+        let project = std::env::temp_dir().join("demo");
+        let cmd = spring_boot_command(
+            "java".into(),
+            Path::new("ls/spring-boot-language-server.jar"),
+            Path::new("logs/server.log"),
+            &project,
+        );
+        let tail = &cmd.args[cmd.args.len() - 2..];
+        assert_eq!(tail[0], "-jar");
+        assert!(tail[1].ends_with("spring-boot-language-server.jar"));
+        assert!(
+            cmd.args
+                .iter()
+                .any(|a| a.starts_with("-Dlogging.file.name=") && a.ends_with("server.log"))
+        );
+        assert_eq!(cmd.init_options["enableJdtClasspath"], false);
+        let folder = cmd.init_options["workspaceFolders"][0].as_str().unwrap();
+        assert!(
+            folder.starts_with("file://") && folder.ends_with("/demo"),
+            "{folder}"
+        );
     }
 }

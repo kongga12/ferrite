@@ -26,10 +26,12 @@ const STDERR_TAIL_LINES: usize = 20;
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
 const INITIALIZE_ID: i64 = 0;
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct ServerCommand {
     pub program: PathBuf,
     pub args: Vec<String>,
+    /// `initialize`의 `initializationOptions`. 필요 없으면 Null.
+    pub init_options: Value,
 }
 
 /// PATH 다음으로 찾아볼 흔한 설치 위치. macOS에서 Finder로 실행한 앱은 셸의 PATH를 물려받지
@@ -69,6 +71,14 @@ pub fn find_program(name: &str) -> Option<PathBuf> {
                 })
                 .find(|p| p.is_file())
         })
+}
+
+/// 클라이언트가 직접 답하지 않고 `ServerEvent::Request`로 넘기는 서버 요청.
+fn is_relayed_request(method: &str) -> bool {
+    matches!(
+        method,
+        "workspace/applyEdit" | "workspace/executeClientCommand"
+    ) || method.starts_with("sts/")
 }
 
 /// 창 없는 앱(릴리스 빌드)에서 콘솔 프로그램을 띄우면 검은 창이 잠깐 뜨므로 막는다.
@@ -202,7 +212,7 @@ impl LanguageServer {
             "jsonrpc": "2.0",
             "id": INITIALIZE_ID,
             "method": "initialize",
-            "params": initialize_params(root)?,
+            "params": initialize_params(root, &command.init_options)?,
         });
         if let Err(e) = write_message(&mut *lock(&stdin), &encode(&initialize)) {
             let _ = child.kill();
@@ -340,13 +350,13 @@ pub fn parse_diagnostics(params: &Value) -> Option<(PathBuf, Vec<Diagnostic>)> {
     Some((uri_to_path(&params.uri)?, params.diagnostics))
 }
 
-fn initialize_params(root: &Path) -> Result<Value, String> {
+fn initialize_params(root: &Path, init_options: &Value) -> Result<Value, String> {
     let root_uri = path_to_uri(root)?;
     let name = root.file_name().map_or_else(
         || root.display().to_string(),
         |n| n.to_string_lossy().into_owned(),
     );
-    Ok(json!({
+    let mut params = json!({
         "processId": std::process::id(),
         "clientInfo": { "name": "Ferrite", "version": env!("CARGO_PKG_VERSION") },
         "rootUri": root_uri,
@@ -385,11 +395,18 @@ fn initialize_params(root: &Path) -> Result<Value, String> {
                 "workspaceFolders": true,
                 "configuration": true,
                 "applyEdit": true,
+                // 코드 액션 명령·중계로 workspace/executeCommand를 보낸다. Spring Boot LS는 이것이
+                // 없으면 명령 목록을 만들지 않아 초기화하다 죽는다.
+                "executeCommand": { "dynamicRegistration": false },
                 "workspaceEdit": { "documentChanges": true, "resourceOperations": [] },
             },
             "window": { "workDoneProgress": false },
         },
-    }))
+    });
+    if !init_options.is_null() {
+        params["initializationOptions"] = init_options.clone();
+    }
+    Ok(params)
 }
 
 fn reader_loop(
@@ -418,10 +435,11 @@ fn reader_loop(
         };
         let method = message.get("method").and_then(Value::as_str);
         match (message.get("id"), method) {
-            // 편집 적용 요청은 앱의 문서를 바꿔야 하므로 앱으로 넘기고, 나머지는 바로 답한다.
-            (Some(id), Some("workspace/applyEdit")) => send(ServerEvent::Request {
+            // 편집 적용은 앱의 문서를 바꿔야 하고, 클라이언트 명령·Spring(`sts/`) 요청은 다른 서버로
+            // 중계해야 하므로 넘긴다. 나머지는 바로 답한다.
+            (Some(id), Some(method)) if is_relayed_request(method) => send(ServerEvent::Request {
                 id: id.clone(),
-                method: "workspace/applyEdit".into(),
+                method: method.to_owned(),
                 params: message.get("params").cloned().unwrap_or(Value::Null),
             }),
             (Some(id), Some(method)) => {

@@ -36,10 +36,11 @@ pub enum Lang {
     Html,
     JavaScript,
     Css,
+    Properties,
 }
 
 impl Lang {
-    pub const ALL: [Lang; 15] = [
+    pub const ALL: [Lang; 16] = [
         Lang::Rust,
         Lang::Python,
         Lang::Go,
@@ -55,6 +56,7 @@ impl Lang {
         Lang::Html,
         Lang::JavaScript,
         Lang::Css,
+        Lang::Properties,
     ];
 
     pub fn from_path(path: &Path) -> Option<Lang> {
@@ -79,6 +81,7 @@ impl Lang {
             "html" | "htm" | "jsp" => Lang::Html,
             "js" | "mjs" | "cjs" => Lang::JavaScript,
             "css" => Lang::Css,
+            "properties" => Lang::Properties,
             _ => return None,
         })
     }
@@ -100,6 +103,7 @@ impl Lang {
             Lang::Html => "HTML",
             Lang::JavaScript => "JavaScript",
             Lang::Css => "CSS",
+            Lang::Properties => "Properties",
         }
     }
 
@@ -121,6 +125,7 @@ impl Lang {
             Lang::Html => "html",
             Lang::JavaScript => "javascript",
             Lang::Css => "css",
+            Lang::Properties => "properties",
         }
     }
 
@@ -129,7 +134,7 @@ impl Lang {
         match self {
             Lang::Rust | Lang::Go | Lang::C | Lang::Cpp | Lang::Php | Lang::Java => Some("//"),
             Lang::JavaScript => Some("//"),
-            Lang::Python | Lang::Toml | Lang::Yaml => Some("#"),
+            Lang::Python | Lang::Toml | Lang::Yaml | Lang::Properties => Some("#"),
             Lang::Sql => Some("--"),
             Lang::Json | Lang::Xml | Lang::Html | Lang::Css => None,
         }
@@ -152,6 +157,7 @@ impl Lang {
             Lang::Html => tree_sitter_html::LANGUAGE.into(),
             Lang::JavaScript => tree_sitter_javascript::LANGUAGE.into(),
             Lang::Css => tree_sitter_css::LANGUAGE.into(),
+            Lang::Properties => tree_sitter_properties::LANGUAGE.into(),
         }
     }
 
@@ -179,6 +185,7 @@ impl Lang {
             Lang::Html => tree_sitter_html::HIGHLIGHTS_QUERY,
             Lang::JavaScript => tree_sitter_javascript::HIGHLIGHT_QUERY,
             Lang::Css => tree_sitter_css::HIGHLIGHTS_QUERY,
+            Lang::Properties => tree_sitter_properties::HIGHLIGHTS_QUERY,
         })
     }
 }

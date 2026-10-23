@@ -131,7 +131,28 @@
   - 한계
     - 힙은 vscode-java 기본값(`-Xms100m -Xmx2G`)이다.
     - JRE를 대신 설치해 주지는 않는다(vscode-java는 JRE를 동봉).
-- [ ] 2-5b Spring Boot LS 중계: 한 언어에 서버 둘(jdt.ls + Spring Boot LS)을 붙이고 jdt.ls와의 메시지를 중계
+- [x] 2-5b Spring Boot LS 중계: 한 언어에 서버 둘(jdt.ls + Spring Boot LS)을 붙이고 jdt.ls와의 메시지를 중계
+  - 실제 확인(Windows, Spring Boot 3.5.6 Maven 프로젝트)
+    - Java 파일만 열면 12.5초 뒤 jdt.ls가 Spring 프로젝트를 알리고 Spring Boot LS가 뜬다.
+    - `application.properties`에서 `server.port`는 문제가 없고, 없는 키에만 "unknown property" 경고가 6.1초에 뜬다. 클래스패스를 jdt.ls 중계로 받았다는 증거다.
+    - 처음에는 Spring Boot LS가 초기화하다 죽었다. 클라이언트가 `workspace.executeCommand` 기능을 알리지 않으면 Spring Boot LS가 명령 목록을 만들지 않아 NullPointerException이 난다. 클라이언트 기능에 추가해 고쳤다.
+  - Spring Boot LS 2.4.1: Open VSX의 VS Code 확장(vsix 83MB, 공개 SHA-256)을 설치한다. 정식판만 고른다.
+  - 허브가 한 언어에 서버 여럿을 붙인다.
+    - 문서는 모두에게 보내고, 진단은 서버별로 모아 합친다.
+    - 기능 요청은 주 서버(목록 순서)에만 보낸다. Java의 주 서버는 jdt.ls다.
+  - 중계: VS Code 확장(`commons-vscode`)과 같은 규칙(`ferrite-lsp::spring`)
+    - jdt.ls를 띄울 때 Spring 확장 번들 5개를 `initializationOptions.bundles`로 싣는다.
+    - Spring Boot LS의 `sts/*` 요청 12종은 jdt.ls `sts.java.*` 명령으로 보내고 응답을 돌려준다.
+    - jdt.ls의 `workspace/executeClientCommand` 콜백(클래스패스 변경)은 Spring Boot LS 명령으로 넘긴다.
+    - Spring Boot LS가 준비되면 설정을 보내고 클래스패스 연동을 켠다.
+  - 파일
+    - `application*`·`bootstrap*`의 `.properties`·`.yml`은 Spring Boot LS가 주 서버다.
+    - `.properties` 구문 강조를 추가했다(tree-sitter-properties). egov의 `globals.properties`에도 붙는다.
+  - 언제 띄우나: Java 파일만으로는 띄우지 않는다(JVM 힙 1GB). jdt.ls 확장이 Spring 프로젝트를 찾아 알리거나 Spring 설정 파일을 열면 띄운다(VS Code와 같게).
+  - Spring XML 설정 지원(`support-spring-xml-config`)을 켰다(egov의 `context-*.xml`).
+  - 한계
+    - Spring Boot LS의 자동완성·호버는 Java 파일에서는 아직 쓰지 않는다(주 서버 jdt.ls만 요청).
+    - XML 파일은 Spring Boot LS에 보내지 않는다.
 - [ ] 2-6 서버 크래시 자동 재시작(백오프), 3개 OS 최종 검증
 
 - JSON-RPC over stdio 클라이언트. 요청/응답 상관관계, 취소, 타임아웃 처리

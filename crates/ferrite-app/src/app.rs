@@ -29,7 +29,7 @@ use ferrite_lsp::features::{
     references_params,
 };
 use ferrite_lsp::position::PositionEncoding;
-use ferrite_lsp::problem::{Severity, to_problems};
+use ferrite_lsp::problem::Severity;
 use serde_json::Value;
 
 // Modifiers::COMMAND는 macOS에서 Cmd, 그 외 OS에서 Ctrl로 동작한다.
@@ -1012,6 +1012,7 @@ impl FerriteApp {
     fn on_lsp_response(
         &mut self,
         lang: Lang,
+        server: &'static str,
         id: i64,
         result: Result<Value, RpcError>,
         encoding: PositionEncoding,
@@ -1083,7 +1084,7 @@ impl FerriteApp {
                         version: None,
                     };
                     if self
-                        .apply_workspace_edit(lang, vec![file], encoding)
+                        .apply_workspace_edit(server, vec![file], encoding)
                         .is_some()
                     {
                         self.status = "포맷했습니다".into();
@@ -1095,7 +1096,7 @@ impl FerriteApp {
                     return;
                 }
                 let edits = parse_workspace_edit(&result);
-                match self.apply_workspace_edit(lang, edits, encoding) {
+                match self.apply_workspace_edit(server, edits, encoding) {
                     Some((_, 0)) => self.status = "바꿀 곳이 없습니다".into(),
                     Some((files, changes)) => {
                         self.status = format!(
@@ -1110,7 +1111,8 @@ impl FerriteApp {
                 if items.is_empty() {
                     self.status = "가능한 코드 액션이 없습니다".into();
                 } else {
-                    self.actions = Some(ActionMenu::new(path, items, encoding, retry.version));
+                    let menu = ActionMenu::new(path, items, encoding, retry.version, server);
+                    self.actions = Some(menu);
                 }
             }
             Pending::Resolve => {
@@ -1118,10 +1120,12 @@ impl FerriteApp {
                     return;
                 }
                 let (edits, command) = parse_resolved_action(&result);
-                if self.apply_workspace_edit(lang, edits, encoding).is_some()
-                    && let Some(command) = command
-                {
-                    self.execute_command(lang, command, encoding);
+                match (self.apply_workspace_edit(server, edits, encoding), command) {
+                    (Some(_), Some(command)) => self.execute_command(server, command, encoding),
+                    (Some((_, 0)), None) => {
+                        self.status = "코드 액션에 적용할 편집이 없습니다".into();
+                    }
+                    _ => {}
                 }
             }
             // 명령의 결과 편집은 서버가 workspace/applyEdit로 따로 보낸다.
@@ -1148,21 +1152,21 @@ impl FerriteApp {
     /// 고른 코드 액션을 실행한다: 편집이 있으면 적용하고, 명령이 있으면 서버에 실행을 요청하고,
     /// 편집이 아직 없으면 resolve로 받아 온다.
     fn run_code_action(&mut self, menu: ActionMenu) {
-        let (path, encoding, version) = (menu.path.clone(), menu.encoding, menu.version);
+        let (path, encoding, version, server) =
+            (menu.path.clone(), menu.encoding, menu.version, menu.server);
         let Some(action) = menu.take_selected() else {
             return;
         };
-        let doc = self.docs.iter().find(|d| d.path == path);
-        let Some(lang) = doc.and_then(|d| d.lang) else {
+        let Some(doc) = self.docs.iter().find(|d| d.path == path) else {
             return;
         };
-        if doc.is_some_and(|d| d.buffer.version() != version) {
+        if doc.buffer.version() != version {
             self.status = "메뉴를 연 뒤 문서가 바뀌었습니다. 코드 액션을 다시 여세요".into();
             return;
         }
         if !action.edit.is_empty()
             && self
-                .apply_workspace_edit(lang, action.edit, encoding)
+                .apply_workspace_edit(server, action.edit, encoding)
                 .is_none()
         {
             return;
@@ -1170,37 +1174,42 @@ impl FerriteApp {
         if let Some(unresolved) = action.unresolved {
             self.request_at_cursor(LspRequest::Resolve(unresolved));
         } else if let Some(command) = action.command {
-            self.execute_command(lang, command, encoding);
+            self.execute_command(server, command, encoding);
         }
     }
 
     /// 코드 액션의 명령을 실행한다. jdt.ls의 `java.apply.workspaceEdit`는 클라이언트가 처리하는
     /// 명령이라(서버로 보내면 처리기가 없다는 오류) 인자로 온 편집을 직접 적용한다.
-    fn execute_command(&mut self, lang: Lang, command: Value, encoding: PositionEncoding) {
+    fn execute_command(
+        &mut self,
+        server: &'static str,
+        command: Value,
+        encoding: PositionEncoding,
+    ) {
         if command.get("command").and_then(Value::as_str) != Some("java.apply.workspaceEdit") {
             self.request_at_cursor(LspRequest::Execute(command));
             return;
         }
         let arguments = command.get("arguments").and_then(Value::as_array);
         for edit in arguments.into_iter().flatten() {
-            self.apply_workspace_edit(lang, parse_workspace_edit(edit), encoding);
+            self.apply_workspace_edit(server, parse_workspace_edit(edit), encoding);
         }
     }
 
     /// 여러 파일 편집을 적용한다. 열려 있지 않은 파일은 탭으로 열어 버퍼에만 반영하고
     /// 저장하지 않는다(사용자가 확인하고 저장하도록). 원래 보던 탭으로 돌아온다.
-    /// 서버가 편집에 붙인 문서 버전이 지금과 다르면 하나도 적용하지 않고 None.
+    /// `server`(편집을 준 서버)가 편집에 붙인 문서 버전이 지금과 다르면 하나도 적용하지 않고 None.
     /// 적용했으면 (바뀐 파일 수, 바뀐 곳 수).
     fn apply_workspace_edit(
         &mut self,
-        lang: Lang,
+        server: &'static str,
         edits: Vec<FileEdit>,
         encoding: PositionEncoding,
     ) -> Option<(usize, usize)> {
         let stale = edits.iter().any(|f| {
             f.version.is_some_and(|v| {
                 self.hub
-                    .document_version(lang, &real_path(&f.path))
+                    .document_version(server, &real_path(&f.path))
                     .is_some_and(|current| current != v)
             })
         });
@@ -1248,8 +1257,16 @@ impl FerriteApp {
         self.focus_editor = true;
     }
 
+    /// 자동완성 팝업을 닫고, 아직 오지 않은 자동완성 응답도 버린다. 그러지 않으면 늦게 온 응답이
+    /// 적용하거나 닫은 팝업을 다시 연다(Ctrl+Space를 여러 번 눌렀을 때 등).
+    fn close_completion(&mut self) -> Option<CompletionPopup> {
+        self.pending
+            .retain(|_, (pending, _)| !matches!(pending, Pending::Completion { .. }));
+        self.completion.take()
+    }
+
     fn accept_completion(&mut self) {
-        let (Some(popup), Some(i)) = (self.completion.take(), self.active) else {
+        let (Some(popup), Some(i)) = (self.close_completion(), self.active) else {
             return;
         };
         let doc = &mut self.docs[i];
@@ -1461,29 +1478,32 @@ impl FerriteApp {
             match update {
                 HubUpdate::Diagnostics {
                     path,
+                    server,
                     diagnostics,
                     encoding,
                 } => {
                     if let Some(doc) = self.docs.iter_mut().find(|d| d.path == path) {
-                        doc.lsp.problems = to_problems(doc.buffer.rope(), &diagnostics, encoding);
+                        let rope = doc.buffer.rope();
+                        doc.lsp.set_problems(server, rope, &diagnostics, encoding);
                     }
                 }
                 HubUpdate::Message(message) => self.status = message,
                 HubUpdate::Response {
                     lang,
+                    server,
                     id,
                     result,
                     encoding,
-                } => self.on_lsp_response(lang, id, result, encoding),
+                } => self.on_lsp_response(lang, server, id, result, encoding),
                 HubUpdate::ApplyEdit {
-                    lang,
+                    server,
                     id,
                     edits,
                     encoding,
                 } => {
-                    self.apply_workspace_edit(lang, edits, encoding);
+                    self.apply_workspace_edit(server, edits, encoding);
                     self.hub
-                        .reply(lang, id, serde_json::json!({ "applied": true }));
+                        .reply(server, id, serde_json::json!({ "applied": true }));
                 }
             }
         }
@@ -1551,7 +1571,7 @@ impl FerriteApp {
                         self.show_problems = !self.show_problems;
                     }
                     if let Some(lang) = doc.lang
-                        && let Some((server, state)) = self.hub.status(lang)
+                        && let Some((server, state)) = self.hub.status(&doc.path, lang)
                     {
                         let name = server.name;
                         match state {
@@ -1590,7 +1610,7 @@ impl FerriteApp {
                                     egui::RichText::new(format!("{name}: 오류 (눌러서 다시 시작)"))
                                         .color(ui.visuals().error_fg_color);
                                 if ui.link(text).on_hover_text(reason.as_str()).clicked() {
-                                    restart = Some(lang);
+                                    restart = Some((doc.path.clone(), lang));
                                 }
                             }
                         }
@@ -1633,8 +1653,8 @@ impl FerriteApp {
                 });
             });
         });
-        if let Some(lang) = restart {
-            self.hub.restart(lang);
+        if let Some((path, lang)) = restart {
+            self.hub.restart(&path, lang);
         }
         if let Some(server) = install {
             let ctx = ui.ctx().clone();
@@ -1695,7 +1715,7 @@ impl FerriteApp {
             return;
         }
         if pressed(Key::Escape) {
-            self.completion = None;
+            self.close_completion();
             return;
         }
         if pressed(Key::Enter) || pressed(Key::Tab) {
@@ -1722,8 +1742,12 @@ impl FerriteApp {
             self.lsp_request(LspRequest::Definition, pos);
         }
         let lang = self.docs[i].lang;
-        let server_ready =
-            lang.is_some_and(|l| matches!(self.hub.status(l), Some((_, ServerState::Ready))));
+        let server_ready = lang.is_some_and(|l| {
+            matches!(
+                self.hub.status(&frame.path, l),
+                Some((_, ServerState::Ready))
+            )
+        });
         if frame.focused
             && server_ready
             && let (Some(lang), Some(last)) = (lang, frame.typed.chars().last())
@@ -1734,7 +1758,11 @@ impl FerriteApp {
                 .as_ref()
                 .is_some_and(|p| p.path == frame.path);
             let incomplete = self.completion.as_ref().is_some_and(|p| p.incomplete);
-            if self.hub.trigger_characters(lang).contains(&last) {
+            if self
+                .hub
+                .trigger_characters(&frame.path, lang)
+                .contains(&last)
+            {
                 self.lsp_request(LspRequest::Completion(Some(last)), pos);
             } else if crate::lsp_ui::is_identifier_char(last) && (!popup_open || incomplete) {
                 self.lsp_request(LspRequest::Completion(None), pos);
@@ -1742,6 +1770,7 @@ impl FerriteApp {
         }
         if let Some(popup) = &mut self.completion {
             let doc = &self.docs[i];
+            // 여기서는 요청을 버리지 않는다: 같은 프레임에 막 보낸 새 요청(미완성 목록 갱신)일 수 있다.
             if popup.path != doc.path || !popup.refilter(&doc.buffer) {
                 self.completion = None;
             }
@@ -2487,7 +2516,10 @@ mod tests {
             .build_eframe(|cc| FerriteApp::new(cc, Some(file.clone())));
         assert!(
             run_until_slow(&mut harness, |app| {
-                matches!(app.hub.status(Lang::Rust), Some((_, ServerState::Ready)))
+                matches!(
+                    app.hub.status(&app.docs[0].path, Lang::Rust),
+                    Some((_, ServerState::Ready))
+                )
             }),
             "서버 준비 시간 초과"
         );
@@ -2600,7 +2632,10 @@ mod tests {
             .build_eframe(|cc| FerriteApp::new(cc, Some(file.clone())));
         assert!(
             run_until_slow(&mut harness, |app| {
-                matches!(app.hub.status(Lang::Rust), Some((_, ServerState::Ready)))
+                matches!(
+                    app.hub.status(&app.docs[0].path, Lang::Rust),
+                    Some((_, ServerState::Ready))
+                )
             }),
             "서버 준비 시간 초과"
         );
@@ -2740,7 +2775,7 @@ mod tests {
         isolate_servers(&mut harness, &dir.join("servers"));
         assert!(run_until(&mut harness, |app| app
             .hub
-            .status(Lang::Xml)
+            .status(&app.docs[0].path, Lang::Xml)
             .is_some()));
         let lemminx = ferrite_lsp::catalog::for_language("xml").unwrap();
         if ferrite_lsp::install::installable(lemminx) {
@@ -2752,7 +2787,8 @@ mod tests {
         // 맡을 서버가 없는 언어는 상태바에 서버 항목을 두지 않는다.
         harness.state_mut().open_file(config);
         harness.run();
-        assert!(harness.state().hub.status(Lang::Toml).is_none());
+        let config = harness.state().docs[1].path.clone();
+        assert!(harness.state().hub.status(&config, Lang::Toml).is_none());
         assert!(harness.query_by_label_contains("설치 안 됨").is_none());
 
         drop(harness);
@@ -2794,6 +2830,7 @@ mod tests {
             vec![item],
             PositionEncoding::Utf16,
             version,
+            "jdtls",
         ));
         harness.run();
         harness.key_press(Key::Enter);
@@ -2807,5 +2844,132 @@ mod tests {
 
         drop(harness);
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 실제 jdt.ls·Spring Boot LS를 받아 중계를 끝까지 확인한다. Spring Boot LS가 jdt.ls에게서
+    /// 클래스패스를 받아야 `server.port` 같은 키를 알므로, 이 결과가 중계가 된다는 증거다.
+    /// Java 21 이상과 로컬 Maven 저장소의 Spring Boot 3.5.6(없으면 내려받음)이 필요하다.
+    /// `cargo test -p ferrite-app -- --ignored spring_boot --nocapture`
+    #[test]
+    #[ignore = "jdt.ls(53MB)와 Spring Boot LS(83MB)를 내려받는다"]
+    fn spring_boot_ls가_jdtls_중계로_설정_키를_검사한다() {
+        let dir = std::env::temp_dir().join(format!("ferrite-spring-e2e-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let root = dir.join("servers");
+        let started = Instant::now();
+        for name in ["jdtls", "spring-boot"] {
+            let server = ferrite_lsp::catalog::SERVERS
+                .iter()
+                .find(|s| s.name == name)
+                .unwrap();
+            ferrite_lsp::install::install(&root, server, &mut |_, _| {})
+                .unwrap_or_else(|e| panic!("{name} 설치 실패: {e}"));
+        }
+        eprintln!("설치: {:.1}초", started.elapsed().as_secs_f64());
+
+        let project = dir.join("demo");
+        let java = project.join("src/main/java/demo");
+        let resources = project.join("src/main/resources");
+        fs::create_dir_all(&java).unwrap();
+        fs::create_dir_all(&resources).unwrap();
+        fs::write(
+            project.join("pom.xml"),
+            r#"<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <parent>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-parent</artifactId>
+    <version>3.5.6</version>
+  </parent>
+  <groupId>demo</groupId><artifactId>demo</artifactId><version>1.0</version>
+  <dependencies>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-web</artifactId>
+    </dependency>
+  </dependencies>
+</project>
+"#,
+        )
+        .unwrap();
+        fs::write(
+            java.join("DemoApplication.java"),
+            "package demo;\n\n@org.springframework.boot.autoconfigure.SpringBootApplication\npublic class DemoApplication {\n}\n",
+        )
+        .unwrap();
+        let props = resources.join("application.properties");
+        fs::write(&props, "server.port=8080\nferrite.unknown.key=1\n").unwrap();
+
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(1200.0, 800.0))
+            .build_eframe(|cc| FerriteApp::new(cc, Some(project.clone())));
+        isolate_servers(&mut harness, &root);
+        // 1) Java 파일만 열면 jdt.ls만 뜨고, jdt.ls 확장이 Spring 프로젝트를 알아본 뒤에 Spring Boot
+        //    LS가 뜬다(vscode-spring-boot.ls.start).
+        harness
+            .state_mut()
+            .open_file(java.join("DemoApplication.java"));
+        let started = Instant::now();
+        let deadline = started + std::time::Duration::from_secs(180);
+        while !harness.state().hub.is_running("spring-boot") {
+            harness.run_ok();
+            assert!(
+                Instant::now() < deadline,
+                "3분 안에 jdt.ls가 Spring 프로젝트를 알리지 않음. 상태: {}",
+                harness.state().status
+            );
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        eprintln!(
+            "jdt.ls가 Spring 프로젝트를 알려 Spring Boot LS가 뜸: {:.1}초",
+            started.elapsed().as_secs_f64()
+        );
+
+        // 2) 설정 파일은 Spring Boot LS가 검사한다.
+        harness.state_mut().open_file(props.clone());
+        let props_doc = harness.state().docs.len() - 1;
+
+        let started = Instant::now();
+        let deadline = started + std::time::Duration::from_secs(300);
+        let lines = |app: &FerriteApp| {
+            let doc = &app.docs[props_doc];
+            doc.lsp
+                .problems
+                .iter()
+                .map(|p| {
+                    (
+                        doc.buffer.pos_to_line_col(p.range.start).0,
+                        p.message.clone(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        loop {
+            harness.run_ok();
+            let problems = lines(harness.state());
+            if problems
+                .iter()
+                .any(|(line, m)| *line == 1 && m.contains("ferrite.unknown.key"))
+            {
+                assert!(
+                    problems.iter().all(|(line, _)| *line != 0),
+                    "server.port는 알려진 키여야 한다(클래스패스 중계 실패): {problems:?}"
+                );
+                eprintln!(
+                    "Spring 설정 검사 확인: {:.1}초, 진단: {problems:?}",
+                    started.elapsed().as_secs_f64()
+                );
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "5분 안에 확인하지 못함. 진단: {problems:?}, 상태: {}",
+                harness.state().status
+            );
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+
+        drop(harness);
+        remove_project(&dir);
     }
 }
