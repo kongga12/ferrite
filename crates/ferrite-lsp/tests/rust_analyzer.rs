@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use ferrite_lsp::client::{
-    LanguageServer, ServerCommand, ServerEvent, find_program, parse_diagnostics,
+    LanguageServer, RpcError, ServerCommand, ServerEvent, find_program, parse_diagnostics,
 };
 use ferrite_lsp::features::{
     completion_params, parse_completion, parse_hover, parse_locations, position_params,
@@ -121,20 +121,51 @@ fn rust_analyzer가_문법_오류를_진단으로_보낸다() {
     let _ = fs::remove_dir_all(&root);
 }
 
-/// 요청 하나의 응답을 기다린다(다른 이벤트는 버린다).
-fn wait_response(server: &LanguageServer, id: i64, deadline: Instant) -> serde_json::Value {
+/// 요청 하나의 응답을 기다린다(다른 이벤트는 버린다). 오류 응답이면 Err.
+fn wait_response(
+    server: &LanguageServer,
+    id: i64,
+    deadline: Instant,
+) -> Result<serde_json::Value, RpcError> {
     loop {
         assert!(Instant::now() < deadline, "응답 시간 초과(요청 {id})");
         for event in server.poll_events() {
             match event {
-                ServerEvent::Response { id: got, result } if got == id => {
-                    return result.expect("서버 오류 응답");
-                }
+                ServerEvent::Response { id: got, result } if got == id => return result,
                 ServerEvent::Exited(reason) => panic!("서버 종료: {reason}"),
                 _ => {}
             }
         }
         std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// 기대한 결과가 나올 때까지 같은 요청을 다시 보낸다. 서버는 색인이 끝나기 전에 빈 결과를,
+/// 문서가 바뀌는 중에는 ContentModified를 돌려주므로(앱도 재시도한다) 둘 다 다시 시도한다.
+/// 재시도할 수 없는 오류는 바로 실패시킨다.
+fn request_until<T>(
+    server: &mut LanguageServer,
+    method: &str,
+    params: &serde_json::Value,
+    deadline: Instant,
+    accept: impl Fn(&serde_json::Value) -> Option<T>,
+) -> T {
+    loop {
+        let id = server.request(method, params.clone());
+        match wait_response(server, id, deadline) {
+            Ok(result) => {
+                if let Some(found) = accept(&result) {
+                    return found;
+                }
+            }
+            Err(e) if e.is_retryable() => {}
+            Err(e) => panic!("{method} 오류: {e:?}"),
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{method}: 기대한 결과가 오지 않음"
+        );
+        std::thread::sleep(Duration::from_millis(300));
     }
 }
 
@@ -159,40 +190,49 @@ fn rust_analyzer로_자동완성_호버_정의를_받는다() {
     }
     let encoding = server.encoding();
 
-    // 자동완성: 색인이 끝나기 전에는 빈 목록이 올 수 있어 다시 요청한다
+    // 자동완성
     let after_dot = at("p.le\n", 4);
-    let completion = loop {
-        let params = completion_params(&main, &rope, after_dot, encoding, None).unwrap();
-        let id = server.request("textDocument/completion", params);
-        let list = parse_completion(&wait_response(&server, id, deadline), &rope, encoding);
-        if let Some(item) = list
-            .items
-            .into_iter()
-            .find(|c| c.label.starts_with("length"))
-        {
-            break item;
-        }
-        std::thread::sleep(Duration::from_millis(500));
-    };
+    let params = completion_params(&main, &rope, after_dot, encoding, None).unwrap();
+    let completion = request_until(
+        &mut server,
+        "textDocument/completion",
+        &params,
+        deadline,
+        |r| {
+            parse_completion(r, &rope, encoding)
+                .items
+                .into_iter()
+                .find(|c| c.label.starts_with("length"))
+        },
+    );
     assert_eq!(completion.kind, "함수");
     assert!(completion.text.starts_with("length"), "{completion:?}");
 
     // 호버: 타입 이름 위
     let on_type = at("= Point {", 2);
-    let id = server.request(
+    let params = position_params(&main, &rope, on_type, encoding).unwrap();
+    let hover = request_until(
+        &mut server,
         "textDocument/hover",
-        position_params(&main, &rope, on_type, encoding).unwrap(),
+        &params,
+        deadline,
+        parse_hover,
     );
-    let hover = parse_hover(&wait_response(&server, id, deadline)).expect("호버 내용");
     assert!(hover.contains("struct Point"), "{hover}");
 
     // 정의로 이동: 메서드 호출 → impl 안의 fn length(5번째 줄, 0부터)
     let on_call = at("p.length()", 3);
-    let id = server.request(
+    let params = position_params(&main, &rope, on_call, encoding).unwrap();
+    let targets = request_until(
+        &mut server,
         "textDocument/definition",
-        position_params(&main, &rope, on_call, encoding).unwrap(),
+        &params,
+        deadline,
+        |r| {
+            let targets = parse_locations(r);
+            (!targets.is_empty()).then_some(targets)
+        },
     );
-    let targets = parse_locations(&wait_response(&server, id, deadline));
     assert_eq!(targets.len(), 1, "{targets:?}");
     assert_eq!(targets[0].path, main);
     assert_eq!(targets[0].range.start.line, 5);

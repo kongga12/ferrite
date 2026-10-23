@@ -2091,22 +2091,35 @@ mod tests {
                 .set_selection(Selection::caret(pos));
         };
 
-        // 자동완성: 색인 전에는 빈 목록일 수 있어 열릴 때까지 다시 요청한다
+        // 서버는 색인이 끝나기 전에 빈 결과를 돌려줄 수 있다(느린 CI 러너에서 실제로 발생).
+        // 사용자가 다시 누르듯, 원하는 결과가 나올 때까지 같은 키를 다시 누른다(최대 약 60초).
+        let retry_key = |h: &mut Harness<'_, FerriteApp>,
+                         pos: usize,
+                         modifiers: Modifiers,
+                         key: Key,
+                         done: &dyn Fn(&Harness<'_, FerriteApp>) -> bool| {
+            for _ in 0..60 {
+                caret(h, pos);
+                h.key_press_modifiers(modifiers, key);
+                for _ in 0..20 {
+                    h.run();
+                    if done(h) {
+                        return true;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+            }
+            false
+        };
+
+        // 자동완성
         let end_of_le = text.find("p.le\n").unwrap() + 4;
-        let mut opened = false;
-        for _ in 0..60 {
-            caret(&mut harness, end_of_le);
-            harness.key_press_modifiers(Modifiers::CTRL, Key::Space);
-            for _ in 0..20 {
-                harness.run();
-                std::thread::sleep(std::time::Duration::from_millis(50));
-            }
-            if harness.query_by_label_contains("length").is_some() {
-                opened = true;
-                break;
-            }
-        }
-        assert!(opened, "자동완성 팝업에 length가 없음");
+        assert!(
+            retry_key(&mut harness, end_of_le, Modifiers::CTRL, Key::Space, &|h| {
+                h.query_by_label_contains("length").is_some()
+            }),
+            "자동완성 팝업에 length가 없음"
+        );
         harness.key_press(Key::Enter);
         harness.run();
         let after = harness.state().docs[0].buffer.text();
@@ -2117,11 +2130,10 @@ mod tests {
         assert!(harness.state().completion.is_none());
 
         // F12: 호출 위치에서 정의(impl 안의 fn length, 6번째 줄)로 이동
-        caret(&mut harness, text.find("p.length();").unwrap() + 3);
-        harness.key_press(Key::F12);
+        let call = text.find("p.length();").unwrap() + 3;
         assert!(
-            run_until_slow(&mut harness, |app| {
-                let buffer = &app.docs[0].buffer;
+            retry_key(&mut harness, call, Modifiers::NONE, Key::F12, &|h| {
+                let buffer = &h.state().docs[0].buffer;
                 buffer.pos_to_line_col(buffer.selection().head).0 == 5
             }),
             "정의로 이동하지 않음: {}",
@@ -2129,9 +2141,13 @@ mod tests {
         );
 
         // Shift+F12: 참조 목록(정의 + 호출들)
-        harness.key_press_modifiers(Modifiers::SHIFT, Key::F12);
         assert!(
-            run_until_slow(&mut harness, |app| app.references.is_some()),
+            retry_key(&mut harness, call, Modifiers::SHIFT, Key::F12, &|h| {
+                h.state()
+                    .references
+                    .as_ref()
+                    .is_some_and(|r| r.items.len() >= 2)
+            }),
             "참조 목록이 열리지 않음: {}",
             harness.state().status
         );
