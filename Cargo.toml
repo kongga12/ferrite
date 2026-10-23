@@ -13,4 +13,6 @@ ferrite-core = { path = "crates/ferrite-core" }
 eframe = "0.37"
 egui_kittest = { version = "0.37", features = ["eframe"] }
 encoding_rs = "0.8"
+# 줄바꿈은 LF만 인정한다(CR·유니코드 줄 구분자를 줄로 세지 않음). tree-sitter의 행 계산과 맞추기 위함.
+ropey = { version = "1.6", default-features = false, features = ["simd"] }
 rfd = "0.17"

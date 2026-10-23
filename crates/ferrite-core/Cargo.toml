@@ -8,3 +8,4 @@ publish.workspace = true
 
 [dependencies]
 encoding_rs.workspace = true
+ropey.workspace = true
