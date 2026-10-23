@@ -2893,12 +2893,35 @@ mod tests {
             .with_size(egui::vec2(1200.0, 800.0))
             .build_eframe(|cc| FerriteApp::new(cc, Some(project.clone())));
         isolate_servers(&mut harness, &root);
+        // 1) Java 파일만 열면 jdt.ls만 뜨고, jdt.ls 확장이 Spring 프로젝트를 알아본 뒤에 Spring Boot
+        //    LS가 뜬다(vscode-spring-boot.ls.start).
+        harness
+            .state_mut()
+            .open_file(java.join("DemoApplication.java"));
+        let started = Instant::now();
+        let deadline = started + std::time::Duration::from_secs(180);
+        while !harness.state().hub.is_running("spring-boot") {
+            harness.run_ok();
+            assert!(
+                Instant::now() < deadline,
+                "3분 안에 jdt.ls가 Spring 프로젝트를 알리지 않음. 상태: {}",
+                harness.state().status
+            );
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        eprintln!(
+            "jdt.ls가 Spring 프로젝트를 알려 Spring Boot LS가 뜸: {:.1}초",
+            started.elapsed().as_secs_f64()
+        );
+
+        // 2) 설정 파일은 Spring Boot LS가 검사한다.
         harness.state_mut().open_file(props.clone());
+        let props_doc = harness.state().docs.len() - 1;
 
         let started = Instant::now();
         let deadline = started + std::time::Duration::from_secs(300);
         let lines = |app: &FerriteApp| {
-            let doc = &app.docs[0];
+            let doc = &app.docs[props_doc];
             doc.lsp
                 .problems
                 .iter()

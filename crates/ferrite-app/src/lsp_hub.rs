@@ -346,6 +346,12 @@ impl LspHub {
     }
 
     /// 이 서버에 마지막으로 보낸 문서 버전(열지 않은 문서면 None). 서버가 편집에 붙인 버전과 비교한다.
+    /// 이 서버 프로세스가 떠 있는가(테스트에서 띄우는 조건을 확인할 때).
+    #[cfg(test)]
+    pub fn is_running(&self, server: &str) -> bool {
+        self.servers.get(server).is_some_and(|s| s.lsp.is_some())
+    }
+
     pub fn document_version(&self, server: &str, path: &Path) -> Option<i32> {
         self.servers.get(server)?.opened.get(path).copied()
     }
