@@ -1,19 +1,27 @@
 //! egov 언어 서버(LSP, 표준 입출력). 비동기 런타임 없이 메시지를 하나씩 처리한다.
-//! 시작할 때 프로젝트의 매퍼를 모아 색인하고, 열린 문서는 편집 중인 내용으로 덮어쓴다.
+//! 시작할 때 프로젝트의 매퍼와 Java 인터페이스를 모아 색인하고, 열린 문서는 편집 중인 내용으로
+//! 덮어쓴다.
+//!
+//! 위치는 UTF-16으로 주고받는다. 이 서버는 다른 서버(jdt.ls, lemminx)와 함께 한 문서를 맡아
+//! 결과가 합쳐지므로, 그 서버들과 같은 단위를 써야 위치가 어긋나지 않는다.
 
 use std::collections::{HashMap, HashSet};
 use std::io::{self, BufRead, Write};
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use ferrite_core::text_file;
-use ferrite_lsp::position::{PositionEncoding, to_lsp};
+use ferrite_lsp::position::{PositionEncoding, from_lsp, to_lsp};
 use ferrite_lsp::transport::{read_message, write_message};
 use ferrite_lsp::uri::{path_to_uri, uri_to_path};
-use lsp_types::{Diagnostic, DiagnosticSeverity, NumberOrString, Range, Uri};
+use lsp_types::{Diagnostic, DiagnosticSeverity, NumberOrString, Position, Uri};
 use ropey::Rope;
 use serde_json::{Value, json};
 
-use crate::mapper::{self, Index, Severity};
+use crate::java::{self, Interface, Target};
+use crate::mapper::{self, Dialect, Finding, Index, Kind, Severity};
+
+const ENCODING: PositionEncoding = PositionEncoding::Utf16;
 
 /// 색인할 때 건너뛰는 폴더(빌드 결과물·도구 폴더). 빌드 결과물에는 같은 매퍼의 사본이 있다.
 const SKIP_DIRS: [&str; 10] = [
@@ -59,30 +67,21 @@ pub fn run(input: &mut impl BufRead, output: &mut impl Write) -> io::Result<()> 
     Ok(())
 }
 
-struct Document {
-    rope: Rope,
+fn is_java(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("java"))
 }
 
+#[derive(Default)]
 struct Server {
     root: Option<PathBuf>,
-    encoding: PositionEncoding,
     index: Index,
+    /// Java 파일의 인터페이스(Mapper 후보).
+    java: HashMap<PathBuf, Vec<Interface>>,
     /// 열린 문서(편집 중인 내용).
-    open: HashMap<PathBuf, Document>,
-    /// 진단을 보낸 문서. 더 이상 매퍼가 아니게 되면 빈 진단으로 지운다.
+    open: HashMap<PathBuf, Rope>,
+    /// 진단을 보낸 문서. 더 이상 대상이 아니게 되면 빈 진단으로 지운다.
     published: HashSet<PathBuf>,
-}
-
-impl Default for Server {
-    fn default() -> Self {
-        Self {
-            root: None,
-            encoding: PositionEncoding::Utf16,
-            index: Index::default(),
-            open: HashMap::new(),
-            published: HashSet::new(),
-        }
-    }
 }
 
 impl Server {
@@ -90,25 +89,17 @@ impl Server {
         match method {
             "initialize" => {
                 self.root = initialize_root(params);
-                // UTF-8을 고를 수 있으면 고른다(한글 위치 계산이 바이트 그대로라 단순하다).
-                let offered = params
-                    .pointer("/capabilities/general/positionEncodings")
-                    .and_then(Value::as_array)
-                    .is_some_and(|list| list.iter().any(|e| e == "utf-8"));
-                if offered {
-                    self.encoding = PositionEncoding::Utf8;
-                }
-                let encoding = match self.encoding {
-                    PositionEncoding::Utf8 => "utf-8",
-                    PositionEncoding::Utf16 => "utf-16",
-                };
                 json!({ "jsonrpc": "2.0", "id": id, "result": {
                     "capabilities": {
-                        "positionEncoding": encoding,
+                        "positionEncoding": "utf-16",
                         "textDocumentSync": { "openClose": true, "change": 1 },
+                        "definitionProvider": true,
                     },
                     "serverInfo": { "name": "ferrite-egov", "version": env!("CARGO_PKG_VERSION") },
                 } })
+            }
+            "textDocument/definition" => {
+                json!({ "jsonrpc": "2.0", "id": id, "result": self.definition(params) })
             }
             "shutdown" => json!({ "jsonrpc": "2.0", "id": id, "result": null }),
             _ => json!({ "jsonrpc": "2.0", "id": id,
@@ -144,10 +135,8 @@ impl Server {
                 };
                 self.open.remove(&path);
                 // 닫으면 디스크 내용이 다시 기준이다.
-                match read_mapper(&path) {
-                    Some(mapper) => self.index.mappers.insert(path.clone(), mapper),
-                    None => self.index.mappers.remove(&path),
-                };
+                let text = read_text(&path);
+                self.reindex(&path, text.as_deref());
                 let mut replies = self.publish_all();
                 if self.published.remove(&path) {
                     replies.extend(publish(&path, Vec::new()));
@@ -158,59 +147,62 @@ impl Server {
         }
     }
 
-    /// 열린 문서의 내용을 바꾸고 열린 매퍼 모두를 다시 진단한다(다른 파일을 참조할 수 있어서).
+    /// 열린 문서의 내용을 바꾸고 열린 문서 모두를 다시 진단한다(서로 참조할 수 있어서).
     fn update(&mut self, path: Option<PathBuf>, text: Option<&str>) -> Vec<Value> {
         let (Some(path), Some(text)) = (path, text) else {
             return Vec::new();
         };
-        match mapper::parse(text) {
-            Some(mapper) => {
-                self.index.mappers.insert(path.clone(), mapper);
-            }
-            None => {
-                self.index.mappers.remove(&path);
-            }
-        }
-        self.open.insert(
-            path,
-            Document {
-                rope: Rope::from_str(text),
-            },
-        );
+        self.reindex(&path, Some(text));
+        self.open.insert(path, Rope::from_str(text));
         self.publish_all()
+    }
+
+    /// 파일 하나의 색인을 이 내용으로 바꾼다(None이면 뺀다).
+    fn reindex(&mut self, path: &Path, text: Option<&str>) {
+        if is_java(path) {
+            match text.map(java::interfaces).filter(|found| !found.is_empty()) {
+                Some(found) => self.java.insert(path.to_path_buf(), found),
+                None => self.java.remove(path),
+            };
+        } else {
+            match text.and_then(mapper::parse) {
+                Some(found) => self.index.mappers.insert(path.to_path_buf(), found),
+                None => self.index.mappers.remove(path),
+            };
+        }
     }
 
     fn publish_all(&mut self) -> Vec<Value> {
         let mut replies = Vec::new();
-        for (path, document) in &self.open {
-            let Some(mapper) = self.index.mappers.get(path) else {
+        for (path, rope) in &self.open {
+            let findings = if is_java(path) {
+                self.java
+                    .get(path)
+                    .and_then(|interfaces| missing_statements(interfaces, &self.index))
+            } else {
+                self.index
+                    .mappers
+                    .get(path)
+                    .map(|m| mapper::diagnose(m, &self.index))
+            };
+            let Some(findings) = findings else {
                 if self.published.remove(path) {
                     replies.extend(publish(path, Vec::new()));
                 }
                 continue;
             };
-            let diagnostics = mapper::diagnose(mapper, &self.index)
+            let diagnostics = findings
                 .into_iter()
-                .map(|finding| {
-                    let rope = &document.rope;
-                    let to = |byte: usize| {
-                        to_lsp(
-                            rope,
-                            rope.byte_to_char(byte.min(rope.len_bytes())),
-                            self.encoding,
-                        )
-                    };
-                    Diagnostic {
-                        range: Range::new(to(finding.range.start), to(finding.range.end)),
-                        severity: Some(match finding.severity {
-                            Severity::Error => DiagnosticSeverity::ERROR,
-                            Severity::Warning => DiagnosticSeverity::WARNING,
-                        }),
-                        code: Some(NumberOrString::String(finding.code.into())),
-                        source: Some("ferrite-egov".into()),
-                        message: finding.message,
-                        ..Default::default()
-                    }
+                .map(|finding| Diagnostic {
+                    range: lsp_range(rope, &finding.range),
+                    severity: Some(match finding.severity {
+                        Severity::Error => DiagnosticSeverity::ERROR,
+                        Severity::Warning => DiagnosticSeverity::WARNING,
+                    }),
+                    code: Some(NumberOrString::String(finding.code.into())),
+                    source: Some("ferrite-egov".into()),
+                    message: finding.message,
+                    ..Default::default()
                 })
                 .collect();
             self.published.insert(path.clone());
@@ -219,7 +211,113 @@ impl Server {
         replies
     }
 
-    /// 프로젝트 폴더의 매퍼를 모두 읽어 색인한다. 열린 문서는 편집 중인 내용을 그대로 둔다.
+    /// 정의로 이동. 매퍼 XML과 Java 사이를 잇는다(같은 파일·다른 파일).
+    fn definition(&self, params: &Value) -> Value {
+        let Some(path) = document_path(params) else {
+            return Value::Null;
+        };
+        let (Some(rope), Ok(position)) = (
+            self.open.get(&path),
+            serde_json::from_value::<Position>(params["position"].clone()),
+        ) else {
+            return Value::Null;
+        };
+        let offset = rope.char_to_byte(from_lsp(rope, position, ENCODING));
+        let targets = if is_java(&path) {
+            self.java_targets(&rope.to_string(), offset)
+        } else {
+            self.xml_targets(&path, offset)
+        };
+        // 대상 파일마다 한 번만 읽는다(열려 있으면 편집 중인 내용).
+        let mut ropes: HashMap<PathBuf, Rope> = HashMap::new();
+        let mut locations = Vec::new();
+        for (target, range) in targets {
+            let rope = ropes.entry(target.clone()).or_insert_with(|| {
+                self.open
+                    .get(&target)
+                    .cloned()
+                    .unwrap_or_else(|| Rope::from_str(&read_text(&target).unwrap_or_default()))
+            });
+            if let Ok(uri) = path_to_uri(&target) {
+                let location = json!({ "uri": uri, "range": lsp_range(rope, &range) });
+                if !locations.contains(&location) {
+                    locations.push(location);
+                }
+            }
+        }
+        if locations.is_empty() {
+            Value::Null
+        } else {
+            Value::Array(locations)
+        }
+    }
+
+    /// XML: 참조(refid·resultMap·select) → 정의, MyBatis 문장 id → Mapper 인터페이스 메서드.
+    fn xml_targets(&self, path: &Path, offset: usize) -> Vec<(PathBuf, Range<usize>)> {
+        let Some(mapper) = self.index.mappers.get(path) else {
+            return Vec::new();
+        };
+        let within = |range: &Range<usize>| range.start <= offset && offset <= range.end;
+        if let Some(reference) = mapper.refs.iter().find(|r| within(&r.range)) {
+            return self
+                .index
+                .targets(mapper, reference)
+                .into_iter()
+                .map(|(found, def)| {
+                    (
+                        found.cloned().unwrap_or_else(|| path.to_path_buf()),
+                        def.range.clone(),
+                    )
+                })
+                .collect();
+        }
+        let statement = mapper
+            .defs
+            .iter()
+            .find(|d| d.kind == Kind::Statement && within(&d.range));
+        match (statement, &mapper.namespace, mapper.dialect) {
+            (Some(def), Some(namespace), Dialect::MyBatis) => self
+                .java
+                .iter()
+                .flat_map(|(file, interfaces)| {
+                    interfaces
+                        .iter()
+                        .filter(|i| &i.fqn == namespace)
+                        .flat_map(|i| i.methods.iter().filter(|m| m.name == def.id))
+                        .map(|m| (file.clone(), m.range.clone()))
+                })
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Java: Mapper 메서드(선언·호출)나 문자열 문장 id → 매퍼 XML 문장.
+    fn java_targets(&self, text: &str, offset: usize) -> Vec<(PathBuf, Range<usize>)> {
+        let found = match java::target_at(text, offset) {
+            Some(Target::Method { namespace, name }) => self.index.find(
+                Kind::Statement,
+                |m| m.namespace.as_deref() == Some(namespace.as_str()),
+                &name,
+            ),
+            // DAO 방식: "namespace.id"(MyBatis·iBatis), iBatis는 id 그대로도 쓴다.
+            Some(Target::StatementId(id)) => {
+                let mut found = self.index.qualified(Kind::Statement, &id);
+                found.extend(self.index.find(
+                    Kind::Statement,
+                    |m| m.dialect == Dialect::IBatis,
+                    &id,
+                ));
+                found
+            }
+            None => Vec::new(),
+        };
+        found
+            .into_iter()
+            .filter_map(|(file, def)| Some((file?.clone(), def.range.clone())))
+            .collect()
+    }
+
+    /// 프로젝트 폴더의 매퍼와 Java 인터페이스를 모두 읽어 색인한다. 열린 문서는 그대로 둔다.
     fn index_project(&mut self, root: &Path) {
         let mut stack = vec![root.to_path_buf()];
         while let Some(dir) = stack.pop() {
@@ -228,36 +326,90 @@ impl Server {
             };
             for entry in entries.flatten() {
                 let path = entry.path();
-                let name = entry.file_name();
                 let Ok(kind) = entry.file_type() else {
                     continue;
                 };
                 if kind.is_dir() {
-                    if !SKIP_DIRS.iter().any(|s| name == *s) {
+                    if !SKIP_DIRS.iter().any(|s| entry.file_name() == *s) {
                         stack.push(path);
                     }
-                } else if path
-                    .extension()
-                    .is_some_and(|e| e.eq_ignore_ascii_case("xml"))
-                    && !self.open.contains_key(&path)
-                    && let Some(mapper) = read_mapper(&path)
+                    continue;
+                }
+                let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
+                    continue;
+                };
+                // 대부분의 파일은 대상이 아니므로 내용을 풀기 전에 바이트로 거른다.
+                let wanted: &[&[u8]] = match ext.to_ascii_lowercase().as_str() {
+                    "xml" => &[b"<mapper", b"<sqlMap"],
+                    "java" => &[b"interface"],
+                    _ => continue,
+                };
+                if self.open.contains_key(&path) {
+                    continue;
+                }
+                let Ok(bytes) = text_file::read(&path) else {
+                    continue;
+                };
+                if wanted
+                    .iter()
+                    .any(|w| bytes.windows(w.len()).any(|b| b == *w))
                 {
-                    self.index.mappers.insert(path, mapper);
+                    let text = text_file::decode(&bytes).ok().map(|c| c.text);
+                    self.reindex(&path, text.as_deref());
                 }
             }
         }
     }
 }
 
-/// 디스크의 매퍼를 읽는다. 예전 egov 프로젝트의 EUC-KR(CP949) 파일도 읽는다.
-fn read_mapper(path: &Path) -> Option<mapper::Mapper> {
-    let bytes = text_file::read(path).ok()?;
-    // 대부분의 XML은 매퍼가 아니므로 파싱 전에 거른다.
-    let looks = |needle: &[u8]| bytes.windows(needle.len()).any(|w| w == needle);
-    if !looks(b"<mapper") && !looks(b"<sqlMap") {
-        return None;
+/// XML 문장이 없는 Mapper 메서드(실행하면 BindingException). 매퍼 XML의 namespace와 이어진
+/// 인터페이스만 본다. 이어진 인터페이스가 없는 파일이면 None(진단 대상이 아님).
+fn missing_statements(interfaces: &[Interface], index: &Index) -> Option<Vec<Finding>> {
+    let mut bound = false;
+    let mut findings = Vec::new();
+    for interface in interfaces {
+        let namespace = |m: &mapper::Mapper| {
+            m.dialect == Dialect::MyBatis && m.namespace.as_deref() == Some(interface.fqn.as_str())
+        };
+        if !index.mappers.values().any(namespace) {
+            continue;
+        }
+        bound = true;
+        for method in interface.methods.iter().filter(|m| m.needs_statement) {
+            if index
+                .find(Kind::Statement, namespace, &method.name)
+                .is_empty()
+            {
+                findings.push(Finding {
+                    range: method.range.clone(),
+                    severity: Severity::Warning,
+                    code: "missing-statement",
+                    message: format!(
+                        "매퍼 XML(namespace {})에 id '{}'인 문장이 없습니다. 실행하면 바인딩 오류(BindingException)가 납니다.",
+                        interface.fqn, method.name
+                    ),
+                });
+            }
+        }
     }
-    mapper::parse(&text_file::decode(&bytes).ok()?.text)
+    bound.then_some(findings)
+}
+
+fn lsp_range(rope: &Rope, range: &Range<usize>) -> lsp_types::Range {
+    let to = |byte: usize| {
+        to_lsp(
+            rope,
+            rope.byte_to_char(byte.min(rope.len_bytes())),
+            ENCODING,
+        )
+    };
+    lsp_types::Range::new(to(range.start), to(range.end))
+}
+
+/// 디스크 파일을 읽는다. 예전 egov 프로젝트의 EUC-KR(CP949) 파일도 읽는다.
+fn read_text(path: &Path) -> Option<String> {
+    let bytes = text_file::read(path).ok()?;
+    Some(text_file::decode(&bytes).ok()?.text)
 }
 
 fn initialize_root(params: &Value) -> Option<PathBuf> {

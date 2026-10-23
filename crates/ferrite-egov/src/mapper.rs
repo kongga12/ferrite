@@ -270,29 +270,62 @@ pub struct Index {
     pub mappers: HashMap<PathBuf, Mapper>,
 }
 
+/// 정의 하나와 그 파일. 같은 파일 안에서 찾은 정의는 경로가 None이다(부른 쪽이 안다).
+pub type Found<'a> = (Option<&'a PathBuf>, &'a Def);
+
 impl Index {
-    /// 참조가 가리키는 정의가 있는가.
-    /// - 같은 파일의 id
-    /// - `namespace.id` 꼴이면 그 namespace의 id
-    /// - iBatis는 문장 namespace를 끄고 쓰는 일이 흔해(`useStatementNamespaces=false`) 전체에서 찾는다.
-    pub fn resolves(&self, from: &Mapper, reference: &Ref) -> bool {
-        if from.has(reference.kind, &reference.name) {
-            return true;
+    /// 참조가 가리키는 정의들. 앞 단계에서 찾으면 거기서 멈춘다(MyBatis가 찾는 순서와 같다).
+    /// 1. 같은 파일의 id
+    /// 2. `namespace.id` 꼴이면 그 namespace의 id
+    /// 3. iBatis는 문장 namespace를 끄고 쓰는 일이 흔해(`useStatementNamespaces=false`) 전체에서 찾는다.
+    pub fn targets<'a>(&'a self, from: &'a Mapper, reference: &Ref) -> Vec<Found<'a>> {
+        let same: Vec<Found<'a>> = from
+            .defs
+            .iter()
+            .filter(|d| d.kind == reference.kind && d.id == reference.name)
+            .map(|d| (None, d))
+            .collect();
+        if !same.is_empty() {
+            return same;
         }
-        let qualified = reference
-            .name
-            .rsplit_once('.')
-            .is_some_and(|(namespace, id)| {
-                self.mappers
-                    .values()
-                    .any(|m| m.namespace.as_deref() == Some(namespace) && m.has(reference.kind, id))
-            });
-        qualified
-            || (from.dialect == Dialect::IBatis
-                && self
-                    .mappers
-                    .values()
-                    .any(|m| m.has(reference.kind, &reference.name)))
+        let qualified = self.qualified(reference.kind, &reference.name);
+        if !qualified.is_empty() || from.dialect == Dialect::MyBatis {
+            return qualified;
+        }
+        self.find(
+            reference.kind,
+            |m| m.dialect == Dialect::IBatis,
+            &reference.name,
+        )
+    }
+
+    pub fn resolves(&self, from: &Mapper, reference: &Ref) -> bool {
+        !self.targets(from, reference).is_empty()
+    }
+
+    /// `namespace.id` 꼴 이름의 정의.
+    pub fn qualified(&self, kind: Kind, name: &str) -> Vec<Found<'_>> {
+        name.rsplit_once('.')
+            .map_or_else(Vec::new, |(namespace, id)| {
+                self.find(kind, |m| m.namespace.as_deref() == Some(namespace), id)
+            })
+    }
+
+    /// 조건에 맞는 매퍼에서 이 종류·id인 정의. 결과는 파일 경로순이다(HashMap 순서에 기대지 않게).
+    pub fn find(&self, kind: Kind, mapper: impl Fn(&Mapper) -> bool, id: &str) -> Vec<Found<'_>> {
+        let mut found: Vec<Found<'_>> = self
+            .mappers
+            .iter()
+            .filter(|(_, m)| mapper(m))
+            .flat_map(|(path, m)| {
+                m.defs
+                    .iter()
+                    .filter(|d| d.kind == kind && d.id == id)
+                    .map(move |d| (Some(path), d))
+            })
+            .collect();
+        found.sort_by(|a, b| (a.0, a.1.range.start).cmp(&(b.0, b.1.range.start)));
+        found
     }
 }
 

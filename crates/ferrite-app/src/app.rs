@@ -942,7 +942,12 @@ impl FerriteApp {
                     pos,
                 },
             ),
-            LspRequest::Definition => ("textDocument/definition", Pending::Definition),
+            LspRequest::Definition => (
+                "textDocument/definition",
+                Pending::Definition {
+                    name: word_at(&doc.buffer, pos),
+                },
+            ),
             LspRequest::References => (
                 "textDocument/references",
                 Pending::References {
@@ -1060,17 +1065,41 @@ impl FerriteApp {
                     hover.text = parse_hover(&result);
                 }
             }
-            Pending::Definition => match parse_locations(&result).into_iter().next() {
-                Some(target) => self.navigate_to(&target.path, target.range, encoding),
-                None => self.status = "정의를 찾지 못했습니다".into(),
-            },
+            Pending::Definition { name } => {
+                // 선언 위에서 부르면 jdt.ls가 선언 자신을 돌려준다. 다른 서버(egov)가 찾은 곳이
+                // 있으면 그쪽이 가고 싶은 곳이므로 커서가 있던 자리는 뺀다.
+                let mut targets = parse_locations(&result);
+                let here = |target: &ferrite_lsp::features::Target| {
+                    active.is_some_and(|doc| {
+                        doc.path == real_path(&target.path)
+                            && char_range(doc.buffer.rope(), target.range, encoding)
+                                .contains(&retry.pos)
+                    })
+                };
+                if targets.len() > 1 {
+                    targets.retain(|t| !here(t));
+                }
+                match targets.len() {
+                    0 => self.status = "정의를 찾지 못했습니다".into(),
+                    1 => {
+                        let target = &targets[0];
+                        self.navigate_to(&target.path, target.range, encoding);
+                    }
+                    _ => {
+                        let root = self.tree.as_ref().map(FileTree::root);
+                        let list = ReferenceList::new("정의", &name, targets, encoding, root);
+                        self.references = Some(list);
+                    }
+                }
+            }
             Pending::References { name } => {
                 let targets = parse_locations(&result);
                 if targets.is_empty() {
                     self.status = format!("'{name}'의 참조가 없습니다");
                 } else {
                     let root = self.tree.as_ref().map(FileTree::root);
-                    self.references = Some(ReferenceList::new(&name, targets, encoding, root));
+                    let list = ReferenceList::new("참조", &name, targets, encoding, root);
+                    self.references = Some(list);
                 }
             }
             Pending::Format { path } => {
@@ -2909,7 +2938,7 @@ mod tests {
         );
 
         drop(harness);
-        fs::remove_dir_all(&dir).unwrap();
+        remove_project(&dir);
     }
 
     /// 실제 jdt.ls·Spring Boot LS를 받아 중계를 끝까지 확인한다. Spring Boot LS가 jdt.ls에게서

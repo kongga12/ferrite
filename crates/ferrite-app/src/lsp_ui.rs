@@ -18,7 +18,7 @@ const POPUP_WIDTH: f32 = 420.0;
 pub enum Pending {
     Completion { path: PathBuf, anchor: usize },
     Hover { path: PathBuf, pos: usize },
-    Definition,
+    Definition { name: String },
     References { name: String },
     Format { path: PathBuf },
     Rename,
@@ -291,7 +291,9 @@ pub struct ReferenceList {
 
 impl ReferenceList {
     /// 각 위치에 "파일:줄  내용" 라벨을 붙인다. 열리지 않은 파일은 디스크에서 그 줄을 읽는다.
+    /// `kind`는 목록 이름("참조", "정의").
     pub fn new(
+        kind: &str,
         name: &str,
         targets: Vec<Target>,
         encoding: PositionEncoding,
@@ -316,7 +318,7 @@ impl ReferenceList {
             })
             .collect::<Vec<_>>();
         Self {
-            title: format!("참조 — {name} ({}개)", items.len()),
+            title: format!("{kind} — {name} ({}개)", items.len()),
             items,
             encoding,
         }

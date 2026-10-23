@@ -621,7 +621,7 @@ mod tests {
         let java: Vec<_> = crate::catalog::servers_for("java")
             .map(|s| s.name)
             .collect();
-        assert_eq!(java, ["jdtls", "spring-boot"]);
+        assert_eq!(java, ["jdtls", "spring-boot", "ferrite-egov"]);
         assert_eq!(
             for_language("spring-boot-properties-yaml").map(|s| s.name),
             Some("spring-boot")
