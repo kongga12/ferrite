@@ -1021,9 +1021,13 @@ impl FerriteApp {
         };
         let result = match result {
             Ok(result) => result,
-            // 편집 직후에는 서버가 "내용이 바뀌었다"며 요청을 버린다. 같은 문서면 다시 보낸다.
+            // 서버가 "내용이 바뀌었다"며 요청을 버리면 다시 보낸다. 단, 처음 요청한 문서 버전
+            // 그대로일 때만. 그 사이 문서가 바뀌었으면 처음 위치가 지금 문서와 맞지 않고,
+            // 지금 버전을 붙여 보내면 오래된 편집 거부까지 우회해 엉뚱한 곳을 고친다.
             Err(e) if e.is_retryable() && retry.attempts < MAX_LSP_RETRIES => {
-                if self.active.is_some_and(|i| self.docs[i].path == retry.path) {
+                if self.request_still_current(&retry)
+                    && self.active.is_some_and(|i| self.docs[i].path == retry.path)
+                {
                     self.send_lsp_request(retry.kind, retry.pos, retry.attempts + 1);
                 }
                 return;
@@ -1072,7 +1076,7 @@ impl FerriteApp {
                 let edits = parse_text_edits(&result);
                 if edits.is_empty() {
                     self.status = "포맷할 내용이 없습니다".into();
-                } else if self.edit_still_valid(&retry) {
+                } else if self.request_still_current(&retry) {
                     let file = FileEdit {
                         path,
                         edits,
@@ -1087,7 +1091,7 @@ impl FerriteApp {
                 }
             }
             Pending::Rename => {
-                if !self.edit_still_valid(&retry) {
+                if !self.request_still_current(&retry) {
                     return;
                 }
                 let edits = parse_workspace_edit(&result);
@@ -1110,7 +1114,7 @@ impl FerriteApp {
                 }
             }
             Pending::Resolve => {
-                if !self.edit_still_valid(&retry) {
+                if !self.request_still_current(&retry) {
                     return;
                 }
                 let (edits, command) = parse_resolved_action(&result);
@@ -1125,15 +1129,16 @@ impl FerriteApp {
         }
     }
 
-    /// 요청한 뒤 그 문서가 바뀌지 않았는지. 바뀌었으면 서버가 옛 내용 기준으로 계산한 편집이라
-    /// 적용하면 엉뚱한 곳을 고치게 되므로(실제로 겹친 응답에서 코드가 깨졌다) 버리고 알린다.
-    fn edit_still_valid(&mut self, retry: &Retry) -> bool {
+    /// 요청한 뒤 그 문서가 바뀌지 않았는지. 바뀌었으면 서버가 옛 내용 기준으로 계산한 결과라
+    /// 적용하면 엉뚱한 곳을 고치게 되므로(실제로 겹친 응답에서 코드가 깨졌다) 버린다.
+    /// 사용자가 직접 한 요청일 때만 알린다(타이핑 중 자동완성·호버가 버려지는 것은 흔하다).
+    fn request_still_current(&mut self, retry: &Retry) -> bool {
         let unchanged = self
             .docs
             .iter()
             .find(|d| d.path == retry.path)
             .is_some_and(|d| d.buffer.version() == retry.version);
-        if !unchanged {
+        if !unchanged && retry.kind.is_explicit() {
             self.status =
                 "요청 뒤에 문서가 바뀌어 결과를 적용하지 않았습니다. 다시 시도하세요".into();
         }
@@ -2159,7 +2164,8 @@ mod tests {
         done: impl Fn(&FerriteApp) -> bool,
     ) -> bool {
         for _ in 0..50 {
-            harness.run();
+            // 기다리는 동안 스피너 등이 계속 다시 그리기를 요청하므로 run()을 쓰면 패닉한다.
+            harness.run_ok();
             if done(harness.state()) {
                 return true;
             }
