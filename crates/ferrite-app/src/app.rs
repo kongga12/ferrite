@@ -1120,10 +1120,12 @@ impl FerriteApp {
                     return;
                 }
                 let (edits, command) = parse_resolved_action(&result);
-                if self.apply_workspace_edit(server, edits, encoding).is_some()
-                    && let Some(command) = command
-                {
-                    self.execute_command(server, command, encoding);
+                match (self.apply_workspace_edit(server, edits, encoding), command) {
+                    (Some(_), Some(command)) => self.execute_command(server, command, encoding),
+                    (Some((_, 0)), None) => {
+                        self.status = "코드 액션에 적용할 편집이 없습니다".into();
+                    }
+                    _ => {}
                 }
             }
             // 명령의 결과 편집은 서버가 workspace/applyEdit로 따로 보낸다.
@@ -1255,8 +1257,16 @@ impl FerriteApp {
         self.focus_editor = true;
     }
 
+    /// 자동완성 팝업을 닫고, 아직 오지 않은 자동완성 응답도 버린다. 그러지 않으면 늦게 온 응답이
+    /// 적용하거나 닫은 팝업을 다시 연다(Ctrl+Space를 여러 번 눌렀을 때 등).
+    fn close_completion(&mut self) -> Option<CompletionPopup> {
+        self.pending
+            .retain(|_, (pending, _)| !matches!(pending, Pending::Completion { .. }));
+        self.completion.take()
+    }
+
     fn accept_completion(&mut self) {
-        let (Some(popup), Some(i)) = (self.completion.take(), self.active) else {
+        let (Some(popup), Some(i)) = (self.close_completion(), self.active) else {
             return;
         };
         let doc = &mut self.docs[i];
@@ -1705,7 +1715,7 @@ impl FerriteApp {
             return;
         }
         if pressed(Key::Escape) {
-            self.completion = None;
+            self.close_completion();
             return;
         }
         if pressed(Key::Enter) || pressed(Key::Tab) {
@@ -1760,6 +1770,7 @@ impl FerriteApp {
         }
         if let Some(popup) = &mut self.completion {
             let doc = &self.docs[i];
+            // 여기서는 요청을 버리지 않는다: 같은 프레임에 막 보낸 새 요청(미완성 목록 갱신)일 수 있다.
             if popup.path != doc.path || !popup.refilter(&doc.buffer) {
                 self.completion = None;
             }
