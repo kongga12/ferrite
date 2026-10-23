@@ -1,0 +1,31 @@
+[package]
+name = "ferrite-core"
+description = "Ferrite 코어: UI에 의존하지 않는 문서·편집·구문 분석 로직"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+encoding_rs.workspace = true
+regex = "1.13.1"
+ropey.workspace = true
+serde = { version = "1.0.229", features = ["derive"] }
+toml = "1.1.8"
+trash = "5"
+tree-sitter = "0.27.1"
+tree-sitter-c = "0.24.2"
+tree-sitter-cpp = "0.23.4"
+tree-sitter-css = "0.25.0"
+tree-sitter-go = "0.25.0"
+tree-sitter-html = "0.23.2"
+tree-sitter-java = "0.23.5"
+tree-sitter-javascript = "0.25.0"
+tree-sitter-json = "0.24.8"
+tree-sitter-php = "0.25.1"
+tree-sitter-python = "0.25.0"
+tree-sitter-rust = "0.24.2"
+tree-sitter-sequel = "0.3.11"
+tree-sitter-toml-ng = "0.7.0"
+tree-sitter-xml = "0.7.0"
+tree-sitter-yaml = "0.7.2"

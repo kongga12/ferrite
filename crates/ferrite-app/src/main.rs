@@ -4,14 +4,20 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod editor_view;
 mod file_tree;
+mod find_bar;
 mod fonts;
-mod text_file;
+mod theme;
+mod watcher;
+
+#[cfg(test)]
+mod perf;
 
 use eframe::egui;
 
 fn main() -> eframe::Result {
-    let project = std::env::args_os().nth(1).map(std::path::PathBuf::from);
+    let start = std::env::args_os().nth(1).map(std::path::PathBuf::from);
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Ferrite")
@@ -22,6 +28,6 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "Ferrite",
         options,
-        Box::new(|cc| Ok(Box::new(app::FerriteApp::new(cc, project)))),
+        Box::new(|cc| Ok(Box::new(app::FerriteApp::new(cc, start)))),
     )
 }

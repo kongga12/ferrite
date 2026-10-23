@@ -1,0 +1,21 @@
+[package]
+name = "ferrite-app"
+description = "Rust 기반 크로스플랫폼 경량 IDE"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "ferrite"
+path = "src/main.rs"
+
+[dependencies]
+dirs = "7.0.0"
+eframe.workspace = true
+ferrite-core.workspace = true
+notify = "8"
+rfd.workspace = true
+
+[dev-dependencies]
+egui_kittest.workspace = true

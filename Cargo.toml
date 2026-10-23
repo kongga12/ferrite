@@ -1,15 +1,18 @@
-[package]
-name = "ferrite"
+[workspace]
+members = ["crates/*"]
+resolver = "3"
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
-description = "Rust 기반 크로스플랫폼 경량 IDE"
 license = "MIT OR Apache-2.0"
 publish = false
 
-[dependencies]
+[workspace.dependencies]
+ferrite-core = { path = "crates/ferrite-core" }
 eframe = "0.37"
-encoding_rs = "0.8"
-rfd = "0.17"
-
-[dev-dependencies]
 egui_kittest = { version = "0.37", features = ["eframe"] }
+encoding_rs = "0.8"
+# 줄바꿈은 LF만 인정한다(CR·유니코드 줄 구분자를 줄로 세지 않음). tree-sitter의 행 계산과 맞추기 위함.
+ropey = { version = "1.6", default-features = false, features = ["simd"] }
+rfd = "0.17"

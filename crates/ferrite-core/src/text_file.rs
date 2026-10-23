@@ -9,8 +9,9 @@ use std::path::Path;
 use encoding_rs::EUC_KR;
 
 /// 편집기로 여는 파일의 최대 크기.
-// ponytail: 파일 전체를 String으로 올리는 방식의 상한. Phase 1 ropey + 가상화 에디터에서 상향.
-pub const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024;
+// ponytail: 파일 전체를 메모리에 올리는 방식의 상한(읽을 때 원본·디코딩·로프로 순간 3배 가까이 쓴다).
+// 더 큰 파일은 메모리 매핑 + 부분 로딩이 필요하다.
+pub const MAX_FILE_SIZE: u64 = 256 * 1024 * 1024;
 
 /// 바이너리 판별 시 검사할 앞부분 길이(git과 같은 휴리스틱).
 const BINARY_SNIFF_LEN: usize = 8000;
@@ -107,17 +108,21 @@ impl From<io::Error> for TextFileError {
     }
 }
 
-pub fn load(path: &Path) -> Result<TextContent, TextFileError> {
+/// 크기 제한을 확인하고 파일 내용을 읽는다.
+pub fn read(path: &Path) -> Result<Vec<u8>, TextFileError> {
     let size = fs::metadata(path)?.len();
     if size > MAX_FILE_SIZE {
         return Err(TextFileError::TooLarge(size));
     }
-    decode(&fs::read(path)?)
+    Ok(fs::read(path)?)
 }
 
-pub fn save(path: &Path, content: &TextContent) -> Result<(), TextFileError> {
-    save_atomic(path, &encode(content)?)?;
-    Ok(())
+/// 디스크 내용이 바뀌었는지 비교할 때 쓰는 해시.
+pub fn content_hash(bytes: &[u8]) -> u64 {
+    use std::hash::{DefaultHasher, Hasher};
+    let mut hasher = DefaultHasher::new();
+    hasher.write(bytes);
+    hasher.finish()
 }
 
 /// UTF-8(BOM 유무) → CP949 순으로 판별한다. 둘 다 아니면 데이터 손상을 막기 위해 거부한다.
@@ -177,7 +182,7 @@ pub fn encode(content: &TextContent) -> Result<Vec<u8>, TextFileError> {
 
 /// 같은 디렉터리의 임시 파일에 쓴 뒤 rename으로 교체한다.
 /// 쓰는 도중 실패하거나 프로세스가 죽어도 원본 파일은 손상되지 않는다.
-fn save_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     // 심볼릭 링크는 링크 자체가 아니라 실제 대상 파일을 교체해야 한다.
     let target = match fs::canonicalize(path) {
         Ok(p) => p,
@@ -264,7 +269,7 @@ mod tests {
         let path = dir.join("a.txt");
         fs::write(&path, "old").unwrap();
 
-        save_atomic(&path, b"new").unwrap();
+        write_atomic(&path, b"new").unwrap();
 
         assert_eq!(fs::read(&path).unwrap(), b"new");
         assert!(!dir.join(".a.txt.ferrite-tmp").exists());
