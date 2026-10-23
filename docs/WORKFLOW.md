@@ -114,7 +114,21 @@
     - pip는 버전만 고정하고 해시는 고정하지 않는다. 의존 휠이 플랫폼마다 달라서다.
     - ruff는 등록하지 않았다. 언어마다 서버를 하나만 띄우는 구조라서다.
     - jdt.ls는 2-5에서 등록한다.
-- [ ] 2-5 Java: jdt.ls + Lombok, Spring Boot LS 중계
+- [x] 2-5 Java: jdt.ls + Lombok
+  - 언어 서버 매니저로 jdt.ls 1.63.0(Eclipse 배포본, 공개 SHA-256)과 Lombok 1.18.46을 함께 설치한다.
+    - Lombok jar: Maven Central은 SHA-1만 준다. Central의 SHA-1과 맞는 jar로 SHA-256을 구해 고정했다.
+    - 한 서버가 여러 파일을 가질 수 있게 했다. 오프라인 설치는 파일 여러 개를 골라 해시로 짝을 찾는다.
+  - 실행: 공식 스크립트(`bin/jdtls.py`)와 같은 JVM 인자를 쓴다.
+    - 설정 폴더는 읽기 전용으로 공유한다. `-data`는 프로젝트마다 `servers/.workspaces/jdtls/<폴더이름-해시>`로 둔다.
+    - Lombok은 `-javaagent`로 붙인다.
+  - Java: jdt.ls는 Java 21 이상으로 띄워야 한다. JAVA_HOME, PATH 순으로 21 이상을 찾는다.
+    - 없으면 찾은 버전과 함께 이유를 상태바에 보인다.
+    - 프로젝트는 Java 8·11이어도 된다.
+  - jdt.ls 코드 액션의 `java.apply.workspaceEdit` 명령은 서버로 보내지 않고 클라이언트가 직접 적용한다.
+  - 한계
+    - 힙은 vscode-java 기본값(`-Xms100m -Xmx2G`)이다.
+    - JRE를 대신 설치해 주지는 않는다(vscode-java는 JRE를 동봉).
+- [ ] 2-5b Spring Boot LS 중계: 한 언어에 서버 둘(jdt.ls + Spring Boot LS)을 붙이고 jdt.ls와의 메시지를 중계
 - [ ] 2-6 서버 크래시 자동 재시작(백오프), 3개 OS 최종 검증
 
 - JSON-RPC over stdio 클라이언트. 요청/응답 상관관계, 취소, 타임아웃 처리

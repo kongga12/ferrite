@@ -26,6 +26,7 @@ const STDERR_TAIL_LINES: usize = 20;
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
 const INITIALIZE_ID: i64 = 0;
 
+#[derive(Debug)]
 pub struct ServerCommand {
     pub program: PathBuf,
     pub args: Vec<String>,

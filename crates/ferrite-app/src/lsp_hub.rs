@@ -315,8 +315,16 @@ fn start_server(
         state: ServerState::NotInstalled,
         opened: HashMap::new(),
     };
-    let (Some(command), Some(root)) = (install::command(install_root, spec), root) else {
+    let Some(root) = root else {
         return server;
+    };
+    let command = match install::command(install_root, spec, root) {
+        None => return server,
+        Some(Err(reason)) => {
+            server.state = ServerState::Failed(reason);
+            return server;
+        }
+        Some(Ok(command)) => command,
     };
     let ctx = ctx.clone();
     match LanguageServer::start(&command, root, move || ctx.request_repaint()) {
