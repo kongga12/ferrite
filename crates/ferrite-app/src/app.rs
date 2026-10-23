@@ -17,6 +17,7 @@ use crate::file_tree::{FileTree, TreeAction};
 use crate::find_bar::{FindAction, FindBar};
 use crate::lsp_hub::{DocSync, HubUpdate, LspHub, ServerState};
 use crate::lsp_ui::{ActionMenu, CompletionPopup, Pending, ReferenceList, word_at, word_start};
+use crate::servers::{ServerAction, ServerManager, install_hint};
 use crate::watcher::FsWatcher;
 use ferrite_lsp::client::RpcError;
 use ferrite_lsp::edits::{
@@ -130,6 +131,15 @@ struct NamePrompt {
 }
 
 /// OS별 설정 파일 위치(Windows `%APPDATA%`, macOS `~/Library/Application Support`, Linux `~/.config`).
+/// 언어 서버 매니저가 서버를 설치하는 곳. Windows `%LOCALAPPDATA%\ferrite\servers`,
+/// macOS `~/Library/Application Support/ferrite/servers`, Linux `~/.local/share/ferrite/servers`.
+fn servers_root() -> PathBuf {
+    dirs::data_local_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("ferrite")
+        .join("servers")
+}
+
 fn settings_path() -> Option<PathBuf> {
     Some(dirs::config_dir()?.join("ferrite").join("settings.toml"))
 }
@@ -374,6 +384,7 @@ pub struct FerriteApp {
     /// 휴지통으로 옮기기 전 확인을 기다리는 경로.
     confirm_delete: Option<PathBuf>,
     hub: LspHub,
+    servers: ServerManager,
     /// 아래쪽 "문제" 목록을 보이는지.
     show_problems: bool,
     /// 응답을 기다리는 언어 서버 요청.
@@ -421,6 +432,7 @@ impl FerriteApp {
                 ),
             ),
         };
+        let settings_failed = settings_error.is_some();
         let mut app = Self {
             tree,
             docs: Vec::new(),
@@ -435,7 +447,8 @@ impl FerriteApp {
             watcher: FsWatcher::new(cc.egui_ctx.clone()).ok(),
             name_prompt: None,
             confirm_delete: None,
-            hub: LspHub::new(cc.egui_ctx.clone()),
+            hub: LspHub::new(cc.egui_ctx.clone(), servers_root()),
+            servers: ServerManager::new(servers_root()),
             show_problems: false,
             pending: std::collections::HashMap::new(),
             completion: None,
@@ -443,6 +456,14 @@ impl FerriteApp {
             hover: None,
             references: None,
         };
+        let outdated = app.servers.outdated();
+        // 설정 오류 안내가 더 급하므로 그때는 덮어쓰지 않는다.
+        if !outdated.is_empty() && !settings_failed {
+            app.status = format!(
+                "언어 서버 업데이트 있음: {} (도구 > 언어 서버)",
+                outdated.join(", ")
+            );
+        }
         if let Some(file) = file {
             app.open_file(file);
         }
@@ -1000,9 +1021,13 @@ impl FerriteApp {
         };
         let result = match result {
             Ok(result) => result,
-            // 편집 직후에는 서버가 "내용이 바뀌었다"며 요청을 버린다. 같은 문서면 다시 보낸다.
+            // 서버가 "내용이 바뀌었다"며 요청을 버리면 다시 보낸다. 단, 처음 요청한 문서 버전
+            // 그대로일 때만. 그 사이 문서가 바뀌었으면 처음 위치가 지금 문서와 맞지 않고,
+            // 지금 버전을 붙여 보내면 오래된 편집 거부까지 우회해 엉뚱한 곳을 고친다.
             Err(e) if e.is_retryable() && retry.attempts < MAX_LSP_RETRIES => {
-                if self.active.is_some_and(|i| self.docs[i].path == retry.path) {
+                if self.request_still_current(&retry)
+                    && self.active.is_some_and(|i| self.docs[i].path == retry.path)
+                {
                     self.send_lsp_request(retry.kind, retry.pos, retry.attempts + 1);
                 }
                 return;
@@ -1051,7 +1076,7 @@ impl FerriteApp {
                 let edits = parse_text_edits(&result);
                 if edits.is_empty() {
                     self.status = "포맷할 내용이 없습니다".into();
-                } else if self.edit_still_valid(&retry) {
+                } else if self.request_still_current(&retry) {
                     let file = FileEdit {
                         path,
                         edits,
@@ -1066,7 +1091,7 @@ impl FerriteApp {
                 }
             }
             Pending::Rename => {
-                if !self.edit_still_valid(&retry) {
+                if !self.request_still_current(&retry) {
                     return;
                 }
                 let edits = parse_workspace_edit(&result);
@@ -1089,7 +1114,7 @@ impl FerriteApp {
                 }
             }
             Pending::Resolve => {
-                if !self.edit_still_valid(&retry) {
+                if !self.request_still_current(&retry) {
                     return;
                 }
                 let (edits, command) = parse_resolved_action(&result);
@@ -1104,15 +1129,16 @@ impl FerriteApp {
         }
     }
 
-    /// 요청한 뒤 그 문서가 바뀌지 않았는지. 바뀌었으면 서버가 옛 내용 기준으로 계산한 편집이라
-    /// 적용하면 엉뚱한 곳을 고치게 되므로(실제로 겹친 응답에서 코드가 깨졌다) 버리고 알린다.
-    fn edit_still_valid(&mut self, retry: &Retry) -> bool {
+    /// 요청한 뒤 그 문서가 바뀌지 않았는지. 바뀌었으면 서버가 옛 내용 기준으로 계산한 결과라
+    /// 적용하면 엉뚱한 곳을 고치게 되므로(실제로 겹친 응답에서 코드가 깨졌다) 버린다.
+    /// 사용자가 직접 한 요청일 때만 알린다(타이핑 중 자동완성·호버가 버려지는 것은 흔하다).
+    fn request_still_current(&mut self, retry: &Retry) -> bool {
         let unchanged = self
             .docs
             .iter()
             .find(|d| d.path == retry.path)
             .is_some_and(|d| d.buffer.version() == retry.version);
-        if !unchanged {
+        if !unchanged && retry.kind.is_explicit() {
             self.status =
                 "요청 뒤에 문서가 바뀌어 결과를 적용하지 않았습니다. 다시 시도하세요".into();
         }
@@ -1380,8 +1406,34 @@ impl FerriteApp {
                         }
                     }
                 });
+                ui.menu_button("도구", |ui| {
+                    if ui.button("언어 서버…").clicked() {
+                        ui.close();
+                        self.servers.show();
+                    }
+                });
             });
         });
+    }
+
+    /// 언어 서버 설치·삭제를 시작한다. 지울 때는 실행 중인 서버를 먼저 내린다(Windows는
+    /// 실행 중인 파일을 못 지운다). 설치는 그대로 두고 끝난 뒤 새 실행 파일로 다시 띄운다.
+    fn start_server_action(&mut self, action: ServerAction, ctx: &egui::Context) {
+        if let ServerAction::Uninstall(server) = &action {
+            self.hub.stop(server.name);
+        }
+        self.servers.start(action, ctx);
+    }
+
+    /// 끝난 설치·삭제를 알리고, 그 서버를 쓰던 언어를 다시 띄우게 한다.
+    fn finish_server_jobs(&mut self) {
+        for done in self.servers.poll() {
+            self.hub.stop(done.server.name);
+            self.status = match done.result {
+                Ok(()) => format!("{} {}를 마쳤습니다", done.server.name, done.verb),
+                Err(e) => format!("{} {} 실패: {e}", done.server.name, done.verb),
+            };
+        }
     }
 
     /// 열린 문서를 언어 서버와 맞추고, 서버에서 온 진단·메시지를 반영한다.
@@ -1469,6 +1521,7 @@ impl FerriteApp {
 
     fn status_bar(&mut self, ui: &mut egui::Ui) {
         let mut restart = None;
+        let mut install = None;
         egui::Panel::bottom("status_bar").show(ui, |ui| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if let Some(doc) = self.active.map(|i| &mut self.docs[i]) {
@@ -1485,8 +1538,9 @@ impl FerriteApp {
                         self.show_problems = !self.show_problems;
                     }
                     if let Some(lang) = doc.lang
-                        && let Some((name, state)) = self.hub.status(lang)
+                        && let Some((server, state)) = self.hub.status(lang)
                     {
+                        let name = server.name;
                         match state {
                             ServerState::Starting => {
                                 ui.label(format!("{name}: 준비 중…"));
@@ -1495,10 +1549,28 @@ impl FerriteApp {
                                 ui.label(format!("{name}: 준비됨"));
                             }
                             ServerState::NotInstalled => {
-                                ui.label(format!("{name}: 설치 안 됨"))
-                                    .on_hover_text(format!(
-                                        "PATH에서 {name}을(를) 찾지 못했습니다"
-                                    ));
+                                if let Some(progress) = self.servers.progress_text(name) {
+                                    ui.label(format!("{name}: {progress}"));
+                                } else if ferrite_lsp::install::installable(server) {
+                                    let hint = install_hint(server);
+                                    if ui
+                                        .button(format!("{name} 설치"))
+                                        .on_hover_text(format!(
+                                            "언어 서버가 없습니다. Ferrite가 {name} {}을(를) \
+                                             설치합니다({hint}). 도구 > 언어 서버에서 관리",
+                                            server.version
+                                        ))
+                                        .clicked()
+                                    {
+                                        install = Some(server);
+                                    }
+                                } else {
+                                    ui.label(format!("{name}: 설치 안 됨"))
+                                        .on_hover_text(format!(
+                                            "PATH에서 {name}을(를) 찾지 못했고, \
+                                             이 OS·CPU용 배포본도 없습니다"
+                                        ));
+                                }
                             }
                             ServerState::Failed(reason) => {
                                 let text =
@@ -1550,6 +1622,10 @@ impl FerriteApp {
         });
         if let Some(lang) = restart {
             self.hub.restart(lang);
+        }
+        if let Some(server) = install {
+            let ctx = ui.ctx().clone();
+            self.start_server_action(ServerAction::Install { server, file: None }, &ctx);
         }
     }
 
@@ -1935,6 +2011,7 @@ impl FerriteApp {
 impl eframe::App for FerriteApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.process_fs_events();
+        self.finish_server_jobs();
         self.sync_language_servers();
         if std::mem::take(&mut self.settings_changed) {
             let (settings, error) = load_settings();
@@ -1959,6 +2036,10 @@ impl eframe::App for FerriteApp {
         self.pending_close_dialog(ui.ctx());
         self.name_prompt_dialog(ui.ctx());
         self.delete_dialog(ui.ctx());
+        let ctx = ui.ctx().clone();
+        if let Some(action) = self.servers.ui(&ctx) {
+            self.start_server_action(action, &ctx);
+        }
     }
 }
 
@@ -2083,7 +2164,8 @@ mod tests {
         done: impl Fn(&FerriteApp) -> bool,
     ) -> bool {
         for _ in 0..50 {
-            harness.run();
+            // 기다리는 동안 스피너 등이 계속 다시 그리기를 요청하므로 run()을 쓰면 패닉한다.
+            harness.run_ok();
             if done(harness.state()) {
                 return true;
             }
@@ -2261,6 +2343,8 @@ mod tests {
         fs::remove_dir_all(&dir).unwrap();
     }
 
+    // 여기부터 rust-analyzer를 실제로 띄우는 테스트는 `run()` 대신 `run_ok()`를 쓴다. 서버 알림
+    // (색인 진행률 등)마다 다시 그리기를 요청해, 알림이 몰리면 `run()`이 max_steps를 넘겨 패닉한다.
     #[test]
     fn 언어_서버_진단이_상태바와_문제_목록에_보이고_누르면_이동한다() {
         if !rust_analyzer_runs() {
@@ -2274,7 +2358,7 @@ mod tests {
         // 첫 실행은 rust-analyzer가 표준 라이브러리를 읽느라 오래 걸릴 수 있다
         let mut arrived = false;
         for _ in 0..1200 {
-            harness.run();
+            harness.run_ok();
             if !harness.state().docs[0].lsp.problems.is_empty() {
                 arrived = true;
                 break;
@@ -2296,7 +2380,7 @@ mod tests {
 
         // 상태바의 개수를 눌러 문제 목록을 열고, 항목을 누르면 커서가 그 위치로 간다
         harness.get_by_label_contains(" · 경고").click();
-        harness.run();
+        harness.run_ok();
         let (line, col) = harness.state().docs[0]
             .buffer
             .pos_to_line_col(problem.range.start);
@@ -2306,7 +2390,7 @@ mod tests {
             .next()
             .expect("문제 목록 항목")
             .click();
-        harness.run();
+        harness.run_ok();
         assert_eq!(
             harness.state().docs[0].buffer.selection().head,
             problem.range.start
@@ -2365,7 +2449,7 @@ mod tests {
         done: impl Fn(&FerriteApp) -> bool,
     ) -> bool {
         for _ in 0..1200 {
-            harness.run();
+            harness.run_ok();
             if done(harness.state()) {
                 return true;
             }
@@ -2408,7 +2492,7 @@ mod tests {
                 caret(h, pos);
                 h.key_press_modifiers(modifiers, key);
                 for _ in 0..20 {
-                    h.run();
+                    h.run_ok();
                     if done(h) {
                         return true;
                     }
@@ -2427,7 +2511,7 @@ mod tests {
             "자동완성 팝업에 length가 없음"
         );
         harness.key_press(Key::Enter);
-        harness.run();
+        harness.run_ok();
         let after = harness.state().docs[0].buffer.text();
         assert!(
             after.contains("p.length\n") || after.contains("p.length()\n"),
@@ -2475,7 +2559,7 @@ mod tests {
         for _ in 0..60 {
             act(harness);
             for _ in 0..20 {
-                harness.run();
+                harness.run_ok();
                 if done(harness) {
                     return true;
                 }
@@ -2514,7 +2598,7 @@ mod tests {
                     .buffer
                     .set_selection(Selection::caret(on_name));
                 h.key_press(Key::F2);
-                h.run();
+                h.run_ok();
                 h.key_press_modifiers(Modifiers::COMMAND, Key::A);
                 h.get_by_role_and_label(Role::TextInput, "이름")
                     .type_text("size");
@@ -2569,5 +2653,92 @@ mod tests {
 
         drop(harness);
         remove_project(&dir);
+    }
+
+    /// 사용자의 실제 설치 폴더를 건드리지 않도록 언어 서버 설치 위치를 임시 폴더로 바꾼다.
+    fn isolate_servers(harness: &mut Harness<'_, FerriteApp>, root: &Path) {
+        let ctx = harness.ctx.clone();
+        let app = harness.state_mut();
+        app.servers = ServerManager::new(root.to_path_buf());
+        app.hub = LspHub::new(ctx, root.to_path_buf());
+    }
+
+    #[test]
+    fn 언어_서버_창은_업데이트를_알리고_설치본을_지운다() {
+        let dir = std::env::temp_dir().join(format!("ferrite-servers-ui-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let root = dir.join("servers");
+        // 예전 버전 lemminx가 설치된 것처럼 꾸민다(실행하지는 않는다).
+        let old = root.join("lemminx").join("0.1");
+        fs::create_dir_all(&old).unwrap();
+        fs::write(old.join("lemminx"), "").unwrap();
+        fs::write(old.join(ferrite_lsp::install::RECORD), "lemminx").unwrap();
+        let lemminx = ferrite_lsp::catalog::for_language("xml").unwrap();
+
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(1000.0, 700.0))
+            .build_eframe(|cc| FerriteApp::new(cc, Some(dir.clone())));
+        isolate_servers(&mut harness, &root);
+        assert_eq!(harness.state().servers.outdated(), ["lemminx"]);
+
+        harness.get_by_label("도구").click();
+        harness.run();
+        harness.get_by_label("언어 서버…").click();
+        harness.run();
+        harness.get_by_label(&format!("업데이트 있음 (0.1 → {})", lemminx.version));
+
+        harness.get_by_label("삭제").click();
+        assert!(
+            run_until(&mut harness, |app| app.status.contains("삭제를 마쳤습니다")),
+            "삭제가 끝나지 않음: {}",
+            harness.state().status
+        );
+        assert!(!root.join("lemminx").exists());
+        harness.run();
+        if ferrite_lsp::install::installable(lemminx) {
+            harness.get_by_label(&format!("설치 ({})", install_hint(lemminx)));
+        }
+
+        drop(harness);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn 언어_서버가_없으면_상태바에서_설치를_제안한다() {
+        if ferrite_lsp::client::find_program("lemminx").is_some() {
+            eprintln!("lemminx가 PATH에 있어 건너뜀");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("ferrite-servers-bar-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let mapper = dir.join("mapper.xml");
+        fs::write(&mapper, "<mapper namespace=\"a\"/>\n").unwrap();
+        let config = dir.join("config.toml");
+        fs::write(&config, "a = 1\n").unwrap();
+
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(1000.0, 700.0))
+            .build_eframe(|cc| FerriteApp::new(cc, Some(mapper.clone())));
+        isolate_servers(&mut harness, &dir.join("servers"));
+        assert!(run_until(&mut harness, |app| app
+            .hub
+            .status(Lang::Xml)
+            .is_some()));
+        let lemminx = ferrite_lsp::catalog::for_language("xml").unwrap();
+        if ferrite_lsp::install::installable(lemminx) {
+            harness.get_by_label("lemminx 설치");
+        } else {
+            harness.get_by_label("lemminx: 설치 안 됨");
+        }
+
+        // 맡을 서버가 없는 언어는 상태바에 서버 항목을 두지 않는다.
+        harness.state_mut().open_file(config);
+        harness.run();
+        assert!(harness.state().hub.status(Lang::Toml).is_none());
+        assert!(harness.query_by_label_contains("설치 안 됨").is_none());
+
+        drop(harness);
+        fs::remove_dir_all(&dir).unwrap();
     }
 }

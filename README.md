@@ -10,7 +10,10 @@ Rust로 작성한 크로스플랫폼(Windows / macOS / Linux) 경량 IDE.
 - 폴더 열기, 지연 로딩 프로젝트 트리(파일 감시로 자동 갱신), 탭 에디터
 - 트리 우클릭: 새 파일·새 폴더·이름 바꾸기·휴지통으로 삭제
 - 가상화 코드 에디터: 100MB 파일도 스크롤·입력 1ms 미만, 줄 번호, 한글 IME 조합 표시
-- 언어 서버(LSP): rust-analyzer로 검증했고, gopls·clangd·basedpyright·phpactor는 설치되어 있으면 연결
+- 언어 서버(LSP): rust-analyzer로 검증했다. gopls·clangd·basedpyright·phpactor·lemminx(XML)도 연결한다.
+  - 언어 서버 매니저(`도구 > 언어 서버`): 버전·SHA-256을 고정한 배포본을 내려받아 설치·업데이트·삭제한다.
+  - 서버가 없으면 상태바의 "설치" 버튼으로 바로 설치할 수 있다.
+  - 인터넷이 막힌 PC는 다른 PC에서 받은 파일로 설치한다("파일에서…").
   - 진단: 물결 밑줄, 말풍선, 문제 목록(상태바의 "오류 N · 경고 M" 클릭)
   - 자동완성 팝업, 호버 정보
   - 정의로 이동, 참조 목록
@@ -42,6 +45,8 @@ Rust로 작성한 크로스플랫폼(Windows / macOS / Linux) 경량 IDE.
 `파일 > 설정 열기`를 누르면 `settings.toml`이 만들어지고 에디터로 열립니다. 저장하면 바로 적용됩니다.
 - 위치: Windows `%APPDATA%\ferrite`, macOS `~/Library/Application Support/ferrite`, Linux `~/.config/ferrite`
 - 항목: 글꼴 크기, 테마(system/dark/light), 탭 크기, 기본 들여쓰기
+
+언어 서버 설치 위치: Windows `%LOCALAPPDATA%\ferrite\servers`, macOS `~/Library/Application Support/ferrite/servers`, Linux `~/.local/share/ferrite/servers`
 
 ## 빌드
 

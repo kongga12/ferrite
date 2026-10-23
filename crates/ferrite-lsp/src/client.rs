@@ -70,6 +70,18 @@ pub fn find_program(name: &str) -> Option<PathBuf> {
         })
 }
 
+/// 창 없는 앱(릴리스 빌드)에서 콘솔 프로그램을 띄우면 검은 창이 잠깐 뜨므로 막는다.
+pub(crate) fn hide_console(cmd: &mut Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    #[cfg(not(windows))]
+    let _ = cmd;
+}
+
 /// 서버가 돌려준 오류 응답.
 #[derive(Debug, Clone)]
 pub struct RpcError {
@@ -152,13 +164,7 @@ impl LanguageServer {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        // 창 없는 앱(릴리스 빌드)에서 콘솔 프로그램을 띄우면 검은 창이 잠깐 뜨므로 막는다.
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-            cmd.creation_flags(CREATE_NO_WINDOW);
-        }
+        hide_console(&mut cmd);
         let mut child = cmd
             .spawn()
             .map_err(|e| format!("{} 실행 실패: {e}", command.program.display()))?;

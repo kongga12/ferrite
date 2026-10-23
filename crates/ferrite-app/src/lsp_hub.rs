@@ -8,10 +8,10 @@ use std::time::{Duration, Instant};
 use eframe::egui;
 use ferrite_core::buffer::Buffer;
 use ferrite_core::syntax::{Lang, MAX_SYNTAX_BYTES};
-use ferrite_lsp::client::{
-    LanguageServer, RpcError, ServerCommand, ServerEvent, find_program, parse_diagnostics,
-};
+use ferrite_lsp::catalog::{self, Server as ServerSpec};
+use ferrite_lsp::client::{LanguageServer, RpcError, ServerEvent, parse_diagnostics};
 use ferrite_lsp::edits::{FileEdit, parse_workspace_edit};
+use ferrite_lsp::install;
 use ferrite_lsp::position::PositionEncoding;
 use lsp_types::Diagnostic;
 use serde_json::Value;
@@ -19,29 +19,16 @@ use serde_json::Value;
 /// 입력이 멈춘 뒤 서버에 보내기까지 기다리는 시간(타이핑마다 문서 전체를 보내지 않게).
 const CHANGE_DEBOUNCE: Duration = Duration::from_millis(150);
 
-/// 언어별 서버 실행 파일 이름과 인자. PATH에서 찾는다.
-// ponytail: PATH만 본다. Phase 2-4 언어 서버 매니저가 내려받아 둔 경로를 먼저 보도록 바꾼다.
-fn server_program(lang: Lang) -> Option<(&'static str, &'static [&'static str])> {
-    Some(match lang {
-        Lang::Rust => ("rust-analyzer", &[]),
-        Lang::Go => ("gopls", &[]),
-        Lang::Python => ("basedpyright-langserver", &["--stdio"]),
-        Lang::C | Lang::Cpp => ("clangd", &[]),
-        Lang::Php => ("phpactor", &["language-server"]),
-        _ => return None,
-    })
-}
-
 pub enum ServerState {
     Starting,
     Ready,
-    /// 실행 파일을 PATH에서 찾지 못했다.
+    /// Ferrite가 설치한 것도, PATH에 있는 것도 없다.
     NotInstalled,
     Failed(String),
 }
 
 struct Server {
-    name: &'static str,
+    spec: &'static ServerSpec,
     lsp: Option<LanguageServer>,
     state: ServerState,
     /// 서버에 연 문서와 마지막으로 보낸 LSP 버전.
@@ -91,14 +78,17 @@ pub enum HubUpdate {
 
 pub struct LspHub {
     root: Option<PathBuf>,
+    /// 언어 서버 매니저가 서버를 설치하는 폴더.
+    install_root: PathBuf,
     servers: HashMap<Lang, Server>,
     ctx: egui::Context,
 }
 
 impl LspHub {
-    pub fn new(ctx: egui::Context) -> Self {
+    pub fn new(ctx: egui::Context, install_root: PathBuf) -> Self {
         Self {
             root: None,
+            install_root,
             servers: HashMap::new(),
             ctx,
         }
@@ -112,15 +102,20 @@ impl LspHub {
         }
     }
 
-    /// 상태바 표시용 (서버 이름, 상태). 이 언어에 서버가 없으면 None.
-    pub fn status(&self, lang: Lang) -> Option<(&'static str, &ServerState)> {
-        self.servers.get(&lang).map(|s| (s.name, &s.state))
+    /// 상태바 표시용 (서버, 상태). 이 언어를 맡는 서버가 없거나 아직 띄우지 않았으면 None.
+    pub fn status(&self, lang: Lang) -> Option<(&'static ServerSpec, &ServerState)> {
+        self.servers.get(&lang).map(|s| (s.spec, &s.state))
     }
 
     /// 실패한 서버를 내려 다음 동기화 때 다시 띄우게 한다.
     // ponytail: 수동 재시작. Phase 2-6에서 지수 백오프 자동 재시작으로.
     pub fn restart(&mut self, lang: Lang) {
         self.servers.remove(&lang);
+    }
+
+    /// 이 서버를 쓰는 언어를 모두 내린다(설치·삭제 뒤 새 실행 파일로 다시 띄우도록).
+    pub fn stop(&mut self, name: &str) {
+        self.servers.retain(|_, s| s.spec.name != name);
     }
 
     /// 문서를 서버와 맞춘다. 매 프레임 열린 문서마다 부른다.
@@ -152,15 +147,18 @@ impl LspHub {
         if buffer.rope().len_bytes() > MAX_SYNTAX_BYTES {
             return;
         }
+        let Some(spec) = catalog::for_language(lang.lsp_id()) else {
+            return;
+        };
         let root = self
             .root
             .clone()
             .or_else(|| path.parent().map(Path::to_path_buf));
-        let ctx = &self.ctx;
+        let (ctx, install_root) = (&self.ctx, &self.install_root);
         let Some(server) = self
             .servers
             .entry(lang)
-            .or_insert_with(|| start_server(lang, root.as_deref(), ctx))
+            .or_insert_with(|| start_server(spec, install_root, root.as_deref(), ctx))
             .lsp_server()
         else {
             return;
@@ -261,7 +259,10 @@ impl LspHub {
                     ServerEvent::Ready => server.state = ServerState::Ready,
                     ServerEvent::Exited(reason) => {
                         let first = reason.lines().last().unwrap_or("").to_owned();
-                        updates.push(HubUpdate::Message(format!("{} 종료: {first}", server.name)));
+                        updates.push(HubUpdate::Message(format!(
+                            "{} 종료: {first}",
+                            server.spec.name
+                        )));
                         server.state = ServerState::Failed(reason);
                     }
                     ServerEvent::Notification { method, params } => {
@@ -302,21 +303,20 @@ impl Server {
     }
 }
 
-fn start_server(lang: Lang, root: Option<&Path>, ctx: &egui::Context) -> Server {
-    let (name, args) = server_program(lang).unwrap_or(("", &[]));
+fn start_server(
+    spec: &'static ServerSpec,
+    install_root: &Path,
+    root: Option<&Path>,
+    ctx: &egui::Context,
+) -> Server {
     let mut server = Server {
-        name,
+        spec,
         lsp: None,
         state: ServerState::NotInstalled,
         opened: HashMap::new(),
     };
-    let (Some(program), Some(root)) = (find_program(name).filter(|_| !name.is_empty()), root)
-    else {
+    let (Some(command), Some(root)) = (install::command(install_root, spec), root) else {
         return server;
-    };
-    let command = ServerCommand {
-        program,
-        args: args.iter().map(|a| (*a).to_owned()).collect(),
     };
     let ctx = ctx.clone();
     match LanguageServer::start(&command, root, move || ctx.request_repaint()) {

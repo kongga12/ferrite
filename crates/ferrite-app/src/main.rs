@@ -10,6 +10,7 @@ mod find_bar;
 mod fonts;
 mod lsp_hub;
 mod lsp_ui;
+mod servers;
 mod theme;
 mod watcher;
 
