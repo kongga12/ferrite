@@ -23,6 +23,34 @@ use serde_json::{Value, json};
 
 /// 입력이 멈춘 뒤 서버에 보내기까지 기다리는 시간(타이핑마다 문서 전체를 보내지 않게).
 const CHANGE_DEBOUNCE: Duration = Duration::from_millis(150);
+/// 실행 중이던 서버가 죽으면 다시 띄우기까지 기다리는 시간. 연달아 죽을수록 늘리고, 다 쓰면
+/// 자동 재시작을 멈춘다(상태바에서 눌러 다시 시작).
+const RESTART_DELAYS: [Duration; 5] = [
+    Duration::from_secs(1),
+    Duration::from_secs(2),
+    Duration::from_secs(4),
+    Duration::from_secs(8),
+    Duration::from_secs(16),
+];
+/// 이만큼 돌다가 죽었으면 연달아 죽은 것으로 치지 않는다(횟수를 처음부터 센다).
+const STABLE_UPTIME: Duration = Duration::from_secs(60);
+
+/// 서버가 죽었을 때: (연달아 죽은 횟수, 다시 띄우기까지 기다릴 시간). 너무 자주 죽으면 None.
+fn restart_after(previous_crashes: usize, uptime: Duration) -> (usize, Option<Duration>) {
+    let crashes = if uptime >= STABLE_UPTIME {
+        1
+    } else {
+        previous_crashes + 1
+    };
+    (crashes, RESTART_DELAYS.get(crashes - 1).copied())
+}
+
+/// 서버가 연달아 죽은 횟수와 다시 띄울 시각.
+#[derive(Default)]
+struct Crashes {
+    count: usize,
+    retry_at: Option<Instant>,
+}
 
 /// 문서의 LSP 언어 ID. Spring Boot 설정 파일(`application*`, `bootstrap*`)은 Spring 전용 ID라
 /// Spring Boot LS가 맡는다. 나머지는 언어 그대로.
@@ -41,6 +69,8 @@ pub enum ServerState {
     Ready,
     /// Ferrite가 설치한 것도, PATH에 있는 것도 없다.
     NotInstalled,
+    /// 실행 중에 죽어서 곧 다시 띄운다(종료 사유).
+    Restarting(String),
     Failed(String),
 }
 
@@ -48,6 +78,7 @@ struct Server {
     spec: &'static ServerSpec,
     lsp: Option<LanguageServer>,
     state: ServerState,
+    started: Instant,
     /// 서버에 연 문서와 마지막으로 보낸 LSP 버전.
     opened: HashMap<PathBuf, i32>,
 }
@@ -139,6 +170,8 @@ pub struct LspHub {
     internal: HashSet<(&'static str, i64)>,
     /// jdt.ls 확장이 Spring 프로젝트를 찾아 Spring Boot LS를 띄우라고 알렸다.
     spring_requested: bool,
+    /// 실행 중에 죽은 서버(자동 재시작 대기).
+    crashes: HashMap<&'static str, Crashes>,
     ctx: egui::Context,
 }
 
@@ -152,6 +185,7 @@ impl LspHub {
             relays: HashMap::new(),
             internal: HashSet::new(),
             spring_requested: false,
+            crashes: HashMap::new(),
             ctx,
         }
     }
@@ -164,6 +198,7 @@ impl LspHub {
             self.relays.clear();
             self.internal.clear();
             self.spring_requested = false;
+            self.crashes.clear();
             self.root = root.map(Path::to_path_buf);
         }
     }
@@ -174,18 +209,23 @@ impl LspHub {
         self.servers.get(spec.name).map(|s| (s.spec, &s.state))
     }
 
-    /// 이 문서의 주 서버를 내려 다음 동기화 때 다시 띄우게 한다.
-    // ponytail: 수동 재시작. Phase 2-6에서 지수 백오프 자동 재시작으로.
+    /// 이 문서의 주 서버를 내려 다음 동기화 때 다시 띄우게 한다(상태바에서 누른 수동 재시작).
     pub fn restart(&mut self, path: &Path, lang: Lang) {
         if let Some(spec) = catalog::for_language(language_id(lang, path)) {
             self.stop(spec.name);
         }
     }
 
-    /// 이 서버를 내린다(설치·삭제 뒤 새 실행 파일로 다시 띄우도록). jdt.ls와 Spring Boot LS는
-    /// 함께 내린다: jdt.ls가 바뀌면 Spring의 클래스패스 연동이 끊기고, Spring Boot LS를 새로
-    /// 설치·삭제하면 jdt.ls가 실을 확장 번들이 달라진다.
+    /// 이 서버를 내린다(설치·삭제 뒤 새 실행 파일로 다시 띄우도록). 연달아 죽은 횟수도 지운다.
     pub fn stop(&mut self, name: &str) {
+        self.crashes.retain(|n, _| *n != name);
+        self.remove(name);
+    }
+
+    /// 서버를 목록에서 뺀다. 다음 동기화 때 다시 띄운다. jdt.ls와 Spring Boot LS는 함께 뺀다:
+    /// jdt.ls가 바뀌면 Spring의 클래스패스 연동이 끊기고, Spring Boot LS를 새로 설치·삭제하면
+    /// jdt.ls가 실을 확장 번들이 달라진다.
+    fn remove(&mut self, name: &str) {
         let paired = [Launch::Jdtls, Launch::SpringBoot]
             .iter()
             .filter_map(|l| catalog::by_launch(*l))
@@ -352,6 +392,12 @@ impl LspHub {
         self.servers.get(server).is_some_and(|s| s.lsp.is_some())
     }
 
+    /// 이 서버가 연달아 죽은 횟수(테스트용).
+    #[cfg(test)]
+    pub fn crash_count(&self, server: &str) -> usize {
+        self.crashes.get(server).map_or(0, |c| c.count)
+    }
+
     pub fn document_version(&self, server: &str, path: &Path) -> Option<i32> {
         self.servers.get(server)?.opened.get(path).copied()
     }
@@ -376,6 +422,20 @@ impl LspHub {
 
     /// 쌓인 서버 이벤트를 처리한다. 중계할 것은 다른 서버로 넘기고, 나머지는 앱에 돌려준다.
     pub fn process_events(&mut self) -> Vec<HubUpdate> {
+        // 기다린 시간이 지난 서버는 목록에서 빼 다음 동기화 때 다시 띄운다(연달아 죽은 횟수는 둔다).
+        let now = Instant::now();
+        let due: Vec<_> = self
+            .crashes
+            .iter_mut()
+            .filter(|(_, c)| c.retry_at.is_some_and(|at| at <= now))
+            .map(|(&name, c)| {
+                c.retry_at = None;
+                name
+            })
+            .collect();
+        for name in due {
+            self.remove(name);
+        }
         // 이벤트를 먼저 모은다: 중계하려면 다른 서버를 빌려 써야 해서.
         let mut batches = Vec::new();
         for (&name, server) in &mut self.servers {
@@ -393,7 +453,10 @@ impl LspHub {
                 self.handle_event(name, encoding, event, &mut updates);
             }
             if let Some(server) = self.servers.get_mut(name)
-                && matches!(server.state, ServerState::Failed(_))
+                && matches!(
+                    server.state,
+                    ServerState::Failed(_) | ServerState::Restarting(_)
+                )
             {
                 // 프로세스는 이미 끝났다. 다시 시작하면 문서를 처음부터 다시 연다.
                 server.lsp = None;
@@ -421,11 +484,26 @@ impl LspHub {
                 }
             }
             ServerEvent::Exited(reason) => {
-                let first = reason.lines().last().unwrap_or("").to_owned();
-                updates.push(HubUpdate::Message(format!("{name} 종료: {first}")));
-                if let Some(server) = self.servers.get_mut(name) {
-                    server.state = ServerState::Failed(reason);
-                }
+                let Some(server) = self.servers.get_mut(name) else {
+                    return;
+                };
+                let last = reason.lines().last().unwrap_or("").to_owned();
+                let crashes = self.crashes.entry(name).or_default();
+                let (count, delay) = restart_after(crashes.count, server.started.elapsed());
+                crashes.count = count;
+                crashes.retry_at = delay.map(|d| Instant::now() + d);
+                let message = match delay {
+                    Some(delay) => {
+                        self.ctx.request_repaint_after(delay);
+                        server.state = ServerState::Restarting(reason);
+                        format!("{name} 종료: {last} ({}초 뒤 다시 시작)", delay.as_secs())
+                    }
+                    None => {
+                        server.state = ServerState::Failed(reason);
+                        format!("{name}이(가) 연달아 종료되어 자동 재시작을 멈췄습니다: {last}")
+                    }
+                };
+                updates.push(HubUpdate::Message(message));
             }
             ServerEvent::Notification { method, params } => {
                 if let Some(update) = notification(name, &method, &params, encoding) {
@@ -526,6 +604,7 @@ fn start_server(
         spec,
         lsp: None,
         state: ServerState::NotInstalled,
+        started: Instant::now(),
         opened: HashMap::new(),
     };
     let Some(root) = root else {
@@ -622,5 +701,27 @@ mod tests {
         sync.set_problems("jdtls", &rope, &[], utf16);
         let messages: Vec<_> = sync.problems.iter().map(|p| p.message.as_str()).collect();
         assert_eq!(messages, ["spring"], "jdtls 몫만 비운다");
+    }
+
+    #[test]
+    fn 연달아_죽을수록_오래_기다리고_다섯_번이면_멈춘다() {
+        let quick = Duration::from_secs(1);
+        let mut crashes = 0;
+        let mut delays = Vec::new();
+        loop {
+            let (count, delay) = restart_after(crashes, quick);
+            crashes = count;
+            match delay {
+                Some(delay) => delays.push(delay.as_secs()),
+                None => break,
+            }
+        }
+        assert_eq!(delays, [1, 2, 4, 8, 16]);
+        assert_eq!(crashes, 6);
+        // 1분 넘게 잘 돌다 죽었으면 처음부터 센다.
+        assert_eq!(
+            restart_after(5, STABLE_UPTIME),
+            (1, Some(Duration::from_secs(1)))
+        );
     }
 }

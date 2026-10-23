@@ -1605,6 +1605,10 @@ impl FerriteApp {
                                         ));
                                 }
                             }
+                            ServerState::Restarting(reason) => {
+                                ui.label(format!("{name}: 다시 시작하는 중…"))
+                                    .on_hover_text(reason.as_str());
+                            }
                             ServerState::Failed(reason) => {
                                 let text =
                                     egui::RichText::new(format!("{name}: 오류 (눌러서 다시 시작)"))
@@ -2793,6 +2797,60 @@ mod tests {
 
         drop(harness);
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn 실행_중에_죽은_서버는_기다렸다가_다시_띄운다() {
+        let dir = std::env::temp_dir().join(format!("ferrite-crash-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let root = dir.join("servers");
+        // lemminx가 설치된 것처럼 꾸미되, 실행 파일은 잠깐 떠 있다가 끝나는 스크립트다
+        // (초기화 요청을 받을 틈을 둬야 "실행 중에 죽음"이 된다).
+        let lemminx = ferrite_lsp::catalog::for_language("xml").unwrap();
+        let installed = root.join(lemminx.name).join(lemminx.version);
+        fs::create_dir_all(&installed).unwrap();
+        let (script, body) = if cfg!(windows) {
+            ("crash.cmd", "@ping -n 2 127.0.0.1 >nul\r\n@exit /b 3\r\n")
+        } else {
+            ("crash.sh", "#!/bin/sh\nsleep 1\nexit 3\n")
+        };
+        fs::write(installed.join(script), body).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(installed.join(script), fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        fs::write(installed.join(ferrite_lsp::install::RECORD), script).unwrap();
+        let mapper = dir.join("mapper.xml");
+        fs::write(&mapper, "<mapper/>\n").unwrap();
+
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(1000.0, 700.0))
+            .build_eframe(|cc| FerriteApp::new(cc, Some(dir.clone())));
+        isolate_servers(&mut harness, &root);
+        harness.state_mut().open_file(mapper);
+
+        // 처음 실행이 죽고, 1초 뒤 다시 띄운 것도 죽으면 연달아 죽은 횟수가 2가 된다.
+        let deadline = Instant::now() + std::time::Duration::from_secs(30);
+        while harness.state().hub.crash_count("lemminx") < 2 {
+            harness.run_ok();
+            assert!(
+                Instant::now() < deadline,
+                "30초 안에 다시 띄우지 않음: {}",
+                harness.state().status
+            );
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        harness.run_ok();
+        assert!(
+            harness.state().status.contains("2초 뒤 다시 시작"),
+            "두 번째는 더 오래 기다린다: {}",
+            harness.state().status
+        );
+        harness.get_by_label("lemminx: 다시 시작하는 중…");
+
+        drop(harness);
+        remove_project(&dir);
     }
 
     #[test]

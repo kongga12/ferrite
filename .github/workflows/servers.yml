@@ -1,0 +1,47 @@
+name: 언어 서버 실제 설치
+
+# 실제 배포처에서 언어 서버를 받아 설치·실행하고, jdt.ls ↔ Spring Boot LS 중계까지 3개 OS에서
+# 확인한다. 한 번에 약 150MB를 받으므로 PR마다 돌리지 않고, 서버 관련 코드가 바뀐 PR과
+# 수동 실행, 매주 한 번(고정한 배포 파일이 사라지거나 바뀌었는지 확인) 돈다.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 18 * * 0' # 매주 월요일 03:00 KST
+  pull_request:
+    paths:
+      - crates/ferrite-lsp/src/catalog.rs
+      - crates/ferrite-lsp/src/install.rs
+      - crates/ferrite-lsp/src/java.rs
+      - crates/ferrite-lsp/src/spring.rs
+      - crates/ferrite-lsp/src/client.rs
+      - crates/ferrite-lsp/tests/download.rs
+      - crates/ferrite-app/src/lsp_hub.rs
+      - .github/workflows/servers.yml
+
+jobs:
+  servers:
+    name: servers (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # jdt.ls·Spring Boot LS는 Java 21 이상으로 띄운다.
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Linux 빌드 의존성 설치
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libxkbcommon-dev libwayland-dev \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev fonts-nanum
+      - name: lemminx·jdt.ls 내려받기, Lombok getter 인식
+        run: cargo test -p ferrite-lsp --test download -- --ignored --nocapture
+      - name: Spring Boot LS ↔ jdt.ls 중계
+        run: cargo test -p ferrite-app -- --ignored spring_boot --nocapture
