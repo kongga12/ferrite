@@ -262,7 +262,10 @@ pub const SERVERS: &[Server] = &[
     Server {
         name: "jdtls",
         languages: &["java"],
-        version: "1.63.0",
+        // 1.61.0이 Java 21로 도는 마지막 판이다. 1.62부터는 Eclipse 4.42 플랫폼(2026-09-12에
+        // 필요 Java를 25로 올림)을 써서 Java 21로 띄우면 핵심 모듈이 로드되지 않고 바로 끝난다.
+        // 올릴 때는 `java::MIN_JAVA`도 함께 바꾼다(공식 jdtls.py는 아직 21로 검사해 믿을 수 없다).
+        version: "1.61.0",
         program: "jdtls",
         args: &[],
         launch: Launch::Jdtls,
@@ -271,9 +274,9 @@ pub const SERVERS: &[Server] = &[
             Asset {
                 os: "",
                 arch: "",
-                url: "https://download.eclipse.org/jdtls/milestones/1.63.0/jdt-language-server-1.63.0-202610191322.tar.gz",
-                sha256: "b1f2abe0b3cccb462cf64fb4a5587c7d09df60cf8be7748b152cbd89d018bdc4",
-                size: 51_143_565,
+                url: "https://download.eclipse.org/jdtls/milestones/1.61.0/jdt-language-server-1.61.0-202609031315.tar.gz",
+                sha256: "338e7e73d61836651ba2453919a0d34fa763eb4e7c03342092309bffb8934c64",
+                size: 51_037_522,
                 archive: Archive::TarGz,
                 bin: "plugins/org.eclipse.equinox.launcher_*.jar",
             },

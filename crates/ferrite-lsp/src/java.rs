@@ -6,8 +6,8 @@ use std::process::{Command, Stdio};
 
 use crate::client::{ServerCommand, find_program, hide_console};
 
-/// jdt.ls를 띄우는 데 필요한 최소 Java 버전. 프로젝트가 쓰는 Java(egov는 8·11도 흔하다)와는
-/// 별개로, 서버 프로세스만 이 버전 이상이면 된다.
+/// 목록에 고정한 jdt.ls(1.61.0)를 띄우는 데 필요한 최소 Java 버전. 프로젝트가 쓰는 Java(egov는
+/// 8·11도 흔하다)와는 별개로, 서버 프로세스만 이 버전 이상이면 된다. jdt.ls 1.62부터는 25다.
 pub const MIN_JAVA: u32 = 21;
 pub const LOMBOK_JAR: &str = "lombok.jar";
 
