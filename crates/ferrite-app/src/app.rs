@@ -3,8 +3,10 @@
 use std::path::PathBuf;
 
 use eframe::egui::{self, Key, KeyboardShortcut, Modifiers, ViewportCommand};
-use ferrite_core::text_file::{self, Encoding, LineEnding, TextContent};
+use ferrite_core::buffer::{Buffer, Indent, detect_indent};
+use ferrite_core::text_file::{self, Encoding, LineEnding, TextContent, TextFileError};
 
+use crate::editor_view::{self, EditorOptions, EditorState};
 use crate::file_tree::FileTree;
 
 // Modifiers::COMMAND는 macOS에서 Cmd, 그 외 OS에서 Ctrl로 동작한다.
@@ -12,19 +14,62 @@ const OPEN_FOLDER: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, 
 const SAVE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::S);
 const CLOSE_TAB: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::W);
 
+/// 들여쓰기 방식을 감지하지 못했을 때 쓰는 기본값.
+const DEFAULT_INDENT: Indent = Indent::Spaces(4);
+const TAB_SIZE: usize = 4;
+
 struct Document {
     path: PathBuf,
-    content: TextContent,
-    dirty: bool,
+    buffer: Buffer,
+    encoding: Encoding,
+    line_ending: LineEnding,
+    indent: Indent,
+    /// 마지막으로 열거나 저장한 시점의 버퍼 리비전.
+    saved_revision: u64,
+    /// 저장 인코딩·줄바꿈을 바꿨지만 아직 저장하지 않음.
+    format_changed: bool,
+    view: EditorState,
 }
 
 impl Document {
+    fn open(path: PathBuf) -> Result<Self, TextFileError> {
+        let content = text_file::load(&path)?;
+        let buffer = Buffer::new(&content.text);
+        let indent = detect_indent(buffer.rope(), DEFAULT_INDENT);
+        Ok(Self {
+            path,
+            saved_revision: buffer.revision(),
+            buffer,
+            encoding: content.encoding,
+            line_ending: content.line_ending,
+            indent,
+            format_changed: false,
+            view: EditorState::default(),
+        })
+    }
+
+    fn save(&mut self) -> Result<(), TextFileError> {
+        let content = TextContent {
+            text: self.buffer.text(),
+            encoding: self.encoding,
+            line_ending: self.line_ending,
+        };
+        text_file::save(&self.path, &content)?;
+        self.saved_revision = self.buffer.revision();
+        self.format_changed = false;
+        Ok(())
+    }
+
+    fn is_dirty(&self) -> bool {
+        self.buffer.revision() != self.saved_revision || self.format_changed
+    }
+
     fn title(&self) -> String {
         let name = self.path.file_name().map_or_else(
             || self.path.display().to_string(),
             |n| n.to_string_lossy().into_owned(),
         );
-        if self.dirty {
+        if self.is_dirty() {
             format!("● {name}")
         } else {
             name
@@ -55,15 +100,20 @@ pub struct FerriteApp {
 }
 
 impl FerriteApp {
-    /// `project`는 명령줄로 받은 시작 폴더(`ferrite <폴더>`).
-    pub fn new(cc: &eframe::CreationContext<'_>, project: Option<PathBuf>) -> Self {
+    /// `start`는 명령줄로 받은 시작 경로. 폴더면 프로젝트로, 파일이면 상위 폴더를 프로젝트로 열고 파일을 연다.
+    pub fn new(cc: &eframe::CreationContext<'_>, start: Option<PathBuf>) -> Self {
         crate::fonts::install_korean_font(&cc.egui_ctx);
+        let file = start.as_ref().filter(|p| p.is_file()).cloned();
+        let project = match &file {
+            Some(f) => f.parent().map(PathBuf::from),
+            None => start,
+        };
         let (tree, status) = match project {
             Some(dir) if dir.is_dir() => (
                 Some(FileTree::new(dir.clone())),
                 format!("프로젝트: {}", dir.display()),
             ),
-            Some(path) => (None, format!("폴더가 아닙니다: {}", path.display())),
+            Some(path) => (None, format!("열 수 없는 경로입니다: {}", path.display())),
             None => (
                 None,
                 format!(
@@ -72,14 +122,18 @@ impl FerriteApp {
                 ),
             ),
         };
-        Self {
+        let mut app = Self {
             tree,
             docs: Vec::new(),
             active: None,
             pending_close: None,
             allow_close: false,
             status,
+        };
+        if let Some(file) = file {
+            app.open_file(file);
         }
+        app
     }
 
     fn open_folder_dialog(&mut self) {
@@ -94,13 +148,9 @@ impl FerriteApp {
             self.active = Some(i);
             return;
         }
-        match text_file::load(&path) {
-            Ok(content) => {
-                self.docs.push(Document {
-                    path,
-                    content,
-                    dirty: false,
-                });
+        match Document::open(path.clone()) {
+            Ok(doc) => {
+                self.docs.push(doc);
                 self.active = Some(self.docs.len() - 1);
             }
             Err(e) => self.status = format!("열기 실패: {}: {e}", path.display()),
@@ -110,9 +160,8 @@ impl FerriteApp {
     /// 저장 성공 여부를 돌려준다. 실패 사유는 상태바에 표시한다.
     fn save(&mut self, index: usize) -> bool {
         let doc = &mut self.docs[index];
-        match text_file::save(&doc.path, &doc.content) {
+        match doc.save() {
             Ok(()) => {
-                doc.dirty = false;
                 self.status = format!("저장됨: {}", doc.path.display());
                 true
             }
@@ -124,7 +173,7 @@ impl FerriteApp {
     }
 
     fn request_close_tab(&mut self, index: usize) {
-        if self.docs[index].dirty {
+        if self.docs[index].is_dirty() {
             self.pending_close = Some(PendingClose::Tab(index));
         } else {
             self.close_tab(index);
@@ -209,26 +258,32 @@ impl FerriteApp {
                     return;
                 };
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let before = (doc.content.encoding, doc.content.line_ending);
+                    let before = (doc.encoding, doc.line_ending);
                     egui::ComboBox::new("line_ending", "줄바꿈")
-                        .selected_text(doc.content.line_ending.label())
+                        .selected_text(doc.line_ending.label())
                         .show_ui(ui, |ui| {
                             for le in LineEnding::ALL {
-                                ui.selectable_value(&mut doc.content.line_ending, le, le.label());
+                                ui.selectable_value(&mut doc.line_ending, le, le.label());
                             }
                         });
                     egui::ComboBox::new("encoding", "인코딩")
-                        .selected_text(doc.content.encoding.label())
+                        .selected_text(doc.encoding.label())
                         .show_ui(ui, |ui| {
                             for enc in Encoding::ALL {
-                                ui.selectable_value(&mut doc.content.encoding, enc, enc.label());
+                                ui.selectable_value(&mut doc.encoding, enc, enc.label());
                             }
                         })
                         .response
                         .on_hover_text("저장할 때 사용할 인코딩");
-                    if (doc.content.encoding, doc.content.line_ending) != before {
-                        doc.dirty = true;
+                    if (doc.encoding, doc.line_ending) != before {
+                        doc.format_changed = true;
                     }
+                    ui.label(match doc.indent {
+                        Indent::Tabs => "탭".to_owned(),
+                        Indent::Spaces(n) => format!("공백: {n}"),
+                    });
+                    let (line, col) = doc.buffer.pos_to_line_col(doc.buffer.selection().head);
+                    ui.label(format!("줄 {}, 열 {}", line + 1, col + 1));
                 });
             });
         });
@@ -291,24 +346,16 @@ impl FerriteApp {
                 ui.centered_and_justified(|ui| ui.label("열린 파일이 없습니다"));
                 return;
             };
-            // ponytail: TextEdit는 매 프레임 전체 텍스트를 레이아웃한다. Phase 1 가상화 에디터로 교체.
-            egui::ScrollArea::both()
-                .id_salt(&doc.path)
-                .auto_shrink(false)
-                .show(ui, |ui| {
-                    let edit = egui::TextEdit::multiline(&mut doc.content.text)
-                        .id_salt(&doc.path)
-                        .code_editor()
-                        .desired_width(f32::INFINITY)
-                        .min_size(ui.available_size());
-                    let mut response = ui.add(edit);
-                    if let Some(tab) = active_tab {
-                        response = response.labelled_by(tab);
-                    }
-                    if response.changed() {
-                        doc.dirty = true;
-                    }
-                });
+            let opts = EditorOptions {
+                tab_size: TAB_SIZE,
+                indent: doc.indent,
+                comment_token: None,
+            };
+            let id = ui.make_persistent_id(&doc.path);
+            let response = editor_view::show(ui, id, &mut doc.buffer, &mut doc.view, &opts, None);
+            if let Some(tab) = active_tab {
+                response.labelled_by(tab);
+            }
         });
         if let Some(i) = close {
             self.request_close_tab(i);
@@ -319,7 +366,7 @@ impl FerriteApp {
     fn intercept_close(&mut self, ctx: &egui::Context) {
         if ctx.input(|i| i.viewport().close_requested())
             && !self.allow_close
-            && self.docs.iter().any(|d| d.dirty)
+            && self.docs.iter().any(Document::is_dirty)
         {
             ctx.send_viewport_cmd(ViewportCommand::CancelClose);
             self.pending_close = Some(PendingClose::App);
@@ -336,7 +383,7 @@ impl FerriteApp {
             }
             PendingClose::App => format!(
                 "저장하지 않은 파일이 {}개 있습니다. 저장할까요?",
-                self.docs.iter().filter(|d| d.dirty).count()
+                self.docs.iter().filter(|d| d.is_dirty()).count()
             ),
         };
         let mut choice = None;
@@ -374,7 +421,7 @@ impl FerriteApp {
             (Some(PendingClose::App), CloseChoice::Save) => {
                 // 하나라도 저장에 실패하면 종료하지 않는다(실패 사유는 상태바에 남는다).
                 let dirty: Vec<usize> = (0..self.docs.len())
-                    .filter(|&i| self.docs[i].dirty)
+                    .filter(|&i| self.docs[i].is_dirty())
                     .collect();
                 let mut all_saved = true;
                 for i in dirty {
@@ -451,7 +498,7 @@ mod tests {
         editor.focus();
         editor.type_text("!");
         harness.run();
-        assert!(harness.state().docs[0].dirty);
+        assert!(harness.state().docs[0].is_dirty());
         harness.get_by_label("● a.txt");
 
         // 창 닫기 요청은 막히고 확인 대화상자가 뜬다
@@ -464,7 +511,7 @@ mod tests {
         harness.get_by_label("저장").click();
         harness.run();
         assert!(harness.state().allow_close);
-        assert!(!harness.state().docs[0].dirty);
+        assert!(!harness.state().docs[0].is_dirty());
         let saved = fs::read_to_string(&file).unwrap();
         assert!(
             saved.contains('!') && saved.contains("hello"),

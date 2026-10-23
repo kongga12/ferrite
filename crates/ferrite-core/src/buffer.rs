@@ -205,6 +205,33 @@ impl Buffer {
         self.set_selection(Selection { anchor, head: pos });
     }
 
+    /// `pos`의 문자가 속한 단어(같은 종류의 문자가 이어진 구간)를 선택한다(더블클릭).
+    pub fn select_word_at(&mut self, pos: usize) {
+        let same =
+            |c: Option<char>, class: u8| c.is_some_and(|c| c != '\n' && char_class(c) == class);
+        let Some(class) = self
+            .rope
+            .get_char(pos)
+            .filter(|c| *c != '\n')
+            .map(char_class)
+        else {
+            self.move_to(pos, false);
+            return;
+        };
+        let mut start = pos;
+        while start > 0 && same(self.rope.get_char(start - 1), class) {
+            start -= 1;
+        }
+        let mut end = pos + 1;
+        while same(self.rope.get_char(end), class) {
+            end += 1;
+        }
+        self.set_selection(Selection {
+            anchor: start,
+            head: end,
+        });
+    }
+
     pub fn select_all(&mut self) {
         self.set_selection(Selection {
             anchor: 0,
