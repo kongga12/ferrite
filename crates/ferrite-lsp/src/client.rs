@@ -319,6 +319,14 @@ fn initialize_params(root: &Path) -> Result<Value, String> {
             "textDocument": {
                 "synchronization": { "didSave": true, "dynamicRegistration": false },
                 "publishDiagnostics": { "relatedInformation": false, "versionSupport": true },
+                // 스니펫($1 등)은 아직 펼치지 못하므로 받지 않는다고 알린다.
+                "completion": {
+                    "completionItem": { "snippetSupport": false, "labelDetailsSupport": true },
+                    "contextSupport": true,
+                },
+                "hover": { "contentFormat": ["plaintext", "markdown"] },
+                "definition": { "linkSupport": true },
+                "references": {},
             },
             "workspace": { "workspaceFolders": true, "configuration": true },
             "window": { "workDoneProgress": false },
