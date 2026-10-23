@@ -1121,7 +1121,7 @@ impl FerriteApp {
                 if self.apply_workspace_edit(lang, edits, encoding).is_some()
                     && let Some(command) = command
                 {
-                    self.request_at_cursor(LspRequest::Execute(command));
+                    self.execute_command(lang, command, encoding);
                 }
             }
             // 명령의 결과 편집은 서버가 workspace/applyEdit로 따로 보낸다.
@@ -1170,7 +1170,20 @@ impl FerriteApp {
         if let Some(unresolved) = action.unresolved {
             self.request_at_cursor(LspRequest::Resolve(unresolved));
         } else if let Some(command) = action.command {
+            self.execute_command(lang, command, encoding);
+        }
+    }
+
+    /// 코드 액션의 명령을 실행한다. jdt.ls의 `java.apply.workspaceEdit`는 클라이언트가 처리하는
+    /// 명령이라(서버로 보내면 처리기가 없다는 오류) 인자로 온 편집을 직접 적용한다.
+    fn execute_command(&mut self, lang: Lang, command: Value, encoding: PositionEncoding) {
+        if command.get("command").and_then(Value::as_str) != Some("java.apply.workspaceEdit") {
             self.request_at_cursor(LspRequest::Execute(command));
+            return;
+        }
+        let arguments = command.get("arguments").and_then(Value::as_array);
+        for edit in arguments.into_iter().flatten() {
+            self.apply_workspace_edit(lang, parse_workspace_edit(edit), encoding);
         }
     }
 
@@ -1625,7 +1638,11 @@ impl FerriteApp {
         }
         if let Some(server) = install {
             let ctx = ui.ctx().clone();
-            self.start_server_action(ServerAction::Install { server, file: None }, &ctx);
+            let action = ServerAction::Install {
+                server,
+                files: Vec::new(),
+            };
+            self.start_server_action(action, &ctx);
         }
     }
 
@@ -2737,6 +2754,56 @@ mod tests {
         harness.run();
         assert!(harness.state().hub.status(Lang::Toml).is_none());
         assert!(harness.query_by_label_contains("설치 안 됨").is_none());
+
+        drop(harness);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn jdtls의_편집_적용_명령은_서버에_보내지_않고_직접_적용한다() {
+        let dir = std::env::temp_dir().join(format!("ferrite-java-cmd-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("Hello.java");
+        fs::write(&file, "class Hello {}\n").unwrap();
+
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(1000.0, 700.0))
+            .build_eframe(|cc| FerriteApp::new(cc, Some(file.clone())));
+        isolate_servers(&mut harness, &dir.join("servers"));
+        harness.run();
+        let doc = &harness.state().docs[0];
+        let (path, version) = (doc.path.clone(), doc.buffer.version());
+        let uri = ferrite_lsp::uri::path_to_uri(&path).unwrap();
+        // jdt.ls가 빠른 수정으로 돌려주는 모양: 편집 대신 클라이언트 명령에 WorkspaceEdit을 싣는다.
+        let item = ferrite_lsp::edits::CodeActionItem {
+            title: "public 붙이기".into(),
+            preferred: true,
+            edit: Vec::new(),
+            unresolved: None,
+            command: Some(serde_json::json!({
+                "command": "java.apply.workspaceEdit",
+                "arguments": [{ "changes": { uri.as_str(): [{
+                    "range": { "start": { "line": 0, "character": 0 }, "end": { "line": 0, "character": 0 } },
+                    "newText": "public ",
+                }] } }],
+            })),
+        };
+        harness.state_mut().actions = Some(ActionMenu::new(
+            path,
+            vec![item],
+            PositionEncoding::Utf16,
+            version,
+        ));
+        harness.run();
+        harness.key_press(Key::Enter);
+        harness.run();
+        assert_eq!(
+            harness.state().docs[0].buffer.text(),
+            "public class Hello {}\n",
+            "{}",
+            harness.state().status
+        );
 
         drop(harness);
         fs::remove_dir_all(&dir).unwrap();

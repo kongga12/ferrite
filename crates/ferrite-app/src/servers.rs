@@ -18,10 +18,10 @@ const UNINSTALL_RETRY_DELAY: Duration = Duration::from_millis(300);
 
 /// 창이나 상태바에서 사용자가 고른 일. 앱이 언어 서버를 내린 뒤 실행한다.
 pub enum ServerAction {
-    /// `file`이 있으면 내려받지 않고 그 파일로 설치한다(인터넷이 막힌 환경).
+    /// `files`가 있으면 내려받지 않고 그 파일들로 설치한다(인터넷이 막힌 환경).
     Install {
         server: &'static Server,
-        file: Option<PathBuf>,
+        files: Vec<PathBuf>,
     },
     Uninstall(&'static Server),
 }
@@ -121,10 +121,10 @@ impl ServerManager {
         let ctx = ctx.clone();
         thread::spawn(move || {
             let result = match action {
-                ServerAction::Install {
-                    file: Some(file), ..
-                } => install::install_from_file(&root, server, &file).map_err(|e| e.to_string()),
-                ServerAction::Install { file: None, .. } => {
+                ServerAction::Install { files, .. } if !files.is_empty() => {
+                    install::install_from_files(&root, server, &files).map_err(|e| e.to_string())
+                }
+                ServerAction::Install { .. } => {
                     let progress_tx = tx.clone();
                     let progress_ctx = ctx.clone();
                     install::install(&root, server, &mut |done, total| {
@@ -264,25 +264,28 @@ fn buttons(ui: &mut egui::Ui, server: &'static Server, status: &Status) -> Optio
             .button(format!("{verb} ({})", install_hint(server)))
             .clicked()
         {
-            action = Some(ServerAction::Install { server, file: None });
+            action = Some(ServerAction::Install {
+                server,
+                files: Vec::new(),
+            });
         }
-        // 인터넷이 막힌 환경: 다른 PC에서 받아 온 파일로 설치한다. 해시가 목록과 맞아야 한다.
-        if let Some(asset) = install::asset(server) {
-            if ui.button("주소 복사").on_hover_text(asset.url).clicked() {
-                ui.ctx().copy_text(asset.url.to_owned());
+        // 인터넷이 막힌 환경: 다른 PC에서 받아 온 파일들로 설치한다. 해시가 목록과 맞아야 한다.
+        let assets = install::assets(server);
+        if !assets.is_empty() {
+            let urls: Vec<&str> = assets.iter().map(|a| a.url).collect();
+            let urls = urls.join("\n");
+            if ui.button("주소 복사").on_hover_text(&urls).clicked() {
+                ui.ctx().copy_text(urls);
             }
             if ui
                 .button("파일에서…")
-                .on_hover_text("다른 PC에서 받아 온 배포 파일로 설치합니다")
+                .on_hover_text("다른 PC에서 받아 온 배포 파일(위 주소의 파일 모두)로 설치합니다")
                 .clicked()
-                && let Some(file) = rfd::FileDialog::new()
+                && let Some(files) = rfd::FileDialog::new()
                     .set_title(format!("{} 배포 파일", server.name))
-                    .pick_file()
+                    .pick_files()
             {
-                action = Some(ServerAction::Install {
-                    server,
-                    file: Some(file),
-                });
+                action = Some(ServerAction::Install { server, files });
             }
         }
     }
@@ -295,9 +298,10 @@ fn buttons(ui: &mut egui::Ui, server: &'static Server, status: &Status) -> Optio
 /// 설치 버튼 옆에 붙이는 설명: 내려받을 크기 또는 필요한 도구.
 pub fn install_hint(server: &Server) -> String {
     match server.source {
-        Source::Release(_) => install::asset(server).map_or_else(String::new, |a| {
-            format!("{:.1}MB", a.size as f64 / 1_000_000.0)
-        }),
+        Source::Release(_) => {
+            let size: u64 = install::assets(server).iter().map(|a| a.size).sum();
+            format!("{:.1}MB", size as f64 / 1_000_000.0)
+        }
         Source::Go(_) => "go 필요".into(),
         Source::Pip(_) => "python 필요".into(),
     }

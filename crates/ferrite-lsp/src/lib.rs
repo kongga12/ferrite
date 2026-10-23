@@ -5,6 +5,7 @@ pub mod client;
 pub mod edits;
 pub mod features;
 pub mod install;
+pub mod java;
 pub mod position;
 pub mod problem;
 pub mod transport;

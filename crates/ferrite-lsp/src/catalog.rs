@@ -1,6 +1,8 @@
 //! Ferrite가 설치해 줄 수 있는 언어 서버 목록. 버전과 내려받을 파일의 SHA-256을 여기 고정한다.
-//! 버전을 올릴 때는 릴리스 페이지의 자산 digest(`gh api repos/<저장소>/releases/tags/<태그>`)로
-//! 크기와 해시를 함께 바꾼다. 목록이 바뀐 Ferrite로 올리면 설치본이 "업데이트 있음"으로 보인다.
+//! 버전을 올릴 때는 크기와 해시를 함께 바꾼다. 해시는 배포처가 공개한 값을 쓴다.
+//! - GitHub: 릴리스 자산의 digest(`gh api repos/<저장소>/releases/tags/<태그>`)
+//! - Eclipse(jdt.ls): 파일 옆의 `.sha256`
+//! - Maven Central: SHA-1만 있으므로, 그 SHA-1과 맞는 jar에서 SHA-256을 구한다. 목록이 바뀐 Ferrite로 올리면 설치본이 "업데이트 있음"으로 보인다.
 
 pub struct Server {
     /// 설치 폴더 이름이자 화면에 보이는 이름.
@@ -11,13 +13,24 @@ pub struct Server {
     /// 사용자가 직접 설치했을 때 PATH에서 찾을 실행 파일 이름.
     pub program: &'static str,
     pub args: &'static [&'static str],
-    /// 실행 파일이 아니라 이 런타임으로 실행하는 파일(`php phpactor.phar …`).
-    pub runtime: Option<&'static str>,
+    pub launch: Launch,
     pub source: Source,
 }
 
+/// 설치본을 어떻게 실행하는가.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Launch {
+    /// 설치한 실행 파일을 그대로 실행한다.
+    Binary,
+    /// 이 런타임으로 실행한다: `<런타임> <파일> <인자>`(`php phpactor.phar …`).
+    Runtime(&'static str),
+    /// Eclipse jdt.ls: Java 21 이상으로 equinox 런처를 띄운다(`crate::java`).
+    Jdtls,
+}
+
 pub enum Source {
-    /// 플랫폼별 배포 파일. 이 OS·CPU에 맞는 것이 없으면 설치할 수 없다.
+    /// 배포 파일. 이 OS·CPU에 맞는 것을 모두 같은 폴더에 설치한다. 그중 첫 파일의 `bin`이 실행
+    /// 대상이다. 맞는 것이 하나도 없으면 설치할 수 없다.
     Release(&'static [Asset]),
     /// `go install <모듈>@<버전>`. 무결성은 Go 체크섬 DB(sum.golang.org)가 검증한다.
     Go(&'static str),
@@ -36,7 +49,8 @@ pub struct Asset {
     pub sha256: &'static str,
     pub size: u64,
     pub archive: Archive,
-    /// 설치 폴더 기준 실행 파일(또는 런타임에 넘길 파일) 경로.
+    /// 설치 폴더 기준 실행 파일(또는 런타임에 넘길 파일) 경로. 파일 이름에 `*`를 하나 쓸 수 있다
+    /// (압축 안 jar 이름에 빌드 번호가 붙는 경우). 설치할 때 실제 이름으로 바꿔 기록한다.
     pub bin: &'static str,
 }
 
@@ -45,6 +59,7 @@ pub enum Archive {
     /// 실행 파일 하나를 gzip으로 압축한 것. 풀어서 `bin` 이름으로 둔다.
     Gz,
     Zip,
+    TarGz,
     /// 압축하지 않은 파일. 그대로 `bin` 이름으로 둔다.
     Plain,
 }
@@ -56,7 +71,7 @@ pub const SERVERS: &[Server] = &[
         version: "2026-10-19",
         program: "rust-analyzer",
         args: &[],
-        runtime: None,
+        launch: Launch::Binary,
         source: Source::Release(&[
             Asset {
                 os: "windows",
@@ -120,7 +135,7 @@ pub const SERVERS: &[Server] = &[
         version: "23.1.0",
         program: "clangd",
         args: &[],
-        runtime: None,
+        launch: Launch::Binary,
         // 압축 안의 lib/clang(내장 헤더)을 실행 파일 기준 상대 경로로 찾으므로 폴더 구조를 유지한다.
         source: Source::Release(&[
             Asset {
@@ -160,7 +175,7 @@ pub const SERVERS: &[Server] = &[
         version: "0.29.3",
         program: "lemminx",
         args: &[],
-        runtime: None,
+        launch: Launch::Binary,
         source: Source::Release(&[
             Asset {
                 os: "windows",
@@ -215,7 +230,7 @@ pub const SERVERS: &[Server] = &[
         version: "2026.10.07.0",
         program: "phpactor",
         args: &["language-server"],
-        runtime: Some("php"),
+        launch: Launch::Runtime("php"),
         source: Source::Release(&[Asset {
             os: "",
             arch: "",
@@ -232,7 +247,7 @@ pub const SERVERS: &[Server] = &[
         version: "v0.24.0",
         program: "gopls",
         args: &[],
-        runtime: None,
+        launch: Launch::Binary,
         source: Source::Go("golang.org/x/tools/gopls"),
     },
     Server {
@@ -241,8 +256,43 @@ pub const SERVERS: &[Server] = &[
         version: "1.40.2",
         program: "basedpyright-langserver",
         args: &["--stdio"],
-        runtime: None,
+        launch: Launch::Binary,
         source: Source::Pip("basedpyright"),
+    },
+    Server {
+        name: "jdtls",
+        languages: &["java"],
+        // 1.61.0이 Java 21로 도는 마지막 판이다. 1.62부터는 Eclipse 4.42 플랫폼(2026-09-12에
+        // 필요 Java를 25로 올림)을 써서 Java 21로 띄우면 핵심 모듈이 로드되지 않고 바로 끝난다.
+        // 올릴 때는 `java::MIN_JAVA`도 함께 바꾼다(공식 jdtls.py는 아직 21로 검사해 믿을 수 없다).
+        version: "1.61.0",
+        program: "jdtls",
+        args: &[],
+        launch: Launch::Jdtls,
+        // Java로 짜여 있어 모든 OS가 같은 파일을 쓴다(OS별 설정 폴더가 압축 안에 들어 있다).
+        source: Source::Release(&[
+            Asset {
+                os: "",
+                arch: "",
+                url: "https://download.eclipse.org/jdtls/milestones/1.61.0/jdt-language-server-1.61.0-202609031315.tar.gz",
+                sha256: "338e7e73d61836651ba2453919a0d34fa763eb4e7c03342092309bffb8934c64",
+                size: 51_037_522,
+                archive: Archive::TarGz,
+                bin: "plugins/org.eclipse.equinox.launcher_*.jar",
+            },
+            // jdt.ls JVM에 에이전트로 붙여 Lombok이 만드는 getter 등을 인식시킨다. Maven Central은
+            // SHA-1만 주므로, Central의 SHA-1과 일치하는 jar에서 SHA-256을 구해 고정했다.
+            // 1.18.46은 최신 jdt.ls의 "Document does not match the AST" 오류를 고친 판이다.
+            Asset {
+                os: "",
+                arch: "",
+                url: "https://repo1.maven.org/maven2/org/projectlombok/lombok/1.18.46/lombok-1.18.46.jar",
+                sha256: "01f7b1a015e33e2b62d5f5f37053306357ab1415fd181fcba7794f5d198c1126",
+                size: 2_045_364,
+                archive: Archive::Plain,
+                bin: crate::java::LOMBOK_JAR,
+            },
+        ]),
     },
 ];
 
