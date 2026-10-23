@@ -5,7 +5,7 @@ Rust로 작성한 크로스플랫폼(Windows / macOS / Linux) 경량 IDE.
 
 - 개발 워크플로우와 로드맵: [docs/WORKFLOW.md](docs/WORKFLOW.md)
 
-## 현재 상태: Phase 2 진행 중 (LSP 연동)
+## 현재 상태: Phase 2 완료 (LSP 연동), 다음은 Phase 2b·2c (egov 지원)
 
 - 폴더 열기, 지연 로딩 프로젝트 트리(파일 감시로 자동 갱신), 탭 에디터
 - 트리 우클릭: 새 파일·새 폴더·이름 바꾸기·휴지통으로 삭제
