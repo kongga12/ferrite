@@ -1,0 +1,20 @@
+[package]
+name = "ferrite-egov"
+description = "Ferrite egov 언어 서버: MyBatis·iBatis 매퍼 진단(SQL Injection, 참조, 중복 id)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "ferrite-egov-ls"
+path = "src/bin/ferrite-egov-ls.rs"
+
+[dependencies]
+ferrite-core.workspace = true
+ferrite-lsp.workspace = true
+lsp-types = "0.97"
+ropey.workspace = true
+serde_json = "1.0.154"
+tree-sitter = "0.27.1"
+tree-sitter-xml = "0.7.0"

@@ -207,6 +207,25 @@
 - egov 3.x·4.x 표본 프로젝트에서 이동과 진단이 동작한다.
 - 코퍼스 기준으로 `${}`·`$prop$` 사용과 이스케이프 없는 EL 출력을 빠짐없이 탐지한다.
 
+**진행 단계**:
+- [x] 2b-1 `ferrite-egov` 언어 서버와 MyBatis·iBatis 매퍼 진단
+  - 크레이트 `ferrite-egov`: tree-sitter-xml로 매퍼를 분석하고 LSP로 진단을 보낸다.
+    - Ferrite에는 내장된다(`ferrite --egov-ls`, 설치 불필요). 다른 에디터는 단독 실행 파일 `ferrite-egov-ls`를 쓴다.
+    - XML 문서의 보조 서버로 붙는다. 주 서버는 lemminx다.
+  - 진단
+    - SQL Injection: MyBatis `${x}`, iBatis `$x$`(경고). SQL 본문(텍스트·CDATA)에서만 찾고 주석과 속성값(`<if test>`)은 뺀다.
+    - 정의 안 된 참조(경고): `<include refid>`, `resultMap`·`extends`, `select`. 같은 파일 → `namespace.id` → (iBatis) 전체 순으로 찾는다.
+    - 같은 파일의 중복 id(오류). 문장·`<sql>`·resultMap 종류마다 따로 본다.
+  - 프로젝트 색인: 열 때 프로젝트의 매퍼를 모은다. 빌드 결과물 폴더(target, bin, build 등)는 뺀다. EUC-KR(CP949) 파일도 읽는다.
+  - 코퍼스 확인(로컬, 저장소 밖): 매퍼 1,462개(MyBatis 676, iBatis 786)를 실패 없이 분석했다.
+    - 문자열 치환 967곳을 찾았다. 따로 짠 단순 검사기와 파일마다 일치해 누락이 0이다.
+    - 테스트: `FERRITE_EGOV_CORPUS=<경로> cargo test -p ferrite-egov --test corpus -- --ignored`
+- [ ] 2b-2 이동: Mapper 인터페이스·DAO 문자열 id ↔ XML 문장, refid·resultMap 정의로 이동, namespace ↔ 인터페이스 진단
+- [ ] 2b-3 `#{}` 속성 완성, resultType·parameterType 클래스 완성
+- [ ] 2b-4 JSP 하이라이팅(HTML + 스크립틀릿 Java + EL), 이스케이프 없는 EL 출력 XSS 경고
+- [ ] 2b-5 JSP taglib 완성, include·뷰 이름 → JSP 이동
+- [ ] 2b-6 Spring XML 설정·JPA 보완(Spring Boot LS가 다루지 못하는 부분)
+
 ### Phase 2c — egov 개발도구 (프로젝트·설정·코드 생성)
 
 **목표**: 공식 egov 개발환경(Eclipse)과 VS Code 확장이 제공하는 생성 기능을 3개 OS에서 제공한다.

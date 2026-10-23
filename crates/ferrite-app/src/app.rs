@@ -1265,6 +1265,14 @@ impl FerriteApp {
         self.completion.take()
     }
 
+    /// 코드 액션 메뉴를 닫고, 아직 오지 않은 코드 액션 응답도 버린다(자동완성과 같은 이유:
+    /// Ctrl+.를 여러 번 누르면 실행하거나 닫은 메뉴를 늦게 온 응답이 다시 연다).
+    fn close_actions(&mut self) -> Option<ActionMenu> {
+        self.pending
+            .retain(|_, (pending, _)| !matches!(pending, Pending::CodeActions { .. }));
+        self.actions.take()
+    }
+
     fn accept_completion(&mut self) {
         let (Some(popup), Some(i)) = (self.close_completion(), self.active) else {
             return;
@@ -1707,9 +1715,9 @@ impl FerriteApp {
                 menu.move_selection(false);
             }
             if pressed(Key::Escape) {
-                self.actions = None;
+                self.close_actions();
             } else if pressed(Key::Enter)
-                && let Some(menu) = self.actions.take()
+                && let Some(menu) = self.close_actions()
             {
                 self.run_code_action(menu);
             }
@@ -1790,7 +1798,7 @@ impl FerriteApp {
         }
         if let Some(menu) = &mut self.actions
             && menu.ui(ctx, frame.cursor_rect.left_bottom())
-            && let Some(menu) = self.actions.take()
+            && let Some(menu) = self.close_actions()
         {
             self.run_code_action(menu);
             self.focus_editor = true;
@@ -2796,7 +2804,7 @@ mod tests {
         assert!(harness.query_by_label_contains("설치 안 됨").is_none());
 
         drop(harness);
-        fs::remove_dir_all(&dir).unwrap();
+        remove_project(&dir);
     }
 
     #[test]

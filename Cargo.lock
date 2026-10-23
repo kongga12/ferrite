@@ -1202,6 +1202,7 @@ dependencies = [
  "eframe",
  "egui_kittest",
  "ferrite-core",
+ "ferrite-egov",
  "ferrite-lsp",
  "lsp-types",
  "notify",
@@ -1237,6 +1238,19 @@ dependencies = [
  "tree-sitter-toml-ng",
  "tree-sitter-xml",
  "tree-sitter-yaml",
+]
+
+[[package]]
+name = "ferrite-egov"
+version = "0.1.0"
+dependencies = [
+ "ferrite-core",
+ "ferrite-lsp",
+ "lsp-types",
+ "ropey",
+ "serde_json",
+ "tree-sitter",
+ "tree-sitter-xml",
 ]
 
 [[package]]

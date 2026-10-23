@@ -96,7 +96,19 @@ pub fn assets(server: &Server) -> Vec<&'static Asset> {
 
 /// 이 플랫폼에서 Ferrite가 설치해 줄 수 있는가(go·python 같은 도구 유무는 설치할 때 확인한다).
 pub fn installable(server: &Server) -> bool {
-    !matches!(server.source, Source::Release(_)) || !assets(server).is_empty()
+    match server.source {
+        Source::Release(_) => !assets(server).is_empty(),
+        Source::Go(_) | Source::Pip(_) => true,
+        Source::Builtin(_) => false,
+    }
+}
+
+/// 내장 서버를 띄울 Ferrite 실행 파일. 테스트 실행 파일(`ferrite-<해시>`)처럼 서버 플래그를
+/// 모르는 실행 파일이면 None(그때는 PATH의 단독 실행 파일을 찾는다).
+fn builtin_exe() -> Option<PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .filter(|exe| exe.file_stem().is_some_and(|stem| stem == "ferrite"))
 }
 
 /// 설치본. 고정 버전을 먼저, 없으면 예전 버전(Ferrite를 올린 뒤 아직 업데이트하지 않은 것).
@@ -128,6 +140,16 @@ pub fn command(
     project: &Path,
 ) -> Option<Result<ServerCommand, String>> {
     let mut args: Vec<String> = server.args.iter().map(|a| (*a).to_owned()).collect();
+    if let Source::Builtin(flag) = server.source
+        && let Some(program) = builtin_exe()
+    {
+        args.insert(0, flag.to_owned());
+        return Some(Ok(ServerCommand {
+            program,
+            args,
+            ..Default::default()
+        }));
+    }
     let Some(installed) = installed(root, server) else {
         let program = find_program(server.program)?;
         if server.launch == Launch::Jdtls {
@@ -212,6 +234,7 @@ fn install_with(
     progress: &mut dyn FnMut(u64, u64),
 ) -> Result<(), InstallError> {
     match server.source {
+        Source::Builtin(_) => Err(InstallError::Unsupported),
         Source::Release(_) => {
             let assets = assets(server);
             let main = assets.first().ok_or(InstallError::Unsupported)?;

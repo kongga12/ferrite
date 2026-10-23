@@ -20,6 +20,10 @@ mod perf;
 use eframe::egui;
 
 fn main() -> eframe::Result {
+    // `ferrite --egov-ls`: 창을 띄우지 않고 egov 언어 서버로 동작한다(Ferrite가 스스로를 띄운다).
+    if std::env::args_os().nth(1).as_deref() == Some(ferrite_lsp::catalog::EGOV_LS_FLAG.as_ref()) {
+        return ferrite_egov::run_stdio().map_err(|e| eframe::Error::AppCreation(Box::new(e)));
+    }
     let start = std::env::args_os().nth(1).map(std::path::PathBuf::from);
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()

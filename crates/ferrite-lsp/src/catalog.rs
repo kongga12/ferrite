@@ -40,7 +40,12 @@ pub enum Source {
     // ponytail: 버전만 고정하고 해시는 고정하지 않는다(의존 휠이 플랫폼마다 달라서).
     // 필요하면 --require-hashes와 플랫폼별 해시 목록으로.
     Pip(&'static str),
+    /// Ferrite 실행 파일에 들어 있다. `ferrite <플래그>`로 띄우므로 설치하지 않는다.
+    Builtin(&'static str),
 }
+
+/// Ferrite 실행 파일을 egov 언어 서버로 띄우는 플래그.
+pub const EGOV_LS_FLAG: &str = "--egov-ls";
 
 pub struct Asset {
     /// `std::env::consts::OS` 값. 빈 문자열이면 모든 OS.
@@ -321,6 +326,17 @@ pub const SERVERS: &[Server] = &[
             archive: Archive::Zip,
             bin: "extension/language-server/spring-boot-language-server*.jar",
         }]),
+    },
+    Server {
+        // egov 매퍼 진단(SQL Injection, 참조, 중복 id). XML의 주 서버는 lemminx이고 이것은 함께
+        // 붙는 보조 서버다. 다른 에디터는 같은 서버를 단독 실행 파일 `ferrite-egov-ls`로 쓴다.
+        name: "ferrite-egov",
+        languages: &["xml"],
+        version: env!("CARGO_PKG_VERSION"),
+        program: "ferrite-egov-ls",
+        args: &[],
+        launch: Launch::Binary,
+        source: Source::Builtin(EGOV_LS_FLAG),
     },
 ];
 
