@@ -26,6 +26,8 @@ pub enum Launch {
     Runtime(&'static str),
     /// Eclipse jdt.ls: Java 21 이상으로 equinox 런처를 띄운다(`crate::java`).
     Jdtls,
+    /// Spring Boot LS: Java 21 이상으로 띄우고, 클라이언트가 jdt.ls와의 메시지를 중계한다.
+    SpringBoot,
 }
 
 pub enum Source {
@@ -294,9 +296,47 @@ pub const SERVERS: &[Server] = &[
             },
         ]),
     },
+    Server {
+        // Spring Tools의 언어 서버. Java 파일은 jdt.ls가 주 서버이고 이것은 함께 붙는 보조 서버다
+        // (Spring 진단·@Query JPQL 검증 등). application*.properties·yml은 이것이 주 서버다.
+        // jdt.ls 쪽 기능(클래스패스, 타입 조회)은 jdt.ls에 실은 확장 번들을 거쳐 클라이언트가 중계한다.
+        name: "spring-boot",
+        languages: &[
+            "java",
+            "spring-boot-properties",
+            "spring-boot-properties-yaml",
+        ],
+        version: "2.4.1",
+        program: "spring-boot-language-server",
+        args: &[],
+        launch: Launch::SpringBoot,
+        // VS Code 확장(vsix = zip). Open VSX가 공개한 SHA-256으로 고정했다. 정식판만 고른다
+        // (Open VSX의 latest는 날짜가 붙은 프리릴리스일 수 있다).
+        source: Source::Release(&[Asset {
+            os: "",
+            arch: "",
+            url: "https://open-vsx.org/api/VMware/vscode-spring-boot/2.4.1/file/VMware.vscode-spring-boot-2.4.1.vsix",
+            sha256: "6971f2bbc513a944e7f907e48ec68f64848d689630d5616bf54ef0803349f6ed",
+            size: 83_290_020,
+            archive: Archive::Zip,
+            bin: "extension/language-server/spring-boot-language-server*.jar",
+        }]),
+    },
 ];
 
-/// 이 언어(LSP 언어 ID)를 맡는 서버.
+/// 이 언어(LSP 언어 ID)를 맡는 주 서버. 기능 요청(자동완성, 정의 이동 등)은 이 서버로 보낸다.
 pub fn for_language(language_id: &str) -> Option<&'static Server> {
-    SERVERS.iter().find(|s| s.languages.contains(&language_id))
+    servers_for(language_id).next()
+}
+
+/// 이 언어를 맡는 서버 모두. 주 서버가 먼저다(목록 순서). 문서는 모두에게 보내고 진단은 합친다.
+pub fn servers_for(language_id: &str) -> impl Iterator<Item = &'static Server> {
+    SERVERS
+        .iter()
+        .filter(move |s| s.languages.contains(&language_id))
+}
+
+/// 런처 종류로 찾는다(jdt.ls ↔ Spring Boot LS처럼 서로를 아는 서버용).
+pub fn by_launch(launch: Launch) -> Option<&'static Server> {
+    SERVERS.iter().find(|s| s.launch == launch)
 }

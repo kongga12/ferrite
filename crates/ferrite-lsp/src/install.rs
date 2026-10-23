@@ -14,7 +14,7 @@ use sha2::{Digest, Sha256};
 use ureq::Agent;
 use ureq::tls::{RootCerts, TlsConfig};
 
-use crate::catalog::{Archive, Asset, Launch, Server, Source};
+use crate::catalog::{self, Archive, Asset, Launch, Server, Source};
 use crate::client::{ServerCommand, find_program, hide_console};
 use crate::java;
 
@@ -139,12 +139,17 @@ pub fn command(
                     .into_owned(),
             );
         }
-        return Some(Ok(ServerCommand { program, args }));
+        return Some(Ok(ServerCommand {
+            program,
+            args,
+            ..Default::default()
+        }));
     };
     Some(match server.launch {
         Launch::Binary => Ok(ServerCommand {
             program: installed.bin,
             args,
+            ..Default::default()
         }),
         Launch::Runtime(runtime) => find_program(runtime)
             .map(|program| ServerCommand {
@@ -152,6 +157,7 @@ pub fn command(
                 args: std::iter::once(installed.bin.to_string_lossy().into_owned())
                     .chain(args)
                     .collect(),
+                ..Default::default()
             })
             .ok_or_else(|| {
                 format!(
@@ -161,7 +167,16 @@ pub fn command(
             }),
         Launch::Jdtls => java::find_java().map(|(java, major)| {
             let data = workspace_dir(root, server, project);
-            java::jdtls_command(java, major, &installed.dir, &installed.bin, &data)
+            // Spring Boot LS가 설치되어 있으면 그 확장 번들을 실어야 중계가 된다.
+            let bundles = catalog::by_launch(Launch::SpringBoot)
+                .and_then(|spring| crate::install::installed(root, spring))
+                .map(|spring| java::spring_bundles(&spring.dir))
+                .unwrap_or_default();
+            java::jdtls_command(java, major, &installed.dir, &installed.bin, &data, &bundles)
+        }),
+        Launch::SpringBoot => java::find_java().map(|(java, _)| {
+            let log = workspace_dir(root, server, project).join("server.log");
+            java::spring_boot_command(java, &installed.bin, &log, project)
         }),
     })
 }
@@ -554,6 +569,7 @@ mod tests {
                         "https://github.com/",
                         "https://download.eclipse.org/",
                         "https://repo1.maven.org/",
+                        "https://open-vsx.org/",
                     ];
                     assert!(hosts.iter().any(|h| a.url.starts_with(h)), "{}", a.url);
                     assert_eq!(a.sha256.len(), 64, "{}", a.url);
@@ -574,7 +590,19 @@ mod tests {
         );
         assert_eq!(for_language("cpp").map(|s| s.name), Some("clangd"));
         assert_eq!(for_language("xml").map(|s| s.name), Some("lemminx"));
-        assert_eq!(for_language("java").map(|s| s.name), Some("jdtls"));
+        assert_eq!(
+            for_language("java").map(|s| s.name),
+            Some("jdtls"),
+            "주 서버"
+        );
+        let java: Vec<_> = crate::catalog::servers_for("java")
+            .map(|s| s.name)
+            .collect();
+        assert_eq!(java, ["jdtls", "spring-boot"]);
+        assert_eq!(
+            for_language("spring-boot-properties-yaml").map(|s| s.name),
+            Some("spring-boot")
+        );
         assert!(for_language("toml").is_none());
     }
 

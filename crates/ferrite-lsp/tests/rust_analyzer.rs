@@ -30,7 +30,7 @@ fn rust_analyzer() -> Option<ServerCommand> {
         .is_ok_and(|o| o.status.success());
     ok.then(|| ServerCommand {
         program,
-        args: Vec::new(),
+        ..Default::default()
     })
 }
 

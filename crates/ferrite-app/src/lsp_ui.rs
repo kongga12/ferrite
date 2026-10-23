@@ -34,6 +34,8 @@ pub struct ActionMenu {
     pub encoding: PositionEncoding,
     /// 목록을 요청한 시점의 버퍼 버전. 실행할 때 문서가 바뀌었으면 편집을 적용하지 않는다.
     pub version: u64,
+    /// 목록을 준 서버. 편집의 문서 버전은 이 서버 기준이다.
+    pub server: &'static str,
     selected: usize,
 }
 
@@ -43,12 +45,14 @@ impl ActionMenu {
         items: Vec<CodeActionItem>,
         encoding: PositionEncoding,
         version: u64,
+        server: &'static str,
     ) -> Self {
         Self {
             path,
             items,
             encoding,
             version,
+            server,
             selected: 0,
         }
     }

@@ -8,5 +8,6 @@ pub mod install;
 pub mod java;
 pub mod position;
 pub mod problem;
+pub mod spring;
 pub mod transport;
 pub mod uri;
