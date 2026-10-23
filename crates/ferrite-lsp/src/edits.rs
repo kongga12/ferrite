@@ -2,7 +2,6 @@
 //! 서버 응답(WorkspaceEdit 등)을 파일별 편집 목록으로 바꾼다. 위치는 그 파일을 연 뒤
 //! `features::char_range`로 문자 범위로 바꾼다(다른 파일일 수 있어서).
 
-use std::collections::HashMap;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
@@ -54,8 +53,7 @@ pub fn parse_workspace_edit(value: &Value) -> Vec<FileEdit> {
             }
         }
         None => {
-            let changes: HashMap<Uri, Vec<TextEdit>> = edit.changes.unwrap_or_default();
-            for (uri, edits) in changes {
+            for (uri, edits) in edit.changes.into_iter().flatten() {
                 push(uri, text_edits(edits));
             }
         }
