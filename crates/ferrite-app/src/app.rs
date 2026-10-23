@@ -31,6 +31,24 @@ fn settings_path() -> Option<PathBuf> {
     Some(dirs::config_dir()?.join("ferrite").join("settings.toml"))
 }
 
+/// 심볼릭 링크를 푼 실제 절대 경로. 파일 감시 알림은 실제 경로로 오므로(macOS의 `/var` →
+/// `/private/var` 등) 문서·트리 경로를 이것으로 통일해야 알림과 비교할 수 있다.
+/// 아직 없는 경로면 절대 경로만 만든다.
+fn real_path(path: &Path) -> PathBuf {
+    let Ok(real) = std::fs::canonicalize(path) else {
+        return std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    };
+    // Windows의 canonicalize는 `\\?\C:\…` 형태를 돌려준다. 드라이브 경로면 접두사를 떼어
+    // 화면 표시와 감시 알림 경로(접두사 없음)에 맞춘다. 네트워크 경로(UNC)는 그대로 둔다.
+    #[cfg(windows)]
+    if let Some(plain) = real.to_str().and_then(|s| s.strip_prefix(r"\\?\"))
+        && !plain.starts_with(r"UNC\")
+    {
+        return PathBuf::from(plain);
+    }
+    real
+}
+
 /// 설정 파일을 읽는다. 없으면 기본값, 잘못되었으면 기본값과 오류 메시지.
 fn load_settings() -> (Settings, Option<String>) {
     let Some(path) = settings_path() else {
@@ -241,7 +259,7 @@ impl FerriteApp {
         crate::fonts::install_korean_font(&cc.egui_ctx);
         let (settings, settings_error) = load_settings();
         apply_settings(&cc.egui_ctx, &settings);
-        let start = start.map(|p| std::path::absolute(&p).unwrap_or(p));
+        let start = start.map(|p| real_path(&p));
         let file = start.as_ref().filter(|p| p.is_file()).cloned();
         let project = match &file {
             Some(f) => f.parent().map(PathBuf::from),
@@ -329,14 +347,15 @@ impl FerriteApp {
 
     fn open_folder_dialog(&mut self) {
         if let Some(dir) = rfd::FileDialog::new().pick_folder() {
+            let dir = real_path(&dir);
             self.status = format!("프로젝트: {}", dir.display());
             self.tree = Some(FileTree::new(dir));
         }
     }
 
     fn open_file(&mut self, path: PathBuf) {
-        // 파일 감시 알림의 경로(절대 경로)와 비교할 수 있게 절대 경로로 둔다.
-        let path = std::path::absolute(&path).unwrap_or(path);
+        // 링크로 연 파일과 실제 파일을 같은 문서로 보고, 감시 알림 경로와도 맞춘다.
+        let path = real_path(&path);
         if let Some(i) = self.docs.iter().position(|d| d.path == path) {
             self.active = Some(i);
             return;
@@ -356,7 +375,7 @@ impl FerriteApp {
         match doc.save() {
             Ok(()) => {
                 self.status = format!("저장됨: {}", doc.path.display());
-                if settings_path().is_some_and(|p| p == doc.path) {
+                if settings_path().is_some_and(|p| real_path(&p) == doc.path) {
                     self.settings_changed = true;
                 }
                 true
