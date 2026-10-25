@@ -19,8 +19,10 @@ use ropey::Rope;
 use serde_json::{Value, json};
 
 use crate::java::{self, JavaFile, Target, TypeDecl};
+use crate::jpa::{self, Word};
 use crate::jsp;
 use crate::mapper::{self, Aliases, Context, Dialect, Finding, Index, Kind, Severity};
+use crate::spring::{self, Config};
 use crate::taglib::{self, Library, Site, Tld};
 use crate::web;
 
@@ -132,6 +134,14 @@ struct Server {
     taglib_files: HashMap<PathBuf, usize>,
     /// `web.xml`의 taglib-uri → taglib-location.
     taglib_locations: HashMap<String, String>,
+    /// Spring XML 설정.
+    spring: HashMap<PathBuf, Config>,
+    /// `.properties` 키 → 그 키를 둔 (파일, 범위). 프로필마다 같은 키가 여러 파일에 있다.
+    property_keys: HashMap<String, Vec<(PathBuf, Range<usize>)>>,
+    /// `classpath:` 경로를 찾는 폴더(`src/main/resources`, `WEB-INF/classes`).
+    resource_roots: Vec<PathBuf>,
+    /// JPA IDENTITY 진단에 쓰는 DB 단서.
+    database: jpa::Database,
 }
 
 impl Server {
@@ -225,6 +235,10 @@ impl Server {
                 Some(found) => self.index.mappers.insert(path.to_path_buf(), found),
                 None => self.index.mappers.remove(path),
             };
+            match text.and_then(spring::parse) {
+                Some(found) => self.spring.insert(path.to_path_buf(), found),
+                None => self.spring.remove(path),
+            };
             let aliases = text.map(mapper::aliases).unwrap_or_default();
             if aliases == Aliases::default() {
                 self.aliases.remove(path);
@@ -240,14 +254,32 @@ impl Server {
             let findings = if is_jsp(path) {
                 Some(jsp::diagnose(&rope.to_string()))
             } else if is_java(path) {
-                self.java
+                let mut findings = self
+                    .java
                     .get(path)
-                    .and_then(|file| missing_statements(&file.types, &self.index))
+                    .and_then(|file| missing_statements(&file.types, &self.index));
+                // IDENTITY를 못 쓰는 DB면 `@GeneratedValue(IDENTITY)`를 알린다.
+                if let Some((severity, message)) = jpa::identity_problem(&self.database) {
+                    let identity: Vec<Finding> = java::identity_generators(&rope.to_string())
+                        .into_iter()
+                        .map(|range| Finding {
+                            range,
+                            severity,
+                            code: "jpa-identity",
+                            message: message.clone(),
+                        })
+                        .collect();
+                    if !identity.is_empty() || findings.is_some() {
+                        findings.get_or_insert_with(Vec::new).extend(identity);
+                    }
+                }
+                findings
+            } else if let Some(mapper) = self.index.mappers.get(path) {
+                Some(mapper::diagnose(mapper, &self.index))
             } else {
-                self.index
-                    .mappers
+                self.spring
                     .get(path)
-                    .map(|m| mapper::diagnose(m, &self.index))
+                    .map(|config| self.spring_findings(config))
             };
             let Some(findings) = findings else {
                 if self.published.remove(path) {
@@ -320,9 +352,14 @@ impl Server {
     }
 
     /// XML: 참조(refid·resultMap·select) → 정의, MyBatis 문장 id → Mapper 인터페이스 메서드.
+    /// Spring XML이면 빈 참조·class·property·플레이스홀더·import.
     fn xml_targets(&self, path: &Path, offset: usize) -> Vec<(PathBuf, Range<usize>)> {
         let Some(mapper) = self.index.mappers.get(path) else {
-            return Vec::new();
+            return self
+                .spring
+                .get(path)
+                .map(|config| self.spring_targets(path, config, offset))
+                .unwrap_or_default();
         };
         let within = |range: &Range<usize>| range.start <= offset && offset <= range.end;
         if let Some(reference) = mapper.refs.iter().find(|r| within(&r.range)) {
@@ -421,8 +458,20 @@ impl Server {
                 None => Value::Null,
             };
         }
+        if is_java(&path) {
+            return match self.jpql_items(rope, &text, offset) {
+                Some(items) => json!({ "isIncomplete": false, "items": items }),
+                None => Value::Null,
+            };
+        }
         let Some(mapper) = self.index.mappers.get(&path) else {
-            return Value::Null;
+            if !self.spring.contains_key(&path) {
+                return Value::Null;
+            }
+            return match self.spring_items(rope, &text, offset) {
+                Some((items, incomplete)) => json!({ "isIncomplete": incomplete, "items": items }),
+                None => Value::Null,
+            };
         };
         let (items, incomplete) = match mapper::context_at(&text, mapper.dialect, offset) {
             Some(Context::Parameter {
@@ -445,7 +494,9 @@ impl Server {
                     .unwrap_or_default();
                 (field_items(&fields), false)
             }
-            Some(Context::ClassName { replace, typed }) => self.class_items(rope, replace, &typed),
+            Some(Context::ClassName { replace, typed }) => {
+                self.class_items(rope, replace, &typed, true)
+            }
             None => return Value::Null,
         };
         json!({ "isIncomplete": incomplete, "items": items })
@@ -670,7 +721,14 @@ impl Server {
 
     /// 클래스 이름 후보: 프로젝트 클래스(단순 이름이나 FQN이 친 값으로 시작), 별칭, MyBatis 기본 별칭.
     /// 고르면 속성값 전체를 FQN(별칭이면 별칭)으로 바꾼다.
-    fn class_items(&self, rope: &Rope, replace: Range<usize>, typed: &str) -> (Vec<Value>, bool) {
+    /// `mybatis`면 MyBatis 별칭(typeAlias·기본 별칭)도 함께 보여 준다.
+    fn class_items(
+        &self,
+        rope: &Rope,
+        replace: Range<usize>,
+        typed: &str,
+        mybatis: bool,
+    ) -> (Vec<Value>, bool) {
         let range = lsp_range(rope, &replace);
         let typed = typed.to_lowercase();
         let simple_typed = typed.rsplit('.').next().unwrap_or(&typed);
@@ -700,6 +758,9 @@ impl Server {
         for fqn in classes.into_iter().take(MAX_CLASS_ITEMS) {
             let (package, simple) = fqn.rsplit_once('.').unwrap_or(("", fqn));
             items.push(edit(simple, package, 7, fqn));
+        }
+        if !mybatis {
+            return (items, incomplete);
         }
         for aliases in self.aliases.values() {
             for (alias, ty) in &aliases.explicit {
@@ -731,6 +792,343 @@ impl Server {
         self.java
             .values()
             .find_map(|file| file.types.iter().find(|t| t.fqn == fqn).map(|t| (file, t)))
+    }
+
+    /// 프로젝트의 모든 빈 이름(Spring XML의 id·name·alias, `@Component` 계열·`@Bean`).
+    fn bean_names(&self) -> HashSet<&str> {
+        self.spring
+            .values()
+            .flat_map(|c| c.defs.iter().map(|d| d.name.as_str()))
+            .chain(
+                self.java
+                    .values()
+                    .flat_map(|f| f.types.iter())
+                    .flat_map(|t| t.beans.iter().map(|(name, _)| name.as_str())),
+            )
+            .collect()
+    }
+
+    /// 이 빈 이름의 정의(XML 빈, Java 클래스·`@Bean` 메서드).
+    fn bean_targets(&self, name: &str) -> Vec<(PathBuf, Range<usize>)> {
+        let xml = self.spring.iter().flat_map(|(file, config)| {
+            config
+                .defs
+                .iter()
+                .filter(|d| d.name == name)
+                .map(|d| (file.clone(), d.range.clone()))
+        });
+        let java = self.java.iter().flat_map(|(file, java)| {
+            java.types
+                .iter()
+                .flat_map(|t| t.beans.iter())
+                .filter(|(bean, _)| bean == name)
+                .map(|(_, range)| (file.clone(), range.clone()))
+        });
+        xml.chain(java).collect()
+    }
+
+    /// 클래스와 상위 클래스들(프로젝트 안에서 찾은 것만). 끝까지 프로젝트 안이면 true도 함께 준다
+    /// (상위 클래스가 라이브러리면 그쪽 property를 몰라 검증하지 않는다).
+    fn hierarchy(&self, fqn: &str) -> (Vec<(&JavaFile, &TypeDecl)>, bool) {
+        let mut found = Vec::new();
+        let mut current = self.class(fqn);
+        let mut seen = HashSet::new();
+        while let Some((file, decl)) = current {
+            if !seen.insert(decl.fqn.as_str()) {
+                break;
+            }
+            found.push((file, decl));
+            let Some(parent) = &decl.superclass else {
+                return (found, true);
+            };
+            current = self.class(&file.resolve(parent));
+        }
+        let complete = !found.is_empty() && current.is_some();
+        (found, complete)
+    }
+
+    /// 클래스의 property(setter `setX`가 있거나 같은 이름의 필드): (이름, 타입, 파일, 범위).
+    fn bean_properties(&self, fqn: &str) -> Vec<(String, String, PathBuf, Range<usize>)> {
+        let mut found: Vec<(String, String, PathBuf, Range<usize>)> = Vec::new();
+        let (hierarchy, _) = self.hierarchy(fqn);
+        let file_of = |decl: &TypeDecl| {
+            self.java
+                .iter()
+                .find(|(_, f)| f.types.iter().any(|t| t.fqn == decl.fqn))
+                .map(|(path, _)| path.clone())
+                .unwrap_or_default()
+        };
+        for (_, decl) in hierarchy {
+            let path = file_of(decl);
+            for method in &decl.methods {
+                if let Some(rest) = method.name.strip_prefix("set")
+                    && method.params.len() == 1
+                    && let Some(first) = rest.chars().next()
+                {
+                    let name: String = first.to_lowercase().chain(rest.chars().skip(1)).collect();
+                    if !found.iter().any(|(n, ..)| *n == name) {
+                        found.push((
+                            name,
+                            method.params[0].ty.clone(),
+                            path.clone(),
+                            method.range.clone(),
+                        ));
+                    }
+                }
+            }
+            for field in &decl.fields {
+                if !found.iter().any(|(n, ..)| *n == field.name) {
+                    found.push((
+                        field.name.clone(),
+                        field.ty.clone(),
+                        path.clone(),
+                        field.range.clone(),
+                    ));
+                }
+            }
+        }
+        found
+    }
+
+    /// Spring XML 진단: 없는 빈 참조, 프로젝트 패키지인데 없는 클래스, 프로젝트 클래스에 없는 property.
+    fn spring_findings(&self, config: &Config) -> Vec<Finding> {
+        let beans = self.bean_names();
+        let packages: HashSet<&str> = self
+            .java
+            .values()
+            .filter_map(|f| f.package.as_deref())
+            .collect();
+        let mut findings = Vec::new();
+        for usage in &config.refs {
+            if !beans.contains(usage.name.as_str()) {
+                findings.push(Finding {
+                    range: usage.range.clone(),
+                    severity: Severity::Warning,
+                    code: "unresolved-bean",
+                    message: format!(
+                        "빈 '{}'을(를) 찾을 수 없습니다(Spring XML 설정, @Component 계열, @Bean에 없음).",
+                        usage.name
+                    ),
+                });
+            }
+        }
+        for usage in &config.classes {
+            let package = usage.name.rsplit_once('.').map(|(p, _)| p);
+            if !usage.name.contains('$')
+                && package.is_some_and(|p| packages.contains(p))
+                && self.class(&usage.name).is_none()
+            {
+                findings.push(Finding {
+                    range: usage.range.clone(),
+                    severity: Severity::Warning,
+                    code: "unresolved-class",
+                    message: format!("클래스 {}을(를) 프로젝트에서 찾을 수 없습니다.", usage.name),
+                });
+            }
+        }
+        for property in &config.properties {
+            let Some(owner) = &property.owner else {
+                continue;
+            };
+            let (hierarchy, complete) = self.hierarchy(owner);
+            if !complete || hierarchy.first().is_some_and(|(_, d)| d.is_interface) {
+                continue;
+            }
+            // `a.b`처럼 이어 쓴 경로는 첫 조각만 본다.
+            let name = property.name.split('.').next().unwrap_or(&property.name);
+            if !self.bean_properties(owner).iter().any(|(n, ..)| n == name) {
+                findings.push(Finding {
+                    range: property.range.clone(),
+                    severity: Severity::Warning,
+                    code: "unknown-property",
+                    message: format!(
+                        "{owner}에 property '{name}'이(가) 없습니다(setter·필드 없음). 실행하면 빈 생성 오류가 납니다."
+                    ),
+                });
+            }
+        }
+        findings
+    }
+
+    /// Spring XML 정의로 이동: 빈 참조 → 빈, class → Java 클래스, property → setter·필드,
+    /// `${키}` → 프로퍼티 파일, import → 파일.
+    fn spring_targets(
+        &self,
+        path: &Path,
+        config: &Config,
+        offset: usize,
+    ) -> Vec<(PathBuf, Range<usize>)> {
+        let within = |range: &Range<usize>| range.start <= offset && offset <= range.end;
+        if let Some(usage) = config.placeholders.iter().find(|u| within(&u.range)) {
+            return self
+                .property_keys
+                .get(&usage.name)
+                .cloned()
+                .unwrap_or_default();
+        }
+        if let Some(usage) = config.refs.iter().find(|u| within(&u.range)) {
+            return self.bean_targets(&usage.name);
+        }
+        if let Some(usage) = config.classes.iter().find(|u| within(&u.range)) {
+            return self
+                .java
+                .iter()
+                .flat_map(|(file, java)| {
+                    java.types
+                        .iter()
+                        .filter(|t| t.fqn == usage.name)
+                        .map(|t| (file.clone(), t.range.clone()))
+                })
+                .collect();
+        }
+        if let Some(property) = config.properties.iter().find(|p| within(&p.range)) {
+            let name = property.name.split('.').next().unwrap_or(&property.name);
+            return property
+                .owner
+                .iter()
+                .flat_map(|owner| self.bean_properties(owner))
+                .filter(|(n, ..)| n == name)
+                .map(|(_, _, file, range)| (file, range))
+                .take(1)
+                .collect();
+        }
+        if let Some(usage) = config.imports.iter().find(|u| within(&u.range)) {
+            return self
+                .import_file(path, &usage.name)
+                .map(|f| vec![(f, 0..0)])
+                .unwrap_or_default();
+        }
+        Vec::new()
+    }
+
+    /// `<import resource>` 경로: `classpath:`는 리소스 폴더 기준, `/`는 웹 루트, 아니면 이 파일 기준.
+    fn import_file(&self, path: &Path, resource: &str) -> Option<PathBuf> {
+        if resource.contains('*') || resource.contains("${") {
+            return None;
+        }
+        if let Some(rest) = resource
+            .strip_prefix("classpath*:")
+            .or_else(|| resource.strip_prefix("classpath:"))
+        {
+            return self.resource_roots.iter().find_map(|root| {
+                web::resolve(
+                    &format!("/{}", rest.trim_start_matches('/')),
+                    path,
+                    Some(root),
+                )
+            });
+        }
+        let root = web::web_root_for(&self.web_roots, path).map(PathBuf::as_path);
+        web::resolve(resource.trim_start_matches("file:"), path, root)
+    }
+
+    /// Spring XML 자동완성: class 이름, 빈 이름, property 이름, `${` 프로퍼티 키.
+    fn spring_items(&self, rope: &Rope, text: &str, offset: usize) -> Option<(Vec<Value>, bool)> {
+        let edit = |label: &str, detail: &str, kind: u8, range: &Range<usize>| {
+            json!({
+                "label": label,
+                "kind": kind,
+                "detail": detail,
+                "filterText": label,
+                "textEdit": { "range": lsp_range(rope, range), "newText": label },
+            })
+        };
+        Some(match spring::site_at(text, offset)? {
+            spring::Site::Class { replace, typed } => {
+                self.class_items(rope, replace, &typed, false)
+            }
+            spring::Site::Bean { replace } => {
+                let classes: HashMap<&str, &str> = self
+                    .spring
+                    .values()
+                    .flat_map(|c| c.defs.iter())
+                    .filter_map(|d| Some((d.name.as_str(), d.class.as_deref()?)))
+                    .collect();
+                let mut names: Vec<&str> = self.bean_names().into_iter().collect();
+                names.sort_unstable();
+                let items = names
+                    .into_iter()
+                    .map(|name| edit(name, classes.get(name).copied().unwrap_or(""), 6, &replace))
+                    .collect();
+                (items, false)
+            }
+            spring::Site::Property { owner, replace } => {
+                let items = owner
+                    .map(|owner| self.bean_properties(&owner))
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|(name, ty, ..)| edit(name, ty, 10, &replace))
+                    .collect();
+                (items, false)
+            }
+            spring::Site::Placeholder { replace } => {
+                let mut keys: Vec<_> = self.property_keys.iter().collect();
+                keys.sort_by(|a, b| a.0.cmp(b.0));
+                let items = keys
+                    .into_iter()
+                    .map(|(key, files)| {
+                        let file = files[0]
+                            .0
+                            .file_name()
+                            .map(|f| f.to_string_lossy())
+                            .unwrap_or_default();
+                        edit(key, &file, 10, &replace)
+                    })
+                    .collect();
+                (items, false)
+            }
+        })
+    }
+
+    /// JPQL(`@Query` 등) 안: `FROM` 뒤 엔티티 이름, `별칭.` 뒤 엔티티 필드.
+    fn jpql_items(&self, rope: &Rope, text: &str, offset: usize) -> Option<Vec<Value>> {
+        let site = java::jpql_at(text, offset)?;
+        let (word, typed) = jpa::word_at(&site.before)?;
+        let replace = offset - typed..offset;
+        let edit = |label: &str, detail: &str, kind: u8| {
+            json!({
+                "label": label,
+                "kind": kind,
+                "detail": detail,
+                "filterText": label,
+                "textEdit": { "range": lsp_range(rope, &replace), "newText": label },
+            })
+        };
+        let entities = || {
+            self.java
+                .values()
+                .flat_map(|f| f.types.iter().map(move |t| (f, t)))
+                .filter(|(_, t)| t.entity.is_some())
+        };
+        match word {
+            Word::Entity => Some(
+                entities()
+                    .map(|(_, t)| edit(t.entity.as_deref().unwrap_or_default(), &t.fqn, 7))
+                    .collect(),
+            ),
+            Word::Field { alias, path } => {
+                let entity = jpa::aliases(&site.query)
+                    .into_iter()
+                    .find(|(a, _)| *a == alias)
+                    .map(|(_, e)| e)?;
+                let (mut file, mut decl) =
+                    entities().find(|(_, t)| t.entity.as_deref() == Some(entity.as_str()))?;
+                // `b.writer.` → writer 필드의 타입으로 내려간다.
+                for segment in &path {
+                    let (field, owner) = self
+                        .fields(file, decl)
+                        .into_iter()
+                        .find(|(f, _)| &f.name == segment)?;
+                    (file, decl) = self.class(&owner.resolve(&field.ty))?;
+                }
+                Some(
+                    self.fields(file, decl)
+                        .iter()
+                        .map(|(f, _)| edit(&f.name, &f.ty, 5))
+                        .collect(),
+                )
+            }
+        }
     }
 
     /// 상속한 필드까지(상위 클래스는 선언한 파일 기준으로 이름을 푼다). 가까운 클래스가 먼저다.
@@ -773,6 +1171,10 @@ impl Server {
                 if kind.is_dir() {
                     if entry.file_name() == "WEB-INF" {
                         self.web_roots.push(dir.clone());
+                        self.resource_roots.push(path.join("classes"));
+                    }
+                    if path.ends_with("src/main/resources") {
+                        self.resource_roots.push(path.clone());
                     }
                     if !SKIP_DIRS.iter().any(|s| entry.file_name() == *s) {
                         stack.push(path);
@@ -788,7 +1190,7 @@ impl Server {
                 }
                 // 대부분의 파일은 대상이 아니므로 내용을 풀기 전에 바이트로 거른다.
                 let wanted: &[&[u8]] = match ext.to_ascii_lowercase().as_str() {
-                    "xml" => &[b"<mapper", b"<sqlMap", b"<typeAlias"],
+                    "xml" => &[b"<mapper", b"<sqlMap", b"<typeAlias", b"<beans"],
                     // VO 클래스의 필드도 자동완성에 쓰므로 Java 파일은 모두 읽는다.
                     "java" => &[],
                     _ => continue,
@@ -842,10 +1244,25 @@ impl Server {
                     self.add_library(None, tld);
                 }
             }
-            "properties" if name.starts_with("application") => {
-                if let Some(view) = text().as_deref().and_then(web::view_properties) {
+            "properties" => {
+                let Some(text) = text() else {
+                    return true;
+                };
+                for (key, range) in spring::property_keys(&text) {
+                    self.property_keys
+                        .entry(key)
+                        .or_default()
+                        .push((path.to_path_buf(), range));
+                }
+                jpa::scan_database(&text, &mut self.database);
+                if name.starts_with("application")
+                    && let Some(view) = web::view_properties(&text)
+                {
                     self.views.push(view);
                 }
+            }
+            "yml" | "yaml" if name.starts_with("application") => {
+                jpa::scan_database(&text().unwrap_or_default(), &mut self.database);
             }
             "gradle" | "kts" if name.starts_with("build.gradle") => {
                 build.push_str(&text().unwrap_or_default());
@@ -871,6 +1288,12 @@ impl Server {
                     && let Some(xml) = decoded()
                 {
                     self.taglib_locations.extend(web::taglib_locations(&xml));
+                }
+                // persistence.xml·데이터소스 설정의 방언·드라이버.
+                if (has(b"Dialect") || has(b"jdbc:oracle") || has(b"OracleDriver"))
+                    && let Some(xml) = decoded()
+                {
+                    jpa::scan_database(&xml, &mut self.database);
                 }
                 return false;
             }

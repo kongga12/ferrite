@@ -298,7 +298,37 @@
     - 뷰 이름 2,402/3,133. 못 푼 것 중 같은 이름의 JSP가 있는 것은 56건뿐이다.
       - 나머지는 JSON·엑셀 빈 뷰, Thymeleaf 프로젝트, 뷰가 아닌 문자열이다.
   - 미룸: tagdir(`.tag` 파일) 태그, 조각 파일을 include하는 부모의 taglib 선언 따라가기, Gradle 캐시의 jar, Java 설정(`@Configuration`)의 뷰 리졸버
-- [ ] 2b-6 Spring XML 설정·JPA 보완(Spring Boot LS가 다루지 못하는 부분)
+- [x] 2b-6 Spring XML 설정·JPA 보완(Spring Boot LS가 다루지 못하는 부분)
+  - Spring XML은 egov 서버가 직접 다룬다.
+    - Spring Boot LS의 XML 지원은 XML 문서를 그 서버에 보내야 하고, 그러려면 jdt.ls와 JVM 둘이 떠 있어야 한다.
+    - 없는 빈·클래스·속성 진단과 플레이스홀더 이동은 Spring Boot LS에 없다.
+  - Spring XML 설정(`<beans>`, `beans:beans` 포함)
+    - 진단(경고)
+      - `unresolved-bean`: 없는 빈 참조(`ref`, `<ref bean>`, `p:x-ref`, `parent`, `depends-on`, `factory-bean`, `transaction-manager`, `*-ref` 등)
+        - 빈은 XML의 id·name·alias, 다른 네임스페이스의 id(`tx:advice` 등), `@Component` 계열·egov `@Mapper`·`@Bean` 메서드(이름 규칙은 Spring과 같다)
+        - `${}`로 만든 이름은 실행 전에는 몰라 뺀다.
+      - `unresolved-class`: 프로젝트 패키지인데 없는 클래스. 라이브러리 클래스는 모르므로 뺀다.
+      - `unknown-property`: 프로젝트 클래스에 setter·필드가 없는 property. 상위 클래스가 라이브러리면 모르므로 뺀다.
+    - 정의로 이동: 빈 참조 → 빈 정의(XML·Java), class → Java 클래스, property → setter·필드, `${키}` → `.properties`의 키(프로필별 파일 모두), `<import resource>` → 파일(`classpath:`는 `src/main/resources`·`WEB-INF/classes` 기준)
+    - 자동완성: class(프로젝트 클래스), 빈 이름, property 이름(그 빈 class의 setter·필드), `${` 뒤 프로퍼티 키
+  - JPA
+    - `@Query`·`@NamedQuery(query)`·`createQuery("…")` 안 JPQL 자동완성
+      - `FROM`·`JOIN`·`UPDATE` 뒤 엔티티 이름(`@Entity(name)`, 없으면 클래스 이름)
+      - `별칭.` 뒤 엔티티 필드. `b.writer.`처럼 필드 타입으로 내려간다.
+      - 문자열을 `+`로 이어도 쿼리 하나로 본다.
+    - `@GeneratedValue(strategy = IDENTITY)` 진단(`jpa-identity`)
+      - 경고: Hibernate 방언이 Oracle8i·9i·10g(IDENTITY는 Oracle12cDialect부터)
+      - 정보: Oracle인데 버전을 모름(드라이버·JDBC URL·egov `Globals.DbType`만 보임). 11g 이하라면 SEQUENCE를 쓰라고 알린다.
+      - DB 단서는 `.properties`, `application.yml`, Spring XML, `persistence.xml`에서 모은다. Tibero는 IDENTITY 지원 여부를 확인하지 못해 방언으로만 판단한다.
+  - Java 색인을 넓혔다: 타입·필드 위치, 빈 이름, 엔티티 이름. 애너테이션 인자는 `value =`·`name =` 형태도 읽는다.
+  - 코퍼스(로컬, 프로젝트마다 실제 서버를 띄워 확인)
+    - Spring XML 설정 313개를 열어 진단 1건이 나왔다. 배포된 Tomcat 사본 안의 설정이라 Java 소스가 없어 실제로 못 찾는 빈이다.
+    - 플레이스홀더 127/131 이동. 못 간 것은 `spring.profiles.active` 같은 시스템 프로퍼티다.
+    - IDENTITY를 쓰는 엔티티 4개는 모두 PostgreSQL 프로젝트라 알림이 나오지 않는다(맞음).
+  - 미룸
+    - 엔드포인트 목록(`@RequestMapping` URL 모음): 앱에 기호 검색 화면이 생기면 Spring Boot LS의 `@/` 기호를 재사용한다.
+    - 라이브러리 클래스의 property 검증(jar의 class 파일 읽기)
+    - `mappedBy` 검증, 경로 조인 별칭(`JOIN b.files f`) 필드 완성
 
 ### Phase 2c — egov 개발도구 (프로젝트·설정·코드 생성)
 

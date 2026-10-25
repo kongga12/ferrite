@@ -722,3 +722,143 @@ fn 코퍼스의_taglib_include_뷰_이름_연결_통계() {
         eprintln!("  못 푼 뷰: {value}");
     }
 }
+
+/// 프로젝트마다 실제 서버를 띄워 Spring XML 설정을 하나씩 열고, 나오는 진단을 종류별로 센다
+/// (잡음 확인). `${키}` 이동이 프로퍼티 파일로 이어지는지도 센다.
+#[test]
+#[ignore = "로컬 egov 코퍼스가 필요하다(FERRITE_EGOV_CORPUS)"]
+fn 코퍼스의_spring_xml_진단_통계() {
+    use std::collections::HashMap;
+
+    use ferrite_egov::spring;
+    use ferrite_lsp::client::{LanguageServer, ServerCommand, ServerEvent, parse_diagnostics};
+    use ferrite_lsp::features::{parse_locations, position_params};
+    use ropey::Rope;
+
+    let Some(root) = std::env::var_os("FERRITE_EGOV_CORPUS") else {
+        eprintln!("FERRITE_EGOV_CORPUS가 없어 건너뜁니다");
+        return;
+    };
+    let read = |path: &Path| {
+        text_file::read(path)
+            .ok()
+            .and_then(|b| text_file::decode(&b).ok())
+            .map(|c| c.text)
+    };
+    let (mut configs, mut entities) = (0, 0);
+    let mut by_code: HashMap<String, (usize, Vec<String>)> = HashMap::new();
+    let (mut placeholders, mut resolved) = (0, 0);
+    let started = Instant::now();
+    for project in std::fs::read_dir(&root).unwrap().flatten() {
+        let project = project.path();
+        if !project.is_dir() {
+            continue;
+        }
+        let xmls: Vec<(PathBuf, String, spring::Config)> = files(&project, &["xml"])
+            .into_iter()
+            .filter_map(|path| {
+                let text = read(&path)?;
+                let config = spring::parse(&text)?;
+                Some((path, text, config))
+            })
+            .collect();
+        // `@GeneratedValue(IDENTITY)`를 쓰는 엔티티(DB에 따라 알림이 나와야 한다).
+        let identity: Vec<(PathBuf, String)> = files(&project, &["java"])
+            .into_iter()
+            .filter_map(|path| Some((path.clone(), read(&path)?)))
+            .filter(|(_, text)| text.contains("@GeneratedValue") && text.contains("IDENTITY"))
+            .collect();
+        if xmls.is_empty() && identity.is_empty() {
+            continue;
+        }
+        let command = ServerCommand {
+            program: env!("CARGO_BIN_EXE_ferrite-egov-ls").into(),
+            ..Default::default()
+        };
+        let mut lsp = LanguageServer::start(&command, &project, || {}).unwrap();
+        let encoding = lsp.encoding();
+        let documents = xmls
+            .iter()
+            .map(|(path, text, config)| (path, text, Some(config), "xml"))
+            .chain(
+                identity
+                    .iter()
+                    .map(|(path, text)| (path, text, None, "java")),
+            );
+        for (path, text, config, language) in documents {
+            if config.is_some() {
+                configs += 1;
+            } else {
+                entities += 1;
+            }
+            lsp.did_open(path, language, 1, text);
+            // 진단이 없으면 알림도 없다. 뒤이은 요청의 응답이 오기 전까지 온 진단을 모은다
+            // (서버는 메시지를 차례로 처리한다).
+            let probe = position_params(path, &Rope::from_str(text), 0, encoding).unwrap();
+            let id = lsp.request("textDocument/definition", probe);
+            let deadline = Instant::now() + Duration::from_secs(60);
+            let mut diagnostics = Vec::new();
+            'wait: loop {
+                for event in lsp.poll_events() {
+                    match event {
+                        ServerEvent::Notification { method, params }
+                            if method == "textDocument/publishDiagnostics" =>
+                        {
+                            if let Some((got, found)) = parse_diagnostics(&params)
+                                && got.file_name() == path.file_name()
+                            {
+                                diagnostics = found;
+                            }
+                        }
+                        ServerEvent::Response { id: got, .. } if got == id => break 'wait,
+                        _ => {}
+                    }
+                }
+                assert!(Instant::now() < deadline, "응답이 오지 않음");
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            let rope = Rope::from_str(text);
+            for d in diagnostics {
+                let code = match &d.code {
+                    Some(lsp_types::NumberOrString::String(code)) => code.clone(),
+                    _ => String::new(),
+                };
+                let start = ferrite_lsp::position::from_lsp(&rope, d.range.start, encoding);
+                let end = ferrite_lsp::position::from_lsp(&rope, d.range.end, encoding);
+                let entry = by_code.entry(code).or_default();
+                entry.0 += 1;
+                if entry.1.len() < 8 {
+                    entry.1.push(format!(
+                        "{}/{}: {}",
+                        project.file_name().unwrap().to_string_lossy(),
+                        path.file_name().unwrap().to_string_lossy(),
+                        rope.slice(start..end)
+                    ));
+                }
+            }
+            for usage in config.iter().flat_map(|c| c.placeholders.iter()) {
+                placeholders += 1;
+                let char_idx = rope.byte_to_char(usage.range.start + 1);
+                let params = position_params(path, &rope, char_idx, encoding).unwrap();
+                let id = lsp.request("textDocument/definition", params);
+                if response(&lsp, id).is_some_and(|r| !parse_locations(&r).is_empty()) {
+                    resolved += 1;
+                }
+            }
+            lsp.did_close(path);
+        }
+    }
+    eprintln!(
+        "시간 {:?}, Spring XML 설정 {configs}개, IDENTITY를 쓰는 엔티티 {entities}개",
+        started.elapsed()
+    );
+    let mut codes: Vec<_> = by_code.into_iter().collect();
+    codes.sort();
+    for (code, (count, samples)) in &codes {
+        eprintln!("  {code}: {count}");
+        for sample in samples {
+            eprintln!("    {sample}");
+        }
+    }
+    eprintln!("플레이스홀더 {resolved}/{placeholders} 이동");
+}
