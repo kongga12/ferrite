@@ -6,5 +6,7 @@ pub mod java;
 pub mod jsp;
 pub mod mapper;
 pub mod server;
+pub mod taglib;
+pub mod web;
 
 pub use server::run_stdio;

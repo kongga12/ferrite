@@ -448,3 +448,141 @@ fn jsp를_열면_이스케이프_없는_출력을_알리고_고치면_지운다(
         std::thread::sleep(Duration::from_millis(100));
     }
 }
+
+#[test]
+fn jsp에서_taglib을_완성하고_include와_뷰_이름으로_이동한다() {
+    use ferrite_lsp::features::{
+        completion_params, parse_completion, parse_locations, position_params,
+    };
+
+    let root = project("jspnav");
+    let web = root.join("src/main/webapp");
+    let write = |path: &str, text: &str| {
+        let file = web.join(path);
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(&file, text).unwrap();
+        file
+    };
+    // 시험용 TLD 하나를 uri로도, web.xml 매핑으로도 쓴다.
+    write(
+        "WEB-INF/tlds/test.tld",
+        "<taglib><uri>http://example.com/t</uri>\n<tag><name>out</name><description>출력</description>\n<attribute><name>value</name><required>true</required></attribute>\n<attribute><name>escapeXml</name></attribute>\n<attribute><name>default</name></attribute></tag>\n<tag><name>if</name><attribute><name>test</name><required>true</required></attribute></tag>\n<function><name>length</name><function-signature>int length(java.lang.Object)</function-signature></function></taglib>\n",
+    );
+    write(
+        "WEB-INF/web.xml",
+        "<web-app><jsp-config><taglib><taglib-uri>/customs</taglib-uri><taglib-location>/WEB-INF/tlds/test.tld</taglib-location></taglib></jsp-config></web-app>\n",
+    );
+    write(
+        "WEB-INF/config/dispatcher-servlet.xml",
+        "<beans><bean class=\"org.springframework.web.servlet.view.UrlBasedViewResolver\" p:prefix=\"/WEB-INF/jsp/\" p:suffix=\".jsp\"/></beans>\n",
+    );
+    // 공통 taglib 파일을 정적 include로 읽는다(전자정부 프로젝트의 흔한 모양).
+    let taglibs = write(
+        "WEB-INF/jsp/include/taglib.jsp",
+        "<%@ taglib prefix=\"t\" uri=\"http://example.com/t\" %>\n",
+    );
+    let controller = root.join("src/main/java/egov/sample/SampleController.java");
+    fs::create_dir_all(controller.parent().unwrap()).unwrap();
+    let controller_text = "package egov.sample;\n\n@Controller\npublic class SampleController {\n    public String list() {\n        return \"sample/list\";\n    }\n}\n";
+    fs::write(&controller, controller_text).unwrap();
+    let list_text = "<%@ include file=\"/WEB-INF/jsp/include/taglib.jsp\" %>\n<%@ taglib prefix=\"u\" uri=\"/customs\" %>\n<t:o\n";
+    let list = write("WEB-INF/jsp/sample/list.jsp", list_text);
+
+    let command = ServerCommand {
+        program: env!("CARGO_BIN_EXE_ferrite-egov-ls").into(),
+        ..Default::default()
+    };
+    let mut lsp = LanguageServer::start(&command, &root, || {}).unwrap();
+    let encoding = lsp.encoding();
+    // `|` 자리에서 자동완성한다(같은 문서를 고쳐 가며).
+    let mut version = 0;
+    let mut complete = |lsp: &mut LanguageServer, marked: &str| {
+        version += 1;
+        let offset = marked.find('|').unwrap();
+        let text = marked.replace('|', "");
+        if version == 1 {
+            lsp.did_open(&list, "jsp", version, &text);
+        } else {
+            lsp.did_change_full(&list, version, &text);
+        }
+        let rope = Rope::from_str(&text);
+        let params =
+            completion_params(&list, &rope, rope.byte_to_char(offset), encoding, None).unwrap();
+        let id = lsp.request("textDocument/completion", params);
+        let result = response(lsp, id);
+        let mut items = parse_completion(&result, &rope, encoding).items;
+        items.sort_by(|a, b| a.sort.cmp(&b.sort));
+        items
+    };
+    let head = "<%@ include file=\"/WEB-INF/jsp/include/taglib.jsp\" %>\n<%@ taglib prefix=\"u\" uri=\"/customs\" %>\n";
+    let labels = |items: &[ferrite_lsp::features::Completion]| {
+        let mut labels: Vec<String> = items.iter().map(|c| c.label.clone()).collect();
+        labels.sort();
+        labels
+    };
+
+    let items = complete(&mut lsp, &format!("{head}<t:o|"));
+    assert_eq!(labels(&items), ["t:if", "t:out"], "include한 파일의 선언");
+    assert_eq!(
+        items.iter().find(|c| c.label == "t:out").unwrap().text,
+        "out"
+    );
+
+    let items = complete(&mut lsp, &format!("{head}<u|"));
+    assert_eq!(
+        labels(&items),
+        ["t:if", "t:out", "u:if", "u:out"],
+        "web.xml 매핑으로 찾은 /customs"
+    );
+
+    let items = complete(&mut lsp, &format!("{head}<t:out escapeXml=\"false\" |"));
+    let attributes: Vec<&str> = items.iter().map(|c| c.label.as_str()).collect();
+    assert_eq!(
+        attributes,
+        ["value", "default"],
+        "필수 먼저, 이미 쓴 속성은 뺀다"
+    );
+
+    let items = complete(&mut lsp, &format!("{head}${{t:le|}}"));
+    assert_eq!(labels(&items), ["length"]);
+    assert_eq!(items[0].detail, "int length(java.lang.Object)");
+
+    let definition =
+        |lsp: &mut LanguageServer, path: &std::path::Path, text: &str, needle: &str| {
+            let rope = Rope::from_str(text);
+            let char_idx = rope.byte_to_char(text.find(needle).unwrap() + 2);
+            let params = position_params(path, &rope, char_idx, encoding).unwrap();
+            let id = lsp.request("textDocument/definition", params);
+            parse_locations(&response(lsp, id))
+                .into_iter()
+                .map(|t| t.path)
+                .collect::<Vec<_>>()
+        };
+    lsp.did_change_full(&list, 99, list_text);
+    let same = |found: Vec<PathBuf>, want: &PathBuf| {
+        found.len() == 1 && fs::canonicalize(&found[0]).ok() == fs::canonicalize(want).ok()
+    };
+    assert!(
+        same(
+            definition(&mut lsp, &list, list_text, "include/taglib"),
+            &taglibs
+        ),
+        "include 경로 → 파일"
+    );
+    lsp.did_open(&controller, "java", 1, controller_text);
+    assert!(
+        same(
+            definition(&mut lsp, &controller, controller_text, "sample/list"),
+            &list
+        ),
+        "뷰 이름 → JSP"
+    );
+
+    drop(lsp);
+    for _ in 0..50 {
+        if fs::remove_dir_all(&root).is_ok() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}

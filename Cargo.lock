@@ -1252,6 +1252,7 @@ dependencies = [
  "tree-sitter",
  "tree-sitter-java",
  "tree-sitter-xml",
+ "zip",
 ]
 
 [[package]]
