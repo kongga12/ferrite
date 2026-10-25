@@ -5,6 +5,7 @@
 
 mod app;
 mod codegen;
+mod commngt_ui;
 mod config_gen;
 mod editor_view;
 mod file_tree;
