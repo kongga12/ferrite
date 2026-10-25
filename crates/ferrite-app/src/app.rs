@@ -54,6 +54,8 @@ const RENAME_SYMBOL: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, K
 const CODE_ACTION: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Period);
 const CODE_ACTION_ALT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::ALT, Key::Enter);
 const QUICK_OPEN: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::P);
+// 터미널은 VS Code처럼 macOS에서도 실제 Ctrl+`다.
+const TOGGLE_TERMINAL: KeyboardShortcut = KeyboardShortcut::new(Modifiers::CTRL, Key::Backtick);
 const FIND_IN_FILES: KeyboardShortcut =
     KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::F);
 /// 마우스가 한 자리에 이만큼 머물면 호버 정보를 요청한다.
@@ -425,6 +427,8 @@ pub struct FerriteApp {
     quick_open: crate::quick_open::QuickOpen,
     /// 파일에서 찾기(Ctrl+Shift+F) 패널.
     find_in_files: crate::find_in_files::FindInFiles,
+    /// 통합 터미널(Ctrl+`) 패널.
+    terminal: crate::terminal_ui::TerminalPanel,
     /// 다음 프레임에 에디터로 키보드 포커스를 돌려준다(찾기 막대를 닫은 뒤 등).
     focus_editor: bool,
     settings: Settings,
@@ -471,6 +475,7 @@ impl FerriteApp {
             find: None,
             quick_open: Default::default(),
             find_in_files: Default::default(),
+            terminal: Default::default(),
             focus_editor: false,
             settings,
             settings_changed: false,
@@ -888,6 +893,9 @@ impl FerriteApp {
         }
         if ctx.input_mut(|i| i.consume_shortcut(&QUICK_OPEN)) {
             self.open_quick_open(ctx);
+        }
+        if ctx.input_mut(|i| i.consume_shortcut(&TOGGLE_TERMINAL)) {
+            self.toggle_terminal(ctx);
         }
         // Ctrl+F가 Ctrl+Shift+F에도 맞으므로 먼저 확인한다.
         if ctx.input_mut(|i| i.consume_shortcut(&FIND_IN_FILES)) {
@@ -1368,6 +1376,11 @@ impl FerriteApp {
         }
     }
 
+    fn toggle_terminal(&mut self, ctx: &egui::Context) {
+        let root = self.tree.as_ref().map(|t| t.root().to_path_buf());
+        self.terminal.toggle(root.as_deref(), ctx);
+    }
+
     fn open_find_in_files(&mut self) {
         let selected = self
             .active
@@ -1561,6 +1574,12 @@ impl FerriteApp {
                     }
                 });
                 ui.menu_button("도구", |ui| {
+                    let item = egui::Button::new("터미널")
+                        .shortcut_text(ctx.format_shortcut(&TOGGLE_TERMINAL));
+                    if ui.add(item).clicked() {
+                        ui.close();
+                        self.toggle_terminal(&ctx);
+                    }
                     if ui.button("언어 서버…").clicked() {
                         ui.close();
                         self.servers.show();
@@ -2226,6 +2245,8 @@ impl eframe::App for FerriteApp {
         self.problems_panel(ui);
         self.references_panel(ui);
         self.find_in_files_panel(ui);
+        let root = self.tree.as_ref().map(|t| t.root().to_path_buf());
+        self.terminal.ui(ui, root.as_deref());
         self.project_panel(ui);
         self.editor(ui);
         if let Some(path) = self.quick_open.ui(ui.ctx()) {
@@ -3753,6 +3774,66 @@ mod tests {
         harness.run();
         harness.get_by_label("찾기").click();
         wait_for_label(&mut harness, "파일 1개에서 1개 찾음");
+        drop(harness);
+        remove_project(&dir);
+    }
+
+    /// 화면 읽기용으로 알린 터미널 글자.
+    fn terminal_text(harness: &Harness<'_, FerriteApp>) -> String {
+        harness
+            .query_by_role(egui::accesskit::Role::Terminal)
+            .and_then(|node| node.value())
+            .unwrap_or_default()
+    }
+
+    fn wait_for_terminal(harness: &mut Harness<'_, FerriteApp>, done: impl Fn(&str) -> bool) {
+        for _ in 0..400 {
+            harness.run_ok();
+            if done(&terminal_text(harness)) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        panic!("터미널 시간 초과. 화면:\n{}", terminal_text(harness));
+    }
+
+    #[test]
+    fn 터미널에서_명령을_실행하고_탭을_닫는다() {
+        let dir = std::env::temp_dir().join(format!("ferrite-terminal-ui-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(1200.0, 800.0))
+            .build_eframe(|cc| FerriteApp::new(cc, Some(dir.clone())));
+        harness.run();
+        harness.key_press_modifiers(Modifiers::CTRL, Key::Backtick);
+        // 셸(Windows PowerShell, 그 밖에는 사용자 셸)이 프롬프트를 띄울 때까지 기다린다.
+        wait_for_terminal(&mut harness, |text| !text.trim().is_empty());
+        harness
+            .query_by_role(egui::accesskit::Role::Terminal)
+            .unwrap()
+            .type_text("echo kittest-ferrite");
+        harness.key_press(Key::Enter);
+        wait_for_terminal(&mut harness, |text| {
+            text.matches("kittest-ferrite").count() >= 2
+        });
+
+        // 두 번째 탭을 열고 첫 탭을 닫는다(셸을 끝낸다).
+        harness.get_by_label("+").click();
+        harness.run_ok();
+        assert_eq!(harness.state().terminal.tab_count(), 2);
+        harness.get_all_by_label("×").next().unwrap().click();
+        harness.run_ok();
+        assert_eq!(harness.state().terminal.tab_count(), 1);
+
+        // 다시 누르면 숨긴다.
+        harness.key_press_modifiers(Modifiers::CTRL, Key::Backtick);
+        harness.run_ok();
+        assert!(
+            harness
+                .query_by_role(egui::accesskit::Role::Terminal)
+                .is_none()
+        );
         drop(harness);
         remove_project(&dir);
     }
