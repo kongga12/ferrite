@@ -1,0 +1,27 @@
+package {{txtConfigPackage}};
+
+import javax.sql.DataSource;
+
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+
+import {{rte}}.fdl.idgnr.impl.EgovSequenceIdGnrServiceImpl;
+
+/**
+ * DB 시퀀스 ID 생성.
+ */
+@Configuration
+public class {{txtFileName}} {
+
+	@Bean(name = "{{txtIdServiceName}}", destroyMethod = "destroy")
+	public EgovSequenceIdGnrServiceImpl idGnrService(@Qualifier("{{txtDatasourceName}}") DataSource dataSource) {
+		EgovSequenceIdGnrServiceImpl service = new EgovSequenceIdGnrServiceImpl();
+		service.setDataSource(dataSource);
+		service.setQuery("{{java txtQuery}}");
+{{#if (eq rdoIdType "BigDecimal")}}
+		service.setUseBigDecimals(true);
+{{/if}}
+		return service;
+	}
+}

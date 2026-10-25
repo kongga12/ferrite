@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<beans xmlns="http://www.springframework.org/schema/beans"
+	xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xmlns:jee="http://www.springframework.org/schema/jee"
+	xsi:schemaLocation="http://www.springframework.org/schema/beans http://www.springframework.org/schema/beans/spring-beans.xsd
+		http://www.springframework.org/schema/jee http://www.springframework.org/schema/jee/spring-jee.xsd">
+
+	<!-- WAS가 제공하는 데이터소스. resource-ref가 true면 java:comp/env/를 붙여 찾는다(Tomcat).
+	     JEUS·WebLogic의 전역 JNDI 이름이면 false로 둔다. -->
+	<jee:jndi-lookup id="{{txtDatasourceName}}" jndi-name="{{xml txtJndiName}}" resource-ref="{{cboResourceRef}}"/>
+
+</beans>

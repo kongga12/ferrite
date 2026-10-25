@@ -1,0 +1,23 @@
+package {{txtConfigPackage}};
+
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.scheduling.quartz.JobDetailFactoryBean;
+
+/**
+ * Job: QuartzJobBean을 상속한 {{txtServiceClass}}.
+ */
+@Configuration
+public class {{txtFileName}} {
+
+	@Bean(name = "{{txtJobName}}")
+	public JobDetailFactoryBean jobDetail() {
+		JobDetailFactoryBean factory = new JobDetailFactoryBean();
+		factory.setJobClass({{txtServiceClass}}.class);
+		factory.setDurability(true);
+{{#if chkProperty}}
+		factory.getJobDataMap().put("{{java txtPropertyName}}", "{{java txtPropertyValue}}");
+{{/if}}
+		return factory;
+	}
+}

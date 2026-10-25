@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- log4j2 설정 -->
+<Configuration status="WARN">
+	<Appenders>
+		<!-- 파일이 {{xml txtMaxFileSize}}를 넘으면 번호를 붙여 넘긴다(최대 {{txtMaxIndex}}개). -->
+		<RollingFile name="{{xml txtAppenderName}}" fileName="{{xml txtLogFileName}}" filePattern="{{xml txtLogFileNamePattern}}">
+			<PatternLayout pattern="{{xml txtConversionPattern}}"/>
+			<Policies>
+				<SizeBasedTriggeringPolicy size="{{xml txtMaxFileSize}}"/>
+			</Policies>
+			<DefaultRolloverStrategy max="{{txtMaxIndex}}"/>
+		</RollingFile>
+	</Appenders>
+	<Loggers>
+		<Logger name="egovframework" level="DEBUG" additivity="false">
+			<AppenderRef ref="{{xml txtAppenderName}}"/>
+		</Logger>
+		<Logger name="org.egovframe" level="DEBUG" additivity="false">
+			<AppenderRef ref="{{xml txtAppenderName}}"/>
+		</Logger>
+		<Logger name="org.springframework" level="INFO" additivity="false">
+			<AppenderRef ref="{{xml txtAppenderName}}"/>
+		</Logger>
+		<Root level="INFO">
+			<AppenderRef ref="{{xml txtAppenderName}}"/>
+		</Root>
+	</Loggers>
+</Configuration>

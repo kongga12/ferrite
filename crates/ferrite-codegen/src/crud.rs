@@ -383,7 +383,7 @@ fn validate(spec: &Spec) -> Result<(), String> {
     Ok(())
 }
 
-fn registry() -> Handlebars<'static> {
+pub(crate) fn registry() -> Handlebars<'static> {
     let mut registry = Handlebars::new();
     // Java·XML·JSP를 만들므로 HTML 이스케이프를 끈다(공식 확장의 결과와 같게).
     registry.register_escape_fn(handlebars::no_escape);
@@ -417,12 +417,22 @@ fn registry() -> Handlebars<'static> {
         _ => 0,
     });
     registry.register_helper("len", Box::new(len));
+    // 설정 파일에 넣는 자유 입력(JDBC URL의 `&`, Windows 경로의 `\` 등)을 형식에 맞게 바꾼다.
+    handlebars_helper!(xml: |a: Value| a.render()
+        .replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;"));
+    handlebars_helper!(java: |a: Value| a.render().replace('\\', "\\\\").replace('"', "\\\""));
+    handlebars_helper!(yaml: |a: Value| format!("'{}'", a.render().replace('\'', "''")));
+    handlebars_helper!(props: |a: Value| a.render().replace('\\', "\\\\"));
+    registry.register_helper("xml", Box::new(xml));
+    registry.register_helper("java", Box::new(java));
+    registry.register_helper("yaml", Box::new(yaml));
+    registry.register_helper("props", Box::new(props));
     registry
 }
 
 /// JS Handlebars의 `배열.length`를 handlebars-rust가 읽는 `len` 도우미로 바꾼다(공식 확장 템플릿이 쓴다).
 /// `{{x.length}}` → `{{len x}}`, 그 밖의 자리(`{{#if x.length}}`) → `(len x)`.
-fn js_compatible(template: &str) -> String {
+pub(crate) fn js_compatible(template: &str) -> String {
     let mut out = String::with_capacity(template.len());
     let mut rest = template;
     while let Some(open) = rest.find("{{") {

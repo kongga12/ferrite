@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- log4j2 설정 -->
+<Configuration status="WARN">
+	<Appenders>
+		<!-- 날짜 패턴의 단위 {{txtInterval}}개마다 넘긴다. -->
+		<RollingFile name="{{xml txtAppenderName}}" fileName="{{xml txtLogFileName}}" filePattern="{{xml txtLogFileNamePattern}}">
+			<PatternLayout pattern="{{xml txtConversionPattern}}"/>
+			<Policies>
+				<TimeBasedTriggeringPolicy interval="{{txtInterval}}" modulate="{{cboModulate}}"/>
+			</Policies>
+		</RollingFile>
+	</Appenders>
+	<Loggers>
+		<Logger name="egovframework" level="DEBUG" additivity="false">
+			<AppenderRef ref="{{xml txtAppenderName}}"/>
+		</Logger>
+		<Logger name="org.egovframe" level="DEBUG" additivity="false">
+			<AppenderRef ref="{{xml txtAppenderName}}"/>
+		</Logger>
+		<Logger name="org.springframework" level="INFO" additivity="false">
+			<AppenderRef ref="{{xml txtAppenderName}}"/>
+		</Logger>
+		<Root level="INFO">
+			<AppenderRef ref="{{xml txtAppenderName}}"/>
+		</Root>
+	</Loggers>
+</Configuration>

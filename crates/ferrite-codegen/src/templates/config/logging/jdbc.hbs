@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- log4j2 설정 -->
+<Configuration status="WARN">
+	<Appenders>
+		<!-- 로그 테이블 {{xml txtTableName}}: LOG_DATE, LOG_LEVEL, LOGGER, MESSAGE, EXCEPTION -->
+		<JDBC name="{{xml txtAppenderName}}" tableName="{{xml txtTableName}}">
+{{#if (eq rdoConnectionType "ConnectionFactory")}}
+			<ConnectionFactory class="{{xml txtConnectionFactoryClass}}" method="{{xml txtConnectionFactoryMethod}}"/>
+{{else}}
+			<DriverManager connectionString="{{xml txtUrl}}" driverClassName="{{xml txtDriver}}" userName="{{xml txtUser}}" password="{{xml txtPasswd}}"/>
+{{/if}}
+			<Column name="LOG_DATE" isEventTimestamp="true"/>
+			<Column name="LOG_LEVEL" pattern="%level"/>
+			<Column name="LOGGER" pattern="%logger"/>
+			<Column name="MESSAGE" pattern="%message"/>
+			<Column name="EXCEPTION" pattern="%throwable"/>
+		</JDBC>
+	</Appenders>
+	<Loggers>
+		<Logger name="egovframework" level="DEBUG" additivity="false">
+			<AppenderRef ref="{{xml txtAppenderName}}"/>
+		</Logger>
+		<Logger name="org.egovframe" level="DEBUG" additivity="false">
+			<AppenderRef ref="{{xml txtAppenderName}}"/>
+		</Logger>
+		<Logger name="org.springframework" level="INFO" additivity="false">
+			<AppenderRef ref="{{xml txtAppenderName}}"/>
+		</Logger>
+		<Root level="INFO">
+			<AppenderRef ref="{{xml txtAppenderName}}"/>
+		</Root>
+	</Loggers>
+</Configuration>

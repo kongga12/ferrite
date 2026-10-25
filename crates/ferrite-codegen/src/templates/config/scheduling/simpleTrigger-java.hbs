@@ -1,0 +1,23 @@
+package {{txtConfigPackage}};
+
+import org.quartz.JobDetail;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.scheduling.quartz.SimpleTriggerFactoryBean;
+
+/**
+ * {{txtStartDelay}}ms 뒤 시작해 {{txtRepeatInterval}}ms마다 {{txtJobName}} 실행.
+ */
+@Configuration
+public class {{txtFileName}} {
+
+	@Bean(name = "{{txtTriggerName}}")
+	public SimpleTriggerFactoryBean trigger(@Qualifier("{{txtJobName}}") JobDetail jobDetail) {
+		SimpleTriggerFactoryBean factory = new SimpleTriggerFactoryBean();
+		factory.setJobDetail(jobDetail);
+		factory.setStartDelay({{txtStartDelay}}L);
+		factory.setRepeatInterval({{txtRepeatInterval}}L);
+		return factory;
+	}
+}

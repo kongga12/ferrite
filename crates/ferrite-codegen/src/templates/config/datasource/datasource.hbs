@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<beans xmlns="http://www.springframework.org/schema/beans"
+	xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xsi:schemaLocation="http://www.springframework.org/schema/beans http://www.springframework.org/schema/beans/spring-beans.xsd">
+{{#if (eq rdoType "DBCP")}}
+
+	<!-- DBCP2 커넥션 풀 -->
+	<bean id="{{txtDatasourceName}}" class="org.apache.commons.dbcp2.BasicDataSource" destroy-method="close">
+		<property name="driverClassName" value="{{xml txtDriver}}"/>
+		<property name="url" value="{{xml txtUrl}}"/>
+		<property name="username" value="{{xml txtUser}}"/>
+		<property name="password" value="{{xml txtPasswd}}"/>
+		<property name="initialSize" value="5"/>
+		<property name="maxTotal" value="50"/>
+		<property name="maxIdle" value="10"/>
+		<property name="minIdle" value="5"/>
+		<property name="maxWaitMillis" value="10000"/>
+		<property name="testOnBorrow" value="true"/>
+	</bean>
+{{/if}}
+{{#if (eq rdoType "C3P0")}}
+
+	<!-- C3P0 커넥션 풀 -->
+	<bean id="{{txtDatasourceName}}" class="com.mchange.v2.c3p0.ComboPooledDataSource" destroy-method="close">
+		<property name="driverClass" value="{{xml txtDriver}}"/>
+		<property name="jdbcUrl" value="{{xml txtUrl}}"/>
+		<property name="user" value="{{xml txtUser}}"/>
+		<property name="password" value="{{xml txtPasswd}}"/>
+		<property name="initialPoolSize" value="3"/>
+		<property name="minPoolSize" value="3"/>
+		<property name="maxPoolSize" value="50"/>
+		<property name="acquireIncrement" value="1"/>
+		<property name="idleConnectionTestPeriod" value="200"/>
+	</bean>
+{{/if}}
+{{#if (eq rdoType "JDBC")}}
+
+	<!-- 풀 없는 JDBC 데이터소스(개발·테스트용). 운영에는 커넥션 풀을 쓴다. -->
+	<bean id="{{txtDatasourceName}}" class="org.springframework.jdbc.datasource.DriverManagerDataSource">
+		<property name="driverClassName" value="{{xml txtDriver}}"/>
+		<property name="url" value="{{xml txtUrl}}"/>
+		<property name="username" value="{{xml txtUser}}"/>
+		<property name="password" value="{{xml txtPasswd}}"/>
+	</bean>
+{{/if}}
+
+</beans>

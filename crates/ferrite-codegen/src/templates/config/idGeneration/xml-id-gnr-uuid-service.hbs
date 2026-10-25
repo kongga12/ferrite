@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<beans xmlns="http://www.springframework.org/schema/beans"
+	xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xsi:schemaLocation="http://www.springframework.org/schema/beans http://www.springframework.org/schema/beans/spring-beans.xsd">
+
+	<!-- UUID ID 생성 -->
+	<!-- 이 서비스는 messageSource 빈이 있어야 한다(basenames에 classpath:/{{rtePath}}/fdl/idgnr/messages/idgnr 포함).
+	     egov 프로젝트는 보통 context-common.xml에 둔다. -->
+	<bean name="{{txtIdServiceName}}" class="{{rte}}.fdl.idgnr.impl.EgovUUIdGnrServiceImpl">
+{{#if (eq rdoIdType "Address")}}
+		<property name="address" value="{{xml txtAddress}}"/>
+{{/if}}
+	</bean>
+
+</beans>

@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- log4j2 설정 -->
+<Configuration status="WARN">
+	<Appenders>
+		<File name="{{xml txtAppenderName}}" fileName="{{xml txtLogFileName}}" append="{{cboAppend}}">
+			<PatternLayout pattern="{{xml txtConversionPattern}}"/>
+		</File>
+	</Appenders>
+	<Loggers>
+		<Logger name="egovframework" level="DEBUG" additivity="false">
+			<AppenderRef ref="{{xml txtAppenderName}}"/>
+		</Logger>
+		<Logger name="org.egovframe" level="DEBUG" additivity="false">
+			<AppenderRef ref="{{xml txtAppenderName}}"/>
+		</Logger>
+		<Logger name="org.springframework" level="INFO" additivity="false">
+			<AppenderRef ref="{{xml txtAppenderName}}"/>
+		</Logger>
+		<Root level="INFO">
+			<AppenderRef ref="{{xml txtAppenderName}}"/>
+		</Root>
+	</Loggers>
+</Configuration>
