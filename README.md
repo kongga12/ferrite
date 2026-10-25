@@ -5,7 +5,7 @@ Rust로 작성한 크로스플랫폼(Windows / macOS / Linux) 경량 IDE.
 
 - 개발 워크플로우와 로드맵: [docs/WORKFLOW.md](docs/WORKFLOW.md)
 
-## 현재 상태: Phase 2 완료 (LSP 연동), Phase 2b 기능 완료 (3개 OS 검증 남음), Phase 2c 진행 중 (egov 개발도구)
+## 현재 상태: Phase 2 완료 (LSP 연동), Phase 2b·2c 기능 완료 (3개 OS 검증 남음)
 
 - 폴더 열기, 지연 로딩 프로젝트 트리(파일 감시로 자동 갱신), 탭 에디터
 - 트리 우클릭: 새 파일·새 폴더·이름 바꾸기·휴지통으로 삭제
@@ -36,6 +36,9 @@ Rust로 작성한 크로스플랫폼(Windows / macOS / Linux) 경량 IDE.
 - 새 egov 프로젝트(`도구 > 새 egov 프로젝트`): 공식 VS Code 확장 v5.0.7의 템플릿 22종(웹·템플릿·Boot·MSA·모바일·배치·AI RAG, egov 5)으로 프로젝트를 만든다.
   - 템플릿은 처음 한 번 GitHub에서 받는다(크기·SHA-256 고정). 인터넷이 막힌 PC는 공식 vsix나 받아 온 파일로 만든다.
   - 만든 프로젝트를 빌드하려면 Java 17 이상과 Maven이 필요하다.
+- 공통컴포넌트 추가(`도구 > 공통컴포넌트 추가`): 공식 개발환경(eGovFrameDev 3.x·4.x)의 공통컴포넌트 플러그인에서 목록을 가져와, 고른 컴포넌트를 의존 컴포넌트와 함께 프로젝트에 넣는다.
+  - 미리 보기로 바뀔 파일을 먼저 보여 준다. 내용이 다른 기존 파일은 건너뛰거나 `.bak`으로 백업하고 바꾼다. `pom.xml`은 덮어쓰지 않고 빠진 의존성을 알린다.
+  - 프로젝트 DB에 돌릴 테이블 생성·기초 자료 스크립트를 순서대로 알린다.
 - 구문 강조(tree-sitter): Rust, Python, Go, C/C++, PHP, Java, SQL, TOML, JSON, YAML, XML, HTML, JSP(HTML + 스크립틀릿 Java + EL), JavaScript, CSS, Properties
 - UTF-8(BOM 포함)·CP949 인코딩과 CRLF 감지·보존, 들여쓰기 방식 감지
 - 원자적 저장, 미저장 변경 확인(탭 닫기, 창 종료), 외부 변경 시 다시 불러오기·충돌 안내

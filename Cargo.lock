@@ -1276,12 +1276,14 @@ dependencies = [
  "rfd",
  "ropey",
  "serde_json",
+ "zip",
 ]
 
 [[package]]
 name = "ferrite-codegen"
 version = "0.1.0"
 dependencies = [
+ "encoding_rs",
  "ferrite-core",
  "ferrite-egov",
  "ferrite-lsp",

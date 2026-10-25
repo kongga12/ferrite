@@ -140,13 +140,17 @@ fn servers_root() -> PathBuf {
         .join("servers")
 }
 
-/// 새 egov 프로젝트 창이 받은 템플릿을 두는 곳(언어 서버 옆, 고정한 버전마다 따로).
-fn templates_root() -> PathBuf {
+/// 받거나 가져온 egov 템플릿을 두는 곳(언어 서버 옆). 새 프로젝트 템플릿은 `egov-<태그>/`,
+/// 공통컴포넌트는 `commngt-<버전>/`에 둔다.
+fn templates_dir() -> PathBuf {
     dirs::data_local_dir()
         .unwrap_or_else(std::env::temp_dir)
         .join("ferrite")
         .join("templates")
-        .join(format!("egov-{}", ferrite_codegen::scaffold::RELEASE))
+}
+
+fn templates_root() -> PathBuf {
+    templates_dir().join(format!("egov-{}", ferrite_codegen::scaffold::RELEASE))
 }
 
 fn settings_path() -> Option<PathBuf> {
@@ -400,6 +404,8 @@ pub struct FerriteApp {
     config_gen: crate::config_gen::ConfigWindow,
     /// 새 egov 프로젝트 창.
     new_project: crate::new_project::NewProjectWindow,
+    /// 공통컴포넌트 추가 창.
+    commngt: crate::commngt_ui::CommngtWindow,
     /// 아래쪽 "문제" 목록을 보이는지.
     show_problems: bool,
     /// 응답을 기다리는 언어 서버 요청.
@@ -467,6 +473,7 @@ impl FerriteApp {
             codegen: Default::default(),
             config_gen: Default::default(),
             new_project: crate::new_project::NewProjectWindow::new(templates_root()),
+            commngt: crate::commngt_ui::CommngtWindow::new(templates_dir()),
             show_problems: false,
             pending: std::collections::HashMap::new(),
             completion: None,
@@ -1515,6 +1522,11 @@ impl FerriteApp {
                         let root = self.tree.as_ref().map(|t| t.root().to_path_buf());
                         self.new_project.show(root.as_deref());
                     }
+                    if ui.button("공통컴포넌트 추가…").clicked() {
+                        ui.close();
+                        let root = self.tree.as_ref().map(|t| t.root().to_path_buf());
+                        self.commngt.show(root.as_deref());
+                    }
                 });
             });
         });
@@ -2167,6 +2179,7 @@ impl eframe::App for FerriteApp {
         if let Some(dir) = self.new_project.ui(&ctx) {
             self.open_folder(&dir);
         }
+        self.commngt.ui(&ctx);
         if let Some(path) = self.config_gen.ui(&ctx) {
             self.status = format!("설정 파일을 만들었습니다: {}", path.display());
             self.open_file(path);
@@ -3442,6 +3455,117 @@ mod tests {
         assert!(
             pom.contains("<artifactId>egov-mobile-deviceapi</artifactId>"),
             "{pom}"
+        );
+        drop(harness);
+        remove_project(&dir);
+    }
+
+    /// 공식 플러그인 jar 모양의 가짜(기본 묶음 cmm과 FAQ).
+    fn fake_commngt_jar() -> Vec<u8> {
+        use std::io::Write;
+        let zip_of = |entries: &[(&str, &[u8])]| {
+            let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+            for (name, data) in entries {
+                zip.start_file(*name, zip::write::SimpleFileOptions::default())
+                    .unwrap();
+                zip.write_all(data).unwrap();
+            }
+            zip.finish().unwrap().into_inner()
+        };
+        let catalog = r##"<components>
+            <category name="#c1nam#" description="#c1des#"><component name="#c1p1nam#">
+              <packageName>#c1p1pac#</packageName></component></category>
+            <category name="#c2nam#" description="#c2des#"><component name="#c2p1nam#">
+              <packageName>#c2p1pac#</packageName><dependencyPackage>#c2p1de1#</dependencyPackage>
+            </component></category></components>"##;
+        let labels = "c1nam=공통\nc1des=기본\nc1p1nam=공통\nc1p1pac=egovframework.com.cmm\n\
+            c2nam=온라인도움말\nc2des=도움말\nc2p1nam=FAQ관리\nc2p1pac=egovframework.com.uss.olh.faq\n\
+            c2p1de1=egovframework.com.cmm\n";
+        let cmm = zip_of(&[
+            ("src/main/java/egovframework/com/cmm/Base.java", b"class Base {}"),
+            ("src/script/ddl/oracle/cmm_create_oracle.sql", b"CREATE TABLE A;"),
+            ("pom.xml", b"<project><dependency><groupId>g</groupId><artifactId>a</artifactId></dependency></project>"),
+        ]);
+        let faq = zip_of(&[(
+            "src/main/java/egovframework/com/uss/olh/faq/Faq.java",
+            b"class Faq {}",
+        )]);
+        zip_of(&[
+            ("examples/components.xml", catalog.as_bytes()),
+            (
+                "egovframework/dev/imp/commngt/common/components_ko.properties",
+                labels.as_bytes(),
+            ),
+            ("examples/egovframework.com.cmm.Wizard.4.2.0.zip", &cmm),
+            (
+                "examples/egovframework.com.uss.olh.faq.Wizard.4.2.0.zip",
+                &faq,
+            ),
+        ])
+    }
+
+    #[test]
+    fn 공통컴포넌트를_골라_미리_보고_넣는다() {
+        let dir = std::env::temp_dir().join(format!("ferrite-commngt-ui-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let project = dir.join("project");
+        fs::create_dir_all(&project).unwrap();
+        fs::write(
+            project.join("pom.xml"),
+            "<project><groupId>org.egovframe.rte</groupId></project>",
+        )
+        .unwrap();
+        let jar = dir.join("egovframework.dev.imp.commngt_4.2.0.jar");
+        fs::write(&jar, fake_commngt_jar()).unwrap();
+        let cache = dir.join("templates");
+        ferrite_codegen::commngt::import(&jar, &cache).unwrap();
+
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(1200.0, 1000.0))
+            .build_eframe(|cc| FerriteApp::new(cc, Some(project.clone())));
+        harness.state_mut().commngt = crate::commngt_ui::CommngtWindow::new(cache);
+        harness.get_by_label("도구").click();
+        harness.run();
+        harness.get_by_label("공통컴포넌트 추가…").click();
+        harness.run();
+        harness.get_by_label("온라인도움말").click();
+        harness.run();
+        harness.get_by_label("FAQ관리").click();
+        harness.run();
+        harness.get_by_label("고른 컴포넌트 1개, 의존을 더해 패키지 2개");
+        assert!(
+            harness.get_by_label("추가").accesskit_node().is_disabled(),
+            "미리 보기 전에는 쓰지 않는다"
+        );
+
+        let wait_for = |harness: &mut Harness<'_, FerriteApp>, text: &str| {
+            for _ in 0..100 {
+                harness.run_ok();
+                if harness.query_by_label_contains(text).is_some() {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            panic!("{text}가 나오지 않음");
+        };
+        harness.get_by_label("미리 보기").click();
+        wait_for(&mut harness, "새 파일 3개, 같은 파일 0개, 다른 파일 1개");
+        harness.get_by_label("다른 파일은 건너뜁니다:");
+        harness.get_by_label("추가").click();
+        wait_for(&mut harness, "넣었습니다");
+        harness.get_by_label_contains("새 파일 3개");
+        harness.get_by_label("g:a");
+        harness.get_by_label("src/script/ddl/oracle/cmm_create_oracle.sql");
+        harness.get_by_label("설치됨");
+        assert!(
+            project
+                .join("src/main/java/egovframework/com/uss/olh/faq/Faq.java")
+                .is_file()
+        );
+        assert_eq!(
+            fs::read_to_string(project.join("pom.xml")).unwrap(),
+            "<project><groupId>org.egovframe.rte</groupId></project>",
+            "pom.xml은 덮어쓰지 않는다"
         );
         drop(harness);
         remove_project(&dir);
