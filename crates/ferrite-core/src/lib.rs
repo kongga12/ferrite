@@ -2,6 +2,7 @@
 
 pub mod buffer;
 pub mod fs_ops;
+pub mod jsp;
 pub mod search;
 pub mod settings;
 pub mod syntax;

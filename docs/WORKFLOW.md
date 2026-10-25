@@ -254,7 +254,25 @@
   - 코퍼스(로컬): parameterType 10,634건을 풀었다.
     - 프로젝트 VO로 풀린 것 7,411건, Map 1,060건, 프로젝트 밖 클래스 1,991건이다.
     - 못 푼 172건은 대부분 String·long 같은 기본 타입 별칭이다. 실제로 못 찾은 VO 이름은 `juVO` 6건이다.
-- [ ] 2b-4 JSP 하이라이팅(HTML + 스크립틀릿 Java + EL), 이스케이프 없는 EL 출력 XSS 경고
+- [x] 2b-4 JSP 하이라이팅(HTML + 스크립틀릿 Java + EL), 이스케이프 없는 EL 출력 XSS 경고
+  - JSP 구간 찾기(`ferrite-core::jsp`): 주석 `<%-- --%>`, 지시자, 선언, 스크립틀릿, 표현식 `<%= %>`, EL `${}`·`#{}`
+    - 출력 자리도 안다: 본문, 어떤 태그의 속성값, `<script>`·`<style>` 안. `\${`는 글자 그대로다.
+    - 구문 강조와 egov 진단이 함께 쓴다.
+  - 강조: HTML 층(JSP 구간을 가린 사본)과 Java 층(스크립틀릿 안쪽만 남긴 사본)을 따로 파싱하고, 그 위에 JSP 구간을 덧칠한다.
+    - 편집할 때마다 문서 전체를 다시 파싱한다. `<%` 하나로 구간 경계가 편집 밖까지 바뀌기 때문이다.
+    - 릴리스 빌드로 평균 1.2ms, 가장 큰 166KB JSP도 26ms다.
+  - XSS 진단(egov 서버, JSP는 이 서버뿐)
+    - 경고 `xss-request`: 요청 값(`param`·`paramValues`·`header`·`cookie`, `pageContext.request.*`, `request.getParameter` 등)을 그대로 출력
+    - 정보 `xss-output`: 그 밖의 값을 이스케이프 없이 출력(저장형 XSS 가능). 상태바의 오류·경고 수에는 들어가지 않는다.
+    - `<script>` 안이면 JS 이스케이프가 필요하다고 알린다.
+    - 출력이 아닌 것: 사용자 정의 태그의 속성값(`c:if`, `c:forEach` 등, `<c:out escapeXml="false">`만 출력), `#{}`, `isELIgnored="true"` 페이지의 EL
+    - 안전하다고 보는 식: `fn:escapeXml`, 결과가 참거짓·숫자인 식(비교·산술·`empty`·`fn:length`), 글자만 내보내는 삼항식, `contextPath`, 대문자 상수, `varStatus`의 `index`·`count` 등
+    - 미룸: 같은 파일 `<c:set var>` 값 따라가기, 속성의 이벤트 핸들러(`onclick`)를 JS 문맥으로 보기
+  - 코퍼스(로컬): JSP 3,650개, EL 42,165곳
+    - 따로 짠 단순 검사기와 파일마다 EL 수가 일치한다(누락 0). 구간 찾기·강조·진단 모두 패닉이 없다.
+    - 경고 93건은 모두 `param.*`·`request.getParameter`를 그대로 출력하는 자리다.
+    - 정보 24,011건(페이지당 약 6.6건). 대문자 상수·반복 상태를 빼서 28,507건에서 줄였다. 남은 것은 대부분 VO 값 출력이다.
+    - 이 검사 중 태그 안 한글에서 글자 중간을 자르는 패닉을 찾아 고쳤다.
 - [ ] 2b-5 JSP taglib 완성, include·뷰 이름 → JSP 이동
 - [ ] 2b-6 Spring XML 설정·JPA 보완(Spring Boot LS가 다루지 못하는 부분)
 

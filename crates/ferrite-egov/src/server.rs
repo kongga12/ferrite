@@ -19,6 +19,7 @@ use ropey::Rope;
 use serde_json::{Value, json};
 
 use crate::java::{self, JavaFile, Target, TypeDecl};
+use crate::jsp;
 use crate::mapper::{self, Aliases, Context, Dialect, Finding, Index, Kind, Severity};
 
 const ENCODING: PositionEncoding = PositionEncoding::Utf16;
@@ -94,6 +95,14 @@ pub fn run(input: &mut impl BufRead, output: &mut impl Write) -> io::Result<()> 
 fn is_java(path: &Path) -> bool {
     path.extension()
         .is_some_and(|e| e.eq_ignore_ascii_case("java"))
+}
+
+fn is_jsp(path: &Path) -> bool {
+    path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
+        ["jsp", "jspf", "tag"]
+            .iter()
+            .any(|j| e.eq_ignore_ascii_case(j))
+    })
 }
 
 #[derive(Default)]
@@ -189,7 +198,9 @@ impl Server {
 
     /// 파일 하나의 색인을 이 내용으로 바꾼다(None이면 뺀다).
     fn reindex(&mut self, path: &Path, text: Option<&str>) {
-        if is_java(path) {
+        if is_jsp(path) {
+            // JSP는 색인하지 않는다(열린 내용만 진단한다).
+        } else if is_java(path) {
             match text.map(java::parse_file).filter(|f| !f.types.is_empty()) {
                 Some(found) => self.java.insert(path.to_path_buf(), found),
                 None => self.java.remove(path),
@@ -211,7 +222,9 @@ impl Server {
     fn publish_all(&mut self) -> Vec<Value> {
         let mut replies = Vec::new();
         for (path, rope) in &self.open {
-            let findings = if is_java(path) {
+            let findings = if is_jsp(path) {
+                Some(jsp::diagnose(&rope.to_string()))
+            } else if is_java(path) {
                 self.java
                     .get(path)
                     .and_then(|file| missing_statements(&file.types, &self.index))
@@ -234,6 +247,7 @@ impl Server {
                     severity: Some(match finding.severity {
                         Severity::Error => DiagnosticSeverity::ERROR,
                         Severity::Warning => DiagnosticSeverity::WARNING,
+                        Severity::Information => DiagnosticSeverity::INFORMATION,
                     }),
                     code: Some(NumberOrString::String(finding.code.into())),
                     source: Some("ferrite-egov".into()),
