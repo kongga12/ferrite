@@ -2773,27 +2773,41 @@ mod tests {
             doc_text(&harness)
         );
 
-        // Ctrl+.: 코드 액션 메뉴를 열고 첫 항목을 실행하면 문서가 바뀐다
+        // Ctrl+.: 코드 액션 메뉴를 열고 첫 항목을 실행하면 문서가 바뀐다. 포맷 직후에는
+        // rust-analyzer가 resolve에 빈 편집을 돌려줄 때가 있어(앱은 "적용할 편집이 없습니다"로
+        // 알린다, CI에서 가끔 생김) 그때는 메뉴부터 다시 연다.
         let on_n = doc_text(&harness).find("let n").unwrap() + 4;
-        let opened = retry_until(
-            &mut harness,
-            &|h| {
-                h.state_mut().docs[0]
-                    .buffer
-                    .set_selection(Selection::caret(on_n));
-                h.key_press_modifiers(Modifiers::COMMAND, Key::Period);
-            },
-            &|h| h.state().actions.is_some(),
-        );
-        assert!(
-            opened,
-            "코드 액션 메뉴가 열리지 않음: {}",
-            harness.state().status
-        );
         let before = harness.state().docs[0].buffer.version();
-        harness.key_press(Key::Enter);
+        let changed = |app: &FerriteApp| app.docs[0].buffer.version() != before;
+        let mut applied = false;
+        for _ in 0..10 {
+            let opened = retry_until(
+                &mut harness,
+                &|h| {
+                    h.state_mut().docs[0]
+                        .buffer
+                        .set_selection(Selection::caret(on_n));
+                    h.key_press_modifiers(Modifiers::COMMAND, Key::Period);
+                },
+                &|h| h.state().actions.is_some(),
+            );
+            assert!(
+                opened,
+                "코드 액션 메뉴가 열리지 않음: {}",
+                harness.state().status
+            );
+            harness.state_mut().status.clear();
+            harness.key_press(Key::Enter);
+            run_until_slow(&mut harness, |app| {
+                changed(app) || app.status.contains("적용할 편집이 없습니다")
+            });
+            applied = changed(harness.state());
+            if applied {
+                break;
+            }
+        }
         assert!(
-            run_until_slow(&mut harness, |app| app.docs[0].buffer.version() != before),
+            applied,
             "코드 액션이 적용되지 않음: {}",
             harness.state().status
         );
