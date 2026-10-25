@@ -140,6 +140,15 @@ fn servers_root() -> PathBuf {
         .join("servers")
 }
 
+/// 새 egov 프로젝트 창이 받은 템플릿을 두는 곳(언어 서버 옆, 고정한 버전마다 따로).
+fn templates_root() -> PathBuf {
+    dirs::data_local_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("ferrite")
+        .join("templates")
+        .join(format!("egov-{}", ferrite_codegen::scaffold::RELEASE))
+}
+
 fn settings_path() -> Option<PathBuf> {
     Some(dirs::config_dir()?.join("ferrite").join("settings.toml"))
 }
@@ -389,6 +398,8 @@ pub struct FerriteApp {
     codegen: crate::codegen::CodegenWindow,
     /// egov 설정 파일 생성 창.
     config_gen: crate::config_gen::ConfigWindow,
+    /// 새 egov 프로젝트 창.
+    new_project: crate::new_project::NewProjectWindow,
     /// 아래쪽 "문제" 목록을 보이는지.
     show_problems: bool,
     /// 응답을 기다리는 언어 서버 요청.
@@ -455,6 +466,7 @@ impl FerriteApp {
             servers: ServerManager::new(servers_root()),
             codegen: Default::default(),
             config_gen: Default::default(),
+            new_project: crate::new_project::NewProjectWindow::new(templates_root()),
             show_problems: false,
             pending: std::collections::HashMap::new(),
             completion: None,
@@ -767,10 +779,14 @@ impl FerriteApp {
 
     fn open_folder_dialog(&mut self) {
         if let Some(dir) = rfd::FileDialog::new().pick_folder() {
-            let dir = real_path(&dir);
-            self.status = format!("프로젝트: {}", dir.display());
-            self.tree = Some(FileTree::new(dir));
+            self.open_folder(&dir);
         }
+    }
+
+    fn open_folder(&mut self, dir: &Path) {
+        let dir = real_path(dir);
+        self.status = format!("프로젝트: {}", dir.display());
+        self.tree = Some(FileTree::new(dir));
     }
 
     fn open_file(&mut self, path: PathBuf) {
@@ -1494,6 +1510,11 @@ impl FerriteApp {
                         let root = self.tree.as_ref().map(|t| t.root().to_path_buf());
                         self.config_gen.show(root.as_deref());
                     }
+                    if ui.button("새 egov 프로젝트…").clicked() {
+                        ui.close();
+                        let root = self.tree.as_ref().map(|t| t.root().to_path_buf());
+                        self.new_project.show(root.as_deref());
+                    }
                 });
             });
         });
@@ -2143,6 +2164,9 @@ impl eframe::App for FerriteApp {
         if let Some(action) = self.servers.ui(&ctx) {
             self.start_server_action(action, &ctx);
         }
+        if let Some(dir) = self.new_project.ui(&ctx) {
+            self.open_folder(&dir);
+        }
         if let Some(path) = self.config_gen.ui(&ctx) {
             self.status = format!("설정 파일을 만들었습니다: {}", path.display());
             self.open_file(path);
@@ -2166,7 +2190,7 @@ mod tests {
     use std::fs;
 
     use egui_kittest::Harness;
-    use egui_kittest::kittest::Queryable;
+    use egui_kittest::kittest::{NodeT, Queryable};
 
     use super::*;
 
@@ -2749,27 +2773,41 @@ mod tests {
             doc_text(&harness)
         );
 
-        // Ctrl+.: 코드 액션 메뉴를 열고 첫 항목을 실행하면 문서가 바뀐다
+        // Ctrl+.: 코드 액션 메뉴를 열고 첫 항목을 실행하면 문서가 바뀐다. 포맷 직후에는
+        // rust-analyzer가 resolve에 빈 편집을 돌려줄 때가 있어(앱은 "적용할 편집이 없습니다"로
+        // 알린다, CI에서 가끔 생김) 그때는 메뉴부터 다시 연다.
         let on_n = doc_text(&harness).find("let n").unwrap() + 4;
-        let opened = retry_until(
-            &mut harness,
-            &|h| {
-                h.state_mut().docs[0]
-                    .buffer
-                    .set_selection(Selection::caret(on_n));
-                h.key_press_modifiers(Modifiers::COMMAND, Key::Period);
-            },
-            &|h| h.state().actions.is_some(),
-        );
-        assert!(
-            opened,
-            "코드 액션 메뉴가 열리지 않음: {}",
-            harness.state().status
-        );
         let before = harness.state().docs[0].buffer.version();
-        harness.key_press(Key::Enter);
+        let changed = |app: &FerriteApp| app.docs[0].buffer.version() != before;
+        let mut applied = false;
+        for _ in 0..10 {
+            let opened = retry_until(
+                &mut harness,
+                &|h| {
+                    h.state_mut().docs[0]
+                        .buffer
+                        .set_selection(Selection::caret(on_n));
+                    h.key_press_modifiers(Modifiers::COMMAND, Key::Period);
+                },
+                &|h| h.state().actions.is_some(),
+            );
+            assert!(
+                opened,
+                "코드 액션 메뉴가 열리지 않음: {}",
+                harness.state().status
+            );
+            harness.state_mut().status.clear();
+            harness.key_press(Key::Enter);
+            run_until_slow(&mut harness, |app| {
+                changed(app) || app.status.contains("적용할 편집이 없습니다")
+            });
+            applied = changed(harness.state());
+            if applied {
+                break;
+            }
+        }
         assert!(
-            run_until_slow(&mut harness, |app| app.docs[0].buffer.version() != before),
+            applied,
             "코드 액션이 적용되지 않음: {}",
             harness.state().status
         );
@@ -3260,6 +3298,151 @@ mod tests {
         harness.run();
         let log = fs::read_to_string(dir.join("src/main/resources/log4j2.xml")).unwrap();
         assert!(log.contains("<Console name=\"console\""), "{log}");
+        drop(harness);
+        remove_project(&dir);
+    }
+
+    fn open_new_project(harness: &mut Harness<'_, FerriteApp>, cache: PathBuf) {
+        harness.state_mut().new_project = crate::new_project::NewProjectWindow::new(cache);
+        harness.get_by_label("도구").click();
+        harness.run();
+        harness.get_by_label("새 egov 프로젝트…").click();
+        harness.run();
+    }
+
+    #[test]
+    fn 새_egov_프로젝트_창은_입력을_검사하고_받을_크기를_알린다() {
+        use egui::accesskit::Role;
+        let dir = std::env::temp_dir().join(format!("ferrite-new-project-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(1200.0, 900.0))
+            .build_eframe(|cc| FerriteApp::new(cc, None));
+        open_new_project(&mut harness, dir.join("cache"));
+
+        // 기본 템플릿(웹 프로젝트): zip 15,547,491 + pom 5,794바이트를 받아야 한다.
+        assert!(
+            !harness
+                .get_by_label("내려받아 만들기 (15.6MB)")
+                .accesskit_node()
+                .is_disabled()
+        );
+        harness.get_by_label("groupId");
+
+        harness
+            .get_by_role_and_label(Role::TextInput, "프로젝트 이름")
+            .focus();
+        harness.run();
+        harness
+            .get_by_role_and_label(Role::TextInput, "프로젝트 이름")
+            .type_text("/x");
+        harness.run();
+        harness.get_by_label_contains("프로젝트 이름: 영문");
+        harness.get_by_label_contains("artifactId: ");
+        assert!(
+            harness
+                .get_by_label("내려받아 만들기 (15.6MB)")
+                .accesskit_node()
+                .is_disabled()
+        );
+        assert!(
+            harness
+                .get_by_label("파일에서…")
+                .accesskit_node()
+                .is_disabled()
+        );
+
+        // pom 틀이 없는 템플릿은 groupId 칸이 없다.
+        harness
+            .get_by_role_and_label(Role::ComboBox, "템플릿")
+            .click();
+        harness.run();
+        harness
+            .get_by_label("Boot > 심플 홈페이지(프런트엔드)")
+            .click();
+        harness.run();
+        assert!(harness.query_by_label("groupId").is_none());
+        harness.get_by_label("내려받아 만들기 (3.7MB)");
+        drop(harness);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// `FERRITE_EGOV_VSIX=<vsix 절대 경로> cargo test -p ferrite-app 공식_템플릿 -- --ignored`
+    #[test]
+    #[ignore = "공식 확장 vsix가 필요하다(FERRITE_EGOV_VSIX)"]
+    fn 공식_템플릿으로_새_프로젝트를_만들고_연다() {
+        use egui::accesskit::Role;
+        use ferrite_codegen::scaffold::{self, TEMPLATES};
+        let Some(vsix) = std::env::var_os("FERRITE_EGOV_VSIX") else {
+            eprintln!("FERRITE_EGOV_VSIX가 없어 건너뜁니다");
+            return;
+        };
+        let dir =
+            std::env::temp_dir().join(format!("ferrite-new-project-e2e-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let cache = dir.join("cache");
+        let out = dir.join("out");
+        fs::create_dir_all(&out).unwrap();
+        // 작은 템플릿(DeviceAPI 웹, 0.2MB)을 받아 둔 상태로 시작한다.
+        let template = TEMPLATES
+            .iter()
+            .find(|t| t.zip.file == "egovframe-mobile-deviceapi.zip")
+            .unwrap();
+        scaffold::import(template, &[PathBuf::from(vsix)], &cache).unwrap();
+
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(1200.0, 900.0))
+            .build_eframe(|cc| FerriteApp::new(cc, None));
+        open_new_project(&mut harness, cache);
+        harness
+            .get_by_role_and_label(Role::ComboBox, "템플릿")
+            .click();
+        harness.run();
+        // 목록이 길어 아래쪽 항목은 스크롤해야 보인다.
+        harness
+            .get_by_label("모바일 > DeviceAPI 웹 프로젝트")
+            .scroll_to_me();
+        harness.run();
+        harness
+            .get_by_label("모바일 > DeviceAPI 웹 프로젝트")
+            .click();
+        harness.run();
+        harness
+            .get_by_role_and_label(Role::TextInput, "만들 위치")
+            .set_text_value_accesskit(&out.to_string_lossy());
+        harness.run();
+        harness.get_by_label("만들기").click();
+        // 작업 중에는 스피너가 계속 다시 그리므로 run_ok로 돌린다.
+        assert!(run_until_slow(&mut harness, |_| out
+            .join("egov-mobile-deviceapi/pom.xml")
+            .is_file()));
+        for _ in 0..50 {
+            harness.run_ok();
+            if harness.query_by_label("열기").is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        harness.get_by_label("열기").click();
+        harness.run();
+        let project = real_path(&out.join("egov-mobile-deviceapi"));
+        assert_eq!(
+            harness
+                .state()
+                .tree
+                .as_ref()
+                .map(|t| t.root().to_path_buf()),
+            Some(project.clone())
+        );
+        let pom = fs::read_to_string(project.join("pom.xml")).unwrap();
+        assert!(
+            pom.contains("<groupId>egovframework.example</groupId>"),
+            "{pom}"
+        );
+        assert!(
+            pom.contains("<artifactId>egov-mobile-deviceapi</artifactId>"),
+            "{pom}"
+        );
         drop(harness);
         remove_project(&dir);
     }

@@ -4,3 +4,4 @@ pub mod config;
 pub mod crud;
 pub mod ddl;
 pub mod project;
+pub mod scaffold;

@@ -33,6 +33,9 @@ Rust로 작성한 크로스플랫폼(Windows / macOS / Linux) 경량 IDE.
   - 공식 VS Code 확장과 같은 템플릿 문맥이라, 공식·직접 고친 Handlebars 템플릿을 `.ferrite/templates/code/`에 두면 그것으로 만든다.
 - egov 설정 파일 생성(`도구 > egov 설정 파일 생성`): Datasource·Transaction·ID 생성·Logging(log4j2)·Scheduling(Quartz)·Cache(Ehcache)·Property 21종을 XML·Java Config·YAML·properties로 만든다.
   - 만든 설정은 실제 Spring(egov 3.x·4.x)에서 띄워 확인했다. DB별 기본값과 프로젝트의 `${Globals.…}` 키를 쓴다.
+- 새 egov 프로젝트(`도구 > 새 egov 프로젝트`): 공식 VS Code 확장 v5.0.7의 템플릿 22종(웹·템플릿·Boot·MSA·모바일·배치·AI RAG, egov 5)으로 프로젝트를 만든다.
+  - 템플릿은 처음 한 번 GitHub에서 받는다(크기·SHA-256 고정). 인터넷이 막힌 PC는 공식 vsix나 받아 온 파일로 만든다.
+  - 만든 프로젝트를 빌드하려면 Java 17 이상과 Maven이 필요하다.
 - 구문 강조(tree-sitter): Rust, Python, Go, C/C++, PHP, Java, SQL, TOML, JSON, YAML, XML, HTML, JSP(HTML + 스크립틀릿 Java + EL), JavaScript, CSS, Properties
 - UTF-8(BOM 포함)·CP949 인코딩과 CRLF 감지·보존, 들여쓰기 방식 감지
 - 원자적 저장, 미저장 변경 확인(탭 닫기, 창 종료), 외부 변경 시 다시 불러오기·충돌 안내

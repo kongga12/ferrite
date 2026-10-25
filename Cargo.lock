@@ -1284,8 +1284,10 @@ version = "0.1.0"
 dependencies = [
  "ferrite-core",
  "ferrite-egov",
+ "ferrite-lsp",
  "handlebars",
  "serde_json",
+ "sha2",
  "zip",
 ]
 

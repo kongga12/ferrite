@@ -402,7 +402,22 @@
     - log4j2: 어펜더 5종의 XML·properties를 log4j2로 읽어 어펜더가 생기는 것을 확인했다(JDBC는 H2). YAML은 문법만 확인했다.
     - 찾은 것: egov 프로퍼티 서비스는 초기화 때 `messageSource`(…/fdl/property/messages/properties)가 있어야 한다. 만든 파일에 주석으로 알린다.
   - 미룸: Ehcache 3(로컬에 jar가 없어 검증 못 함), 공통 설정(context-common의 messageSource 등) 생성
-- [ ] 2c-3 새 egov 프로젝트 마법사(공식 템플릿 버전 고정 다운로드·체크섬, Web·Boot Web `mvn package` 확인)
+- [x] 2c-3 새 egov 프로젝트 마법사(도구 > 새 egov 프로젝트)
+  - 템플릿 22종: 공식 VS Code 확장 v5.0.7의 목록과 같다(웹, 템플릿 4, Boot 3, MSA 3, 모바일 3, 배치 6, AI RAG 2). 모두 egov 5.0.0이다.
+  - Ferrite는 템플릿을 싣지 않는다. 처음 한 번 받아 캐시(언어 서버 옆 `templates/egov-v5.0.7/`)에 둔다.
+    - 출처: GitHub `eGovFramework/egovframe-vscode-initializr` 태그 v5.0.7. zip은 Git LFS라 `media.githubusercontent.com`, pom 틀은 `raw.githubusercontent.com`에서 받는다.
+    - 파일마다 크기·SHA-256을 고정했다(LFS 포인터의 oid와 공식 vsix 안의 파일이 22종 모두 같음을 확인). 맞지 않으면 남기지 않는다.
+    - 인터넷이 막힌 PC: [파일에서…]로 공식 vsix(모든 템플릿이 들어 있다)나 받아 온 zip·pom을 고른다. 이름은 보지 않고 크기·해시로 맞춘다. [주소 복사]로 받을 주소를 얻는다.
+  - 만드는 방식은 공식 확장과 같다: `<위치>/<이름>`에 zip을 풀고, pom 틀의 `###NAME###`·`###GROUP_ID###`·`###ARTIFACT_ID###`·`###VERSION###`·`###URL###`을 채워 `pom.xml`을 쓴다.
+    - 입력 규칙도 같다: 이름 `영문·숫자·-·_`(점은 낱말 사이에 하나씩), groupId `소문자로 시작하는 낱말.낱말`, artifactId `소문자·숫자·-`. 버전은 `영문·숫자·. - _ +`만 받는다. 모두 XML에 안전한 글자라 pom에 그대로 넣는다.
+    - 이미 있는 폴더에는 만들지 않는다. 도중에 실패하면 만들던 폴더를 지운다. zip 항목 경로는 폴더 밖으로 나가지 못한다.
+    - 받아 둔 파일도 만들 때마다 해시를 다시 본다. 맞지 않으면 지워서 다시 받게 한다.
+  - 만든 뒤 [열기]로 Ferrite에서 연다.
+  - 검증
+    - 가짜 zip으로 만들기·가져오기·실패 정리·입력 검사를 확인하는 단위 테스트, 창 테스트(kittest)
+    - 로컬: 공식 vsix에서 22종을 모두 가져와 만들고, pom에 채우지 않은 자리가 없음을 확인했다. 창에서 DeviceAPI 템플릿으로 만들고 연다.
+    - Windows(Java 21, Maven 3.9): Web·Boot Web을 실제로 GitHub에서 받아(각 15.5MB) 만들고 `mvn package`(테스트 포함)를 통과했다.
+    - 3개 OS: `egov 템플릿 mvn package` 워크플로(수동 실행, Java 17)로 같은 확인을 한다. 아직 돌리지 않았다(Actions 예산).
 - [ ] 2c-4 공통컴포넌트 추가
 
 ### Phase 3 — 프로젝트 도구
