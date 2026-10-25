@@ -1,5 +1,5 @@
-//! Java 쪽 분석: 타입 색인(Mapper 인터페이스, VO 클래스의 필드·상속, 메서드 매개변수)과
-//! 커서가 가리키는 매퍼 문장 찾기.
+//! Java 쪽 분석: 타입 색인(Mapper 인터페이스, VO 클래스의 필드·상속, 메서드 매개변수, Spring 빈 이름,
+//! JPA 엔티티)과 커서가 가리키는 매퍼 문장·JPQL 문자열 찾기.
 //! 타입 추론은 하지 않는다. egov 코드의 관례(선언 타입, import, 같은 패키지)로 타입을 알아낸다.
 
 use std::ops::Range;
@@ -11,6 +11,8 @@ pub struct Field {
     pub name: String,
     /// 선언 타입의 단순 이름(제네릭 바깥 타입).
     pub ty: String,
+    /// 필드 이름의 바이트 범위.
+    pub range: Range<usize>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -36,12 +38,40 @@ pub struct Method {
 pub struct TypeDecl {
     /// 패키지를 붙인 이름. MyBatis 매퍼의 namespace·parameterType과 같아야 연결된다.
     pub fqn: String,
+    /// 타입 이름의 바이트 범위.
+    pub range: Range<usize>,
     pub is_interface: bool,
     /// `extends`로 쓴 상위 클래스 이름(쓴 그대로, 제네릭 바깥).
     pub superclass: Option<String>,
     /// 인스턴스 필드(static 제외).
     pub fields: Vec<Field>,
     pub methods: Vec<Method>,
+    /// 이 타입이 등록하는 Spring 빈(이름, 바이트 범위): `@Service`·`@Component` 계열의 클래스 자신,
+    /// `@Bean` 메서드.
+    pub beans: Vec<(String, Range<usize>)>,
+    /// `@Entity`면 JPQL에서 쓰는 엔티티 이름(`@Entity(name)`, 없으면 클래스 단순 이름).
+    pub entity: Option<String>,
+}
+
+/// 클래스에 붙으면 빈이 되는 애너테이션. `Mapper`는 egov `@Mapper("이름")`·MyBatis `@Mapper`다.
+const BEAN_ANNOTATIONS: [&str; 7] = [
+    "Component",
+    "Service",
+    "Repository",
+    "Controller",
+    "RestController",
+    "Configuration",
+    "Mapper",
+];
+
+/// Spring이 붙이는 기본 빈 이름(`Introspector.decapitalize`): 첫 두 글자가 대문자면 그대로.
+fn bean_name(simple: &str) -> String {
+    let mut chars = simple.chars();
+    match (chars.next(), chars.next()) {
+        (Some(a), Some(b)) if a.is_uppercase() && b.is_uppercase() => simple.to_owned(),
+        (Some(a), _) => a.to_lowercase().chain(simple.chars().skip(1)).collect(),
+        _ => String::new(),
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -200,20 +230,31 @@ fn modifiers<'a>(node: Node<'a>) -> Option<Node<'a>> {
     children(node).find(|n| n.kind() == "modifiers")
 }
 
-/// 애너테이션 이름들(마지막 이름만: `org.x.Param` → `Param`)과 그 첫 문자열 인자.
+/// 애너테이션 이름들(마지막 이름만: `org.x.Param` → `Param`)과 그 첫 문자열 인자
+/// (`@X("a")`, `@X(value = "a")`, `@X(name = "a")`).
 fn annotations<'t>(node: Node<'_>, text: &'t str) -> Vec<(&'t str, Option<&'t str>)> {
     let Some(modifiers) = modifiers(node) else {
         return Vec::new();
+    };
+    let fragment = |literal: Node<'_>| {
+        (literal.kind() == "string_literal")
+            .then(|| children(literal).find(|n| n.kind() == "string_fragment"))
+            .flatten()
+            .and_then(|s| s.utf8_text(text.as_bytes()).ok())
     };
     children(modifiers)
         .filter(|n| matches!(n.kind(), "annotation" | "marker_annotation"))
         .filter_map(|a| {
             let name = field_text(a, "name", text)?;
             let argument = a.child_by_field_name("arguments").and_then(|args| {
-                children(args)
-                    .find(|n| n.kind() == "string_literal")
-                    .and_then(|s| children(s).find(|n| n.kind() == "string_fragment"))
-                    .and_then(|s| s.utf8_text(text.as_bytes()).ok())
+                children(args).find_map(|n| match n.kind() {
+                    "element_value_pair"
+                        if matches!(field_text(n, "key", text), Some("value" | "name")) =>
+                    {
+                        fragment(n.child_by_field_name("value")?)
+                    }
+                    _ => fragment(n),
+                })
             });
             Some((name.rsplit('.').next().unwrap_or(name), argument))
         })
@@ -243,10 +284,13 @@ fn collect_types(node: Node<'_>, text: &str, package: Option<&str>, found: &mut 
                     .unwrap_or_default();
                 children(declaration)
                     .filter(|d| d.kind() == "variable_declarator")
-                    .filter_map(|d| field_text(d, "name", text))
-                    .map(move |name| Field {
-                        name: name.to_owned(),
-                        ty: ty.clone(),
+                    .filter_map(|d| d.child_by_field_name("name"))
+                    .filter_map(|name| {
+                        Some(Field {
+                            name: name.utf8_text(text.as_bytes()).ok()?.to_owned(),
+                            ty: ty.clone(),
+                            range: name.byte_range(),
+                        })
                     })
                     .collect::<Vec<_>>()
             })
@@ -255,12 +299,47 @@ fn collect_types(node: Node<'_>, text: &str, package: Option<&str>, found: &mut 
             .filter(|n| n.kind() == "method_declaration")
             .filter_map(|method| method_of(method, text))
             .collect();
+        let range = node
+            .child_by_field_name("name")
+            .map_or(0..0, |n| n.byte_range());
+        let annotated = annotations(node, text);
+        let mut beans: Vec<(String, Range<usize>)> = annotated
+            .iter()
+            .filter(|(a, _)| BEAN_ANNOTATIONS.contains(a))
+            .map(|(_, value)| {
+                (
+                    value.map_or_else(|| bean_name(simple), str::to_owned),
+                    range.clone(),
+                )
+            })
+            .take(1)
+            .collect();
+        // `@Bean` 메서드: 이름은 `@Bean("x")`·`@Bean(name = "x")`, 없으면 메서드 이름.
+        beans.extend(
+            children(body)
+                .filter(|n| n.kind() == "method_declaration")
+                .filter_map(|method| {
+                    let (_, value) = annotations(method, text)
+                        .into_iter()
+                        .find(|(a, _)| *a == "Bean")?;
+                    let name = method.child_by_field_name("name")?;
+                    let name_text = name.utf8_text(text.as_bytes()).ok()?;
+                    Some((value.unwrap_or(name_text).to_owned(), name.byte_range()))
+                }),
+        );
+        let entity = annotated
+            .iter()
+            .find(|(a, _)| *a == "Entity")
+            .map(|(_, value)| value.unwrap_or(simple).to_owned());
         found.push(TypeDecl {
             fqn: qualify(package, simple),
+            range,
             is_interface,
             superclass,
             fields,
             methods,
+            beans,
+            entity,
         });
     }
     for child in children(node) {
@@ -330,6 +409,112 @@ fn declared_type(root: Node<'_>, variable: &str, text: &str) -> Option<String> {
         stack.extend(children(node));
     }
     None
+}
+
+/// JPQL 문자열 안 커서 자리: `@Query("…")`, `@NamedQuery(query = "…")`, `createQuery("…")`의 인자.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JpqlSite {
+    /// 쿼리 전체(`"a " + "b"`처럼 이은 조각을 합친 것).
+    pub query: String,
+    /// 커서 앞까지의 쿼리.
+    pub before: String,
+}
+
+pub fn jpql_at(text: &str, offset: usize) -> Option<JpqlSite> {
+    let tree = parse(text)?;
+    let node = tree.root_node().descendant_for_byte_range(offset, offset)?;
+    let literal = std::iter::successors(Some(node), |n| n.parent())
+        .take(3)
+        .find(|n| n.kind() == "string_literal")?;
+    // 문자열을 잇는 `+`와 괄호를 올라가 인자 자리까지.
+    let mut top = literal;
+    while let Some(parent) = top.parent()
+        && matches!(
+            parent.kind(),
+            "binary_expression" | "parenthesized_expression"
+        )
+    {
+        top = parent;
+    }
+    let holder = top.parent()?;
+    let is_query = match holder.kind() {
+        "annotation_argument_list" => annotation_name(holder.parent()?, text) == Some("Query"),
+        "element_value_pair" => {
+            let key = field_text(holder, "key", text);
+            let annotation = holder.parent().and_then(|l| l.parent());
+            match annotation.and_then(|a| annotation_name(a, text)) {
+                Some("Query") => key == Some("value"),
+                Some("NamedQuery") => key == Some("query"),
+                _ => false,
+            }
+        }
+        "argument_list" => holder
+            .parent()
+            .is_some_and(|call| field_text(call, "name", text) == Some("createQuery")),
+        _ => false,
+    };
+    if !is_query {
+        return None;
+    }
+    let mut query = String::new();
+    let mut before = None;
+    let mut stack = vec![top];
+    // 조각을 앞에서부터 모은다(왼쪽 자식 먼저).
+    while let Some(node) = stack.pop() {
+        if matches!(node.kind(), "string_fragment" | "multiline_string_fragment") {
+            let range = node.byte_range();
+            if before.is_none() && range.start <= offset && offset <= range.end {
+                before = Some(format!("{query}{}", &text[range.start..offset]));
+            }
+            query.push_str(&text[range]);
+            // 이은 조각 사이를 띄운다(`"…b" + "WHERE…"`가 `bWHERE`로 붙지 않게).
+            if !query.ends_with(char::is_whitespace) {
+                query.push(' ');
+            }
+            continue;
+        }
+        if node.kind() == "string_literal" && node.child_count() == 2 && literal == node {
+            // 빈 문자열 `""` 안의 커서.
+            before.get_or_insert_with(|| query.clone());
+        }
+        let mut kids: Vec<Node<'_>> = children(node).collect();
+        kids.reverse();
+        stack.extend(kids);
+    }
+    Some(JpqlSite {
+        query,
+        before: before?,
+    })
+}
+
+fn annotation_name<'t>(annotation: Node<'_>, text: &'t str) -> Option<&'t str> {
+    matches!(annotation.kind(), "annotation" | "marker_annotation")
+        .then(|| field_text(annotation, "name", text))
+        .flatten()
+        .map(|name| name.rsplit('.').next().unwrap_or(name))
+}
+
+/// `@GeneratedValue(strategy = GenerationType.IDENTITY)`(정적 import한 `IDENTITY` 포함)의 바이트 범위.
+pub fn identity_generators(text: &str) -> Vec<Range<usize>> {
+    let Some(tree) = parse(text) else {
+        return Vec::new();
+    };
+    let mut found = Vec::new();
+    let mut stack = vec![tree.root_node()];
+    while let Some(node) = stack.pop() {
+        if annotation_name(node, text) == Some("GeneratedValue")
+            && node
+                .child_by_field_name("arguments")
+                .and_then(|a| a.utf8_text(text.as_bytes()).ok())
+                .is_some_and(|args| args.contains("IDENTITY"))
+        {
+            found.push(node.byte_range());
+            continue;
+        }
+        stack.extend(children(node));
+    }
+    found.sort_by_key(|r| r.start);
+    found
 }
 
 /// `SampleMapper`, `a.b.SampleMapper`, `List<X>`에서 바깥 타입 이름(점이 있으면 그대로 둔다).
@@ -463,6 +648,76 @@ public class SampleVO extends ComDefaultVO implements Serializable {
             "같은 패키지"
         );
         assert_eq!(file.resolve("a.b.C"), "a.b.C");
+    }
+
+    #[test]
+    fn spring_빈_이름과_jpa_엔티티를_모은다() {
+        let config = r#"package egov.sample;
+@Service("sampleService")
+public class SampleServiceImpl {}
+@Repository
+class URLDao {}
+@Component(value = "named")
+class Named {}
+@Configuration
+public class AppConfig {
+    @Bean
+    public DataSource dataSource() { return null; }
+    @Bean(name = "txManager")
+    public Tx transactionManager() { return null; }
+}
+@Entity(name = "Board")
+@Table(name = "TB_BOARD")
+public class BoardEntity {
+    @Id @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+}
+"#;
+        let file = parse_file(config);
+        let beans: Vec<&str> = file
+            .types
+            .iter()
+            .flat_map(|t| t.beans.iter().map(|(name, _)| name.as_str()))
+            .collect();
+        assert_eq!(
+            beans,
+            [
+                "sampleService",
+                "URLDao",
+                "named",
+                "appConfig",
+                "dataSource",
+                "txManager"
+            ],
+            "기본 이름은 첫 두 글자가 대문자면 그대로"
+        );
+        let entity = file.types.iter().find(|t| t.entity.is_some()).unwrap();
+        assert_eq!(entity.entity.as_deref(), Some("Board"));
+        assert_eq!(&config[entity.range.clone()], "BoardEntity");
+        assert_eq!(&config[entity.fields[0].range.clone()], "id");
+        let identity = identity_generators(config);
+        assert_eq!(identity.len(), 1);
+        assert!(config[identity[0].clone()].starts_with("@GeneratedValue"));
+    }
+
+    #[test]
+    fn jpql_문자열_자리를_안다() {
+        let repo = r#"interface BoardRepository {
+    @Query("SELECT b FROM Board b " + "WHERE b.ti")
+    List<Board> find();
+    @Query(value = "", nativeQuery = false)
+    List<Board> empty();
+    @Column(name = "TITLE") String notQuery();
+    default void x(EntityManager em) { em.createQuery("UPDATE Board b SET b.") ; em.find("FROM X"); }
+}"#;
+        let at = |needle: &str| jpql_at(repo, repo.find(needle).unwrap() + needle.len());
+        let site = at("b.ti").unwrap();
+        assert_eq!(site.before, "SELECT b FROM Board b WHERE b.ti");
+        assert!(site.query.starts_with("SELECT b FROM Board b"));
+        assert_eq!(at("value = \"").unwrap().before, "", "빈 문자열");
+        assert!(at("name = \"TI").is_none(), "@Column은 쿼리가 아니다");
+        assert_eq!(at("SET b.").unwrap().before, "UPDATE Board b SET b.");
+        assert!(at("FROM X").is_none(), "createQuery가 아닌 호출");
     }
 
     #[test]

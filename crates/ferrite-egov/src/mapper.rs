@@ -125,7 +125,7 @@ pub(crate) fn tag_name<'t>(tag: Node<'_>, text: &'t str) -> Option<&'t str> {
 }
 
 /// 태그의 속성: (이름, 값, 값의 바이트 범위). 값은 따옴표를 뺀다.
-fn attributes<'a>(
+pub(crate) fn attributes<'a>(
     tag: Node<'a>,
     text: &'a str,
 ) -> impl Iterator<Item = (&'a str, &'a str, Range<usize>)> + 'a {

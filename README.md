@@ -18,7 +18,9 @@ Rust로 작성한 크로스플랫폼(Windows / macOS / Linux) 경량 IDE.
     - 자동완성: `#{}`(iBatis `#…#`) 안의 VO 필드·`@Param` 이름, resultType·parameterType 클래스 이름(별칭 포함), resultMap의 property.
     - JSP 자동완성: taglib의 태그 이름(`<c:`), 사용자 정의 태그의 속성(필수 먼저, 이미 쓴 것 제외), EL 함수(`${fn:`). TLD는 프로젝트, `WEB-INF/lib`, 로컬 Maven 저장소(JSTL·Spring·egov `ui:`·Tiles)에서 읽는다.
     - JSP 이동(F12): include 경로(`<%@ include file>`, `<jsp:include page>`, `<c:import url>`) → 그 파일, 컨트롤러의 뷰 이름(`return "sample/list"`) → 뷰 리졸버 접두사·접미사로 찾은 JSP.
-    - JSP: 이스케이프 없이 출력하는 EL(`${…}`)·`<%= %>`를 알린다. 요청 값(`param`·`header`·`cookie`, `request.getParameter`)은 경고, 그 밖의 값은 정보다. `<c:out>`·`fn:escapeXml`로 감싸면 사라진다.
+    - JSP: 이스케이프 없이 출력하는 EL(`${…}`)·`<%= %>`를 알린다.
+    - Spring XML 설정: 없는 빈 참조·프로젝트 클래스·property를 경고하고, 빈·class·property·`${키}`(→ `.properties`)·import로 이동하며, class·빈 이름·property·프로퍼티 키를 완성한다.
+    - JPA: `@Query` JPQL 안의 엔티티·필드 완성, IDENTITY를 지원하지 않는 Oracle 방언에서 `@GeneratedValue(IDENTITY)` 경고. 요청 값(`param`·`header`·`cookie`, `request.getParameter`)은 경고, 그 밖의 값은 정보다. `<c:out>`·`fn:escapeXml`로 감싸면 사라진다.
   - 언어 서버 매니저(`도구 > 언어 서버`): 버전·SHA-256을 고정한 배포본을 내려받아 설치·업데이트·삭제한다.
   - 서버가 없으면 상태바의 "설치" 버튼으로 바로 설치할 수 있다.
   - 인터넷이 막힌 PC는 다른 PC에서 받은 파일로 설치한다("파일에서…").

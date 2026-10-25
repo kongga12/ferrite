@@ -3,9 +3,11 @@
 //! Ferrite에는 `ferrite --egov-ls`로 내장되고, 다른 에디터는 `ferrite-egov-ls`를 LSP 서버로 쓸 수 있다.
 
 pub mod java;
+pub mod jpa;
 pub mod jsp;
 pub mod mapper;
 pub mod server;
+pub mod spring;
 pub mod taglib;
 pub mod web;
 

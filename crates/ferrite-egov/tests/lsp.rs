@@ -586,3 +586,238 @@ fn jsp에서_taglib을_완성하고_include와_뷰_이름으로_이동한다() {
         std::thread::sleep(Duration::from_millis(100));
     }
 }
+
+#[test]
+fn spring_xml과_jpa를_검증하고_이동하고_완성한다() {
+    use ferrite_lsp::features::{
+        completion_params, parse_completion, parse_locations, position_params,
+    };
+
+    let root = project("spring");
+    let write = |path: &str, text: &str| {
+        let file = root.join(path);
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(&file, text).unwrap();
+        file
+    };
+    let java = "src/main/java/egov/sample";
+    let service = write(
+        &format!("{java}/service/impl/SampleServiceImpl.java"),
+        "package egov.sample.service.impl;\n@Service(\"sampleService\")\npublic class SampleServiceImpl {\n    private SampleDAO sampleDAO;\n    private int pageUnit;\n    public void setHelperName(String name) {}\n}\n",
+    );
+    write(
+        &format!("{java}/AppConfig.java"),
+        "package egov.sample;\n@Configuration\npublic class AppConfig {\n    @Bean\n    public Tx txManager() { return null; }\n}\n",
+    );
+    write(
+        &format!("{java}/Member.java"),
+        "package egov.sample;\n@Entity\npublic class Member {\n    @Id private Long id;\n    private String name;\n}\n",
+    );
+    let board_text = "package egov.sample;\n@Entity\npublic class Board {\n    @Id @GeneratedValue(strategy = GenerationType.IDENTITY)\n    private Long id;\n    private String title;\n    private Member writer;\n}\n";
+    let board = write(&format!("{java}/Board.java"), board_text);
+    let props = write(
+        "src/main/resources/egovframework/egovProps/globals.properties",
+        "# DB\nGlobals.DbType = oracle\nGlobals.Url = jdbc:oracle:thin:@db:1521:orcl\n",
+    );
+    let common = write(
+        "src/main/resources/egovframework/spring/context-common.xml",
+        "<beans><bean id=\"dataSource\" class=\"org.apache.commons.dbcp2.BasicDataSource\"/></beans>\n",
+    );
+    let context_text = r#"<beans xmlns:p="http://www.springframework.org/schema/p">
+  <import resource="classpath:/egovframework/spring/context-common.xml"/>
+  <bean id="sample" class="egov.sample.service.impl.SampleServiceImpl" p:pageUnit="10">
+    <property name="sampleDAO" ref="dataSource"/>
+    <property name="helperName" value="${Globals.Url}"/>
+    <property name="nothing" value="x"/>
+    <property name="list" ref="missingBean"/>
+  </bean>
+  <bean id="missing" class="egov.sample.service.impl.NoSuchImpl"/>
+  <bean id="lib" class="org.apache.commons.dbcp2.BasicDataSource" p:anything="1"/>
+  <tx:advice id="txAdvice" transaction-manager="txManager"/>
+</beans>
+"#;
+    let context = write(
+        "src/main/resources/egovframework/spring/context-sample.xml",
+        context_text,
+    );
+
+    let command = ServerCommand {
+        program: env!("CARGO_BIN_EXE_ferrite-egov-ls").into(),
+        ..Default::default()
+    };
+    let mut lsp = LanguageServer::start(&command, &root, || {}).unwrap();
+    let encoding = lsp.encoding();
+    lsp.did_open(&context, "xml", 1, context_text);
+    let rope = Rope::from_str(context_text);
+    let found: Vec<(String, String)> = diagnostics_for(&lsp, "context-sample.xml")
+        .iter()
+        .map(|d| {
+            let start = from_lsp(&rope, d.range.start, encoding);
+            let end = from_lsp(&rope, d.range.end, encoding);
+            let code = match &d.code {
+                Some(lsp_types::NumberOrString::String(code)) => code.clone(),
+                other => format!("{other:?}"),
+            };
+            (code, rope.slice(start..end).to_string())
+        })
+        .collect();
+    assert_eq!(
+        found,
+        [
+            ("unresolved-bean".to_owned(), "missingBean".to_owned()),
+            (
+                "unresolved-class".to_owned(),
+                "egov.sample.service.impl.NoSuchImpl".to_owned()
+            ),
+            ("unknown-property".to_owned(), "nothing".to_owned()),
+            ("unknown-property".to_owned(), "list".to_owned()),
+        ],
+        "라이브러리 클래스(BasicDataSource)의 property와 @Bean 빈(txManager)은 문제 없음"
+    );
+
+    let definition =
+        |lsp: &mut LanguageServer, path: &std::path::Path, text: &str, needle: &str| {
+            let rope = Rope::from_str(text);
+            let char_idx = rope.byte_to_char(text.find(needle).unwrap() + 2);
+            let params = position_params(path, &rope, char_idx, encoding).unwrap();
+            let id = lsp.request("textDocument/definition", params);
+            parse_locations(&response(lsp, id))
+                .into_iter()
+                .map(|t| {
+                    let name = t.path.file_name().unwrap().to_string_lossy().into_owned();
+                    (name, t.range.start.line)
+                })
+                .collect::<Vec<_>>()
+        };
+    let name = |path: &std::path::Path| path.file_name().unwrap().to_string_lossy().into_owned();
+    assert_eq!(
+        definition(&mut lsp, &context, context_text, "dataSource\"/>"),
+        [(name(&common), 0)],
+        "ref → 다른 파일의 빈"
+    );
+    assert_eq!(
+        definition(
+            &mut lsp,
+            &context,
+            context_text,
+            "egov.sample.service.impl.Sample"
+        ),
+        [(name(&service), 2)],
+        "class → Java 클래스"
+    );
+    assert_eq!(
+        definition(&mut lsp, &context, context_text, "helperName"),
+        [(name(&service), 5)],
+        "property → setter"
+    );
+    assert_eq!(
+        definition(&mut lsp, &context, context_text, "Globals.Url"),
+        [(name(&props), 2)],
+        "${{키}} → 프로퍼티 파일"
+    );
+    assert_eq!(
+        definition(
+            &mut lsp,
+            &context,
+            context_text,
+            "egovframework/spring/context-common"
+        ),
+        [(name(&common), 0)],
+        "import → 파일"
+    );
+    assert_eq!(
+        definition(&mut lsp, &context, context_text, "txManager\"/>"),
+        [("AppConfig.java".to_owned(), 4)],
+        "@Bean 메서드"
+    );
+
+    // `|` 자리에서 자동완성한다(같은 문서를 고쳐 가며).
+    let mut version = 1;
+    let mut complete = |lsp: &mut LanguageServer, path: &std::path::Path, marked: &str| {
+        version += 1;
+        let offset = marked.find('|').unwrap();
+        let text = marked.replace('|', "");
+        lsp.did_change_full(path, version, &text);
+        let rope = Rope::from_str(&text);
+        let params =
+            completion_params(path, &rope, rope.byte_to_char(offset), encoding, None).unwrap();
+        let id = lsp.request("textDocument/completion", params);
+        let mut labels: Vec<String> = parse_completion(&response(lsp, id), &rope, encoding)
+            .items
+            .into_iter()
+            .map(|c| c.label)
+            .collect();
+        labels.sort();
+        labels
+    };
+    let labels = complete(
+        &mut lsp,
+        &context,
+        &context_text.replace("ref=\"dataSource\"", "ref=\"|\""),
+    );
+    for bean in ["dataSource", "sample", "sampleService", "txManager"] {
+        assert!(labels.contains(&bean.to_owned()), "{bean}: {labels:?}");
+    }
+    assert_eq!(
+        complete(
+            &mut lsp,
+            &context,
+            &context_text.replace("name=\"nothing\"", "name=\"|\"")
+        ),
+        ["helperName", "pageUnit", "sampleDAO"]
+    );
+    assert_eq!(
+        complete(
+            &mut lsp,
+            &context,
+            &context_text.replace("${Globals.Url}", "${Glo|}")
+        ),
+        ["Globals.DbType", "Globals.Url"]
+    );
+
+    // JPA: JPQL 완성과 Oracle(버전 모름)에서의 IDENTITY 알림.
+    let repository_text = "package egov.sample;\npublic interface BoardRepository {\n    @Query(\"SELECT b FROM Board b WHERE b.\")\n    List<Board> find();\n}\n";
+    let repository = write(&format!("{java}/BoardRepository.java"), repository_text);
+    lsp.did_open(&repository, "java", 1, repository_text);
+    assert_eq!(
+        complete(
+            &mut lsp,
+            &repository,
+            &repository_text.replace("b.\"", "b.|\"")
+        ),
+        ["id", "title", "writer"]
+    );
+    assert_eq!(
+        complete(
+            &mut lsp,
+            &repository,
+            &repository_text.replace("b.\"", "b.writer.|\"")
+        ),
+        ["id", "name"],
+        "필드 타입(Member)으로 내려간다"
+    );
+    assert_eq!(
+        complete(
+            &mut lsp,
+            &repository,
+            &repository_text.replace("FROM Board", "FROM |Board")
+        ),
+        ["Board", "Member"]
+    );
+    lsp.did_open(&board, "java", 1, board_text);
+    let identity = diagnostics_for(&lsp, "Board.java");
+    assert_eq!(identity.len(), 1, "{identity:?}");
+    assert_eq!(
+        identity[0].severity,
+        Some(lsp_types::DiagnosticSeverity::INFORMATION)
+    );
+    assert!(identity[0].message.contains("Oracle 11g"));
+
+    drop(lsp);
+    for _ in 0..50 {
+        if fs::remove_dir_all(&root).is_ok() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
