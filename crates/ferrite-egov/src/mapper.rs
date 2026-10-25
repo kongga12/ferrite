@@ -396,6 +396,259 @@ pub fn diagnose(mapper: &Mapper, index: &Index) -> Vec<Finding> {
     findings
 }
 
+/// 타입 별칭. iBatis sqlMap의 `<typeAlias alias type>`, MyBatis 설정의 `<typeAliases>` 안
+/// `<typeAlias>`·`<package name>`(그 패키지의 클래스는 단순 이름이 별칭이다).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Aliases {
+    pub explicit: Vec<(String, String)>,
+    pub packages: Vec<String>,
+}
+
+/// 별칭을 풀어 FQN으로: 선언한 별칭(대소문자 무시) → 점이 있으면 그대로 → 별칭 패키지의
+/// 같은 이름 클래스 → 프로젝트에서 단순 이름이 같은 클래스 → 그대로.
+/// `classes`는 프로젝트 클래스들의 FQN이다.
+pub fn resolve_alias(name: &str, aliases: &[&Aliases], classes: &[&str]) -> String {
+    let explicit = aliases
+        .iter()
+        .flat_map(|a| a.explicit.iter())
+        .find(|(alias, _)| alias.eq_ignore_ascii_case(name));
+    if let Some((_, ty)) = explicit {
+        return ty.clone();
+    }
+    if name.contains('.') {
+        return name.to_owned();
+    }
+    let simple = |fqn: &&&str| {
+        fqn.rsplit('.')
+            .next()
+            .is_some_and(|s| s.eq_ignore_ascii_case(name))
+    };
+    let in_alias_package = |fqn: &&&str| {
+        aliases.iter().flat_map(|a| a.packages.iter()).any(|p| {
+            fqn.strip_prefix(p.as_str())
+                .is_some_and(|rest| rest.starts_with('.'))
+        })
+    };
+    classes
+        .iter()
+        .filter(simple)
+        .find(in_alias_package)
+        .or_else(|| classes.iter().find(simple))
+        .map_or_else(|| name.to_owned(), |fqn| (*fqn).to_owned())
+}
+
+/// 문서에서 별칭 선언을 모은다(매퍼든 설정 파일이든).
+pub fn aliases(text: &str) -> Aliases {
+    let mut found = Aliases::default();
+    for tag in start_tags(text) {
+        match tag.name {
+            "typeAlias" => {
+                let Some(ty) = tag.attr("type") else {
+                    continue;
+                };
+                // MyBatis는 alias를 빼면 단순 이름이 별칭이다.
+                let alias = tag
+                    .attr("alias")
+                    .unwrap_or_else(|| ty.rsplit('.').next().unwrap_or(ty));
+                found.explicit.push((alias.to_owned(), ty.to_owned()));
+            }
+            "package" => {
+                if let Some(name) = tag.attr("name") {
+                    found.packages.push(name.to_owned());
+                }
+            }
+            _ => {}
+        }
+    }
+    found
+}
+
+/// 여는 태그 하나(`<name 속성…>`). 단순 텍스트 검사라 주석·CDATA 안의 태그 모양도 잡지만,
+/// 매퍼·설정 파일에서는 문제되지 않는다.
+struct StartTag<'t> {
+    name: &'t str,
+    body: &'t str,
+}
+
+impl<'t> StartTag<'t> {
+    /// `name="값"` 또는 `name='값'`의 값.
+    fn attr(&self, name: &str) -> Option<&'t str> {
+        attr_value(self.body, name)
+    }
+}
+
+fn attr_value<'t>(body: &'t str, name: &str) -> Option<&'t str> {
+    let mut rest = body;
+    while let Some(at) = rest.find(name) {
+        let before_ok = rest[..at]
+            .chars()
+            .next_back()
+            .is_none_or(char::is_whitespace);
+        let after = rest[at + name.len()..].trim_start();
+        if before_ok && let Some(after) = after.strip_prefix('=') {
+            let after = after.trim_start();
+            let quote = after.chars().next()?;
+            if quote == '"' || quote == '\'' {
+                let value = &after[1..];
+                return value.find(quote).map(|end| &value[..end]);
+            }
+        }
+        rest = &rest[at + name.len()..];
+    }
+    None
+}
+
+fn start_tags(text: &str) -> impl Iterator<Item = StartTag<'_>> {
+    text.match_indices('<').filter_map(move |(at, _)| {
+        let rest = &text[at + 1..];
+        let end = rest.find('>')?;
+        let tag = &rest[..end];
+        let name_end = tag
+            .find(|c: char| c.is_whitespace() || c == '/')
+            .unwrap_or(tag.len());
+        let name = &tag[..name_end];
+        (!name.is_empty() && name.chars().next()?.is_ascii_alphabetic()).then_some(StartTag {
+            name,
+            body: &tag[name_end..],
+        })
+    })
+}
+
+/// 자동완성할 자리.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Context {
+    /// `#{…}`(iBatis `#…#`) 안. `path`는 커서 앞까지 친 속성 경로에서 마지막 조각을 뺀 것
+    /// (`#{user.na` → `["user"]`).
+    Parameter {
+        parameter_type: Option<String>,
+        statement_id: Option<String>,
+        path: Vec<String>,
+    },
+    /// 클래스 이름을 받는 속성값. `replace`는 속성값 전체, `typed`는 커서까지 친 값.
+    ClassName {
+        replace: Range<usize>,
+        typed: String,
+    },
+    /// resultMap 안 `property` 속성값. `owner`는 그 resultMap의 타입.
+    Property { owner: Option<String> },
+}
+
+const CLASS_ATTRIBUTES: [&str; 8] = [
+    "resultType",
+    "parameterType",
+    "type",
+    "ofType",
+    "javaType",
+    "resultClass",
+    "parameterClass",
+    "class",
+];
+
+/// `offset`(바이트) 자리의 자동완성 문맥. 입력 중인 XML은 따옴표가 닫히지 않은 등 깨져 있기 쉬워
+/// 트리가 아니라 커서 앞 텍스트로 판단한다.
+pub fn context_at(text: &str, dialect: Dialect, offset: usize) -> Option<Context> {
+    let before = text.get(..offset)?;
+    let tag_start = before.rfind('<');
+    let in_tag = tag_start.is_some_and(|start| !before[start..].contains('>'));
+    if in_tag {
+        let tag_start = tag_start?;
+        let tag = &before[tag_start + 1..];
+        let name = tag.split(char::is_whitespace).next()?;
+        // 커서가 속성값 안이면 태그 안의 따옴표 수가 홀수다(마지막 값이 아직 열려 있다).
+        if tag.matches(['"', '\'']).count() % 2 == 0 {
+            return None;
+        }
+        let quote = tag.rfind(['"', '\''])?;
+        let opening = tag[..quote].trim_end().strip_suffix('=')?;
+        let attribute = opening.trim_end().rsplit(char::is_whitespace).next()?;
+        let value_start = tag_start + 1 + quote + 1;
+        let typed = text[value_start..offset].to_owned();
+        let value_end = text[offset..]
+            .find(['"', '\'', '<', '\n'])
+            .map_or(offset, |end| offset + end);
+        if CLASS_ATTRIBUTES.contains(&attribute) {
+            return Some(Context::ClassName {
+                replace: value_start..value_end,
+                typed,
+            });
+        }
+        if attribute == "property" && matches!(name, "result" | "id" | "association" | "collection")
+        {
+            let owner = open_element(before, &["resultMap"])
+                .and_then(|tag| tag.attr("type").or_else(|| tag.attr("class")))
+                .map(str::to_owned);
+            return Some(Context::Property { owner });
+        }
+        return None;
+    }
+    // 본문: 커서 앞이 속성 경로(글자·숫자·_·.)이고 그 앞이 `#{`(MyBatis) 또는 여는 `#`(iBatis).
+    let typed_len = before
+        .chars()
+        .rev()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '.')
+        .count();
+    let typed = &before[before.len() - typed_len..];
+    let head = &before[..before.len() - typed_len];
+    let opened = match dialect {
+        Dialect::MyBatis => head.ends_with("#{"),
+        Dialect::IBatis => {
+            head.ends_with('#')
+                && !head[..head.len() - 1]
+                    .chars()
+                    .next_back()
+                    .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
+        }
+    };
+    if !opened {
+        return None;
+    }
+    let statements: &[&str] = match dialect {
+        Dialect::MyBatis => &MYBATIS_STATEMENTS,
+        Dialect::IBatis => &IBATIS_STATEMENTS,
+    };
+    let statement = open_element(before, statements);
+    let mut path: Vec<String> = typed.split('.').map(str::to_owned).collect();
+    path.pop();
+    Some(Context::Parameter {
+        parameter_type: statement
+            .as_ref()
+            .and_then(|tag| {
+                tag.attr("parameterType")
+                    .or_else(|| tag.attr("parameterClass"))
+            })
+            .map(str::to_owned),
+        statement_id: statement
+            .as_ref()
+            .and_then(|tag| tag.attr("id"))
+            .map(str::to_owned),
+        path,
+    })
+}
+
+/// 커서 앞에서 아직 닫히지 않은 요소(이름 중 하나)의 여는 태그.
+fn open_element<'t>(before: &'t str, names: &[&str]) -> Option<StartTag<'t>> {
+    names
+        .iter()
+        .filter_map(|name| {
+            let open = format!("<{name}");
+            let mut search = before;
+            let mut found = None;
+            while let Some(at) = search.rfind(&open) {
+                let next = search[at + open.len()..].chars().next();
+                if next.is_some_and(|c| c.is_whitespace() || c == '>') {
+                    found = Some(at);
+                    break;
+                }
+                search = &search[..at];
+            }
+            let at = found?;
+            let closed = before[at..].contains(&format!("</{name}>"));
+            (!closed).then_some(at)
+        })
+        .max()
+        .and_then(|at| start_tags(&before[at..]).next())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -550,5 +803,88 @@ mod tests {
     fn 매퍼가_아닌_xml은_무시한다() {
         assert!(parse("<project><modelVersion>4.0.0</modelVersion></project>").is_none());
         assert!(parse("").is_none());
+    }
+
+    #[test]
+    fn 별칭은_typealias와_package를_모은다() {
+        let found = aliases(
+            r#"<sqlMap namespace="Sample">
+  <typeAlias  alias="searchVO" type="egov.sample.service.SampleDefaultVO"/>
+  <typeAlias type="egov.com.EgovMap"/>
+</sqlMap>
+<configuration><typeAliases><package name="egov.sample.service"/></typeAliases></configuration>"#,
+        );
+        assert_eq!(
+            found.explicit,
+            [
+                (
+                    "searchVO".into(),
+                    "egov.sample.service.SampleDefaultVO".into()
+                ),
+                ("EgovMap".into(), "egov.com.EgovMap".into()),
+            ]
+        );
+        assert_eq!(found.packages, ["egov.sample.service"]);
+    }
+
+    #[test]
+    fn 자동완성_문맥을_커서_앞_텍스트로_찾는다() {
+        let at = |text: &str, dialect| {
+            let offset = text.find('|').unwrap();
+            context_at(&text.replace('|', ""), dialect, offset)
+        };
+        let mybatis = r#"<mapper namespace="a.B"><select id="list" parameterType="searchVO">SELECT * WHERE id = #{user.na|} </select></mapper>"#;
+        assert_eq!(
+            at(mybatis, Dialect::MyBatis),
+            Some(Context::Parameter {
+                parameter_type: Some("searchVO".into()),
+                statement_id: Some("list".into()),
+                path: vec!["user".into()],
+            })
+        );
+        let ibatis = r#"<sqlMap><select id="x.list" parameterClass="vo">WHERE a = #a# AND b = #b|"#;
+        assert_eq!(
+            at(ibatis, Dialect::IBatis),
+            Some(Context::Parameter {
+                parameter_type: Some("vo".into()),
+                statement_id: Some("x.list".into()),
+                path: vec![],
+            }),
+            "닫힌 #a# 다음의 여는 #"
+        );
+        assert_eq!(
+            at(r#"<sqlMap><select id="a">WHERE a = #a|"#, Dialect::MyBatis),
+            None
+        );
+        let class = r#"<select id="a" resultType="egov.Sam|ple">"#;
+        let offset = class.find('|').unwrap();
+        let clean = class.replace('|', "");
+        assert_eq!(
+            context_at(&clean, Dialect::MyBatis, offset),
+            Some(Context::ClassName {
+                replace: clean.find("egov").unwrap()..clean.find("\">").unwrap(),
+                typed: "egov.Sam".into(),
+            }),
+            "속성값 전체를 바꾼다"
+        );
+        assert_eq!(
+            at(
+                r#"<resultMap id="m" type="egov.SampleVO"><result property="na|" column="name"/>"#,
+                Dialect::MyBatis
+            ),
+            Some(Context::Property {
+                owner: Some("egov.SampleVO".into())
+            })
+        );
+        assert_eq!(
+            at(r#"<select id="a|" resultType="x">"#, Dialect::MyBatis),
+            None,
+            "id 속성은 대상 아님"
+        );
+        assert_eq!(
+            at(r#"<select id="a">SELECT na|"#, Dialect::MyBatis),
+            None,
+            "#{{ 밖"
+        );
     }
 }
