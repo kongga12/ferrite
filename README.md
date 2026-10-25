@@ -16,6 +16,7 @@ Rust로 작성한 크로스플랫폼(Windows / macOS / Linux) 경량 IDE.
   - egov(내장, 설치 불필요): MyBatis·iBatis 매퍼에서 SQL Injection 위험(`${}`, `$prop$`), 정의 안 된 refid·resultMap, 중복 id를 진단한다.
     - Mapper 인터페이스·DAO 문자열 id ↔ XML 문장을 정의로 이동(F12)하고, XML 문장이 없는 Mapper 메서드를 경고한다.
     - 자동완성: `#{}`(iBatis `#…#`) 안의 VO 필드·`@Param` 이름, resultType·parameterType 클래스 이름(별칭 포함), resultMap의 property.
+    - JSP: 이스케이프 없이 출력하는 EL(`${…}`)·`<%= %>`를 알린다. 요청 값(`param`·`header`·`cookie`, `request.getParameter`)은 경고, 그 밖의 값은 정보다. `<c:out>`·`fn:escapeXml`로 감싸면 사라진다.
   - 언어 서버 매니저(`도구 > 언어 서버`): 버전·SHA-256을 고정한 배포본을 내려받아 설치·업데이트·삭제한다.
   - 서버가 없으면 상태바의 "설치" 버튼으로 바로 설치할 수 있다.
   - 인터넷이 막힌 PC는 다른 PC에서 받은 파일로 설치한다("파일에서…").
@@ -23,7 +24,7 @@ Rust로 작성한 크로스플랫폼(Windows / macOS / Linux) 경량 IDE.
   - 자동완성 팝업, 호버 정보
   - 정의로 이동, 참조 목록
   - 문서 포맷, 기호 이름 바꾸기(여러 파일), 코드 액션(빠른 수정·리팩터링)
-- 구문 강조(tree-sitter): Rust, Python, Go, C/C++, PHP, Java, SQL, TOML, JSON, YAML, XML, HTML, JavaScript, CSS
+- 구문 강조(tree-sitter): Rust, Python, Go, C/C++, PHP, Java, SQL, TOML, JSON, YAML, XML, HTML, JSP(HTML + 스크립틀릿 Java + EL), JavaScript, CSS, Properties
 - UTF-8(BOM 포함)·CP949 인코딩과 CRLF 감지·보존, 들여쓰기 방식 감지
 - 원자적 저장, 미저장 변경 확인(탭 닫기, 창 종료), 외부 변경 시 다시 불러오기·충돌 안내
 - 명령줄: `ferrite <폴더>` 또는 `ferrite <파일>`

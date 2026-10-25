@@ -333,6 +333,7 @@ impl Index {
 pub enum Severity {
     Error,
     Warning,
+    Information,
 }
 
 /// 진단 하나. 범위는 바이트 단위다.

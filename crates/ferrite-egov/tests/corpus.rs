@@ -6,9 +6,13 @@
 //! 지우고 CDATA·태그 밖 텍스트만 남겨 센다. 둘이 다르면 파서가 놓쳤거나 잘못 잡은 것이다.
 
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
+use ferrite_core::buffer::Buffer;
+use ferrite_core::jsp::{self, Kind};
+use ferrite_core::syntax::{Lang, Syntax};
 use ferrite_core::text_file;
-use ferrite_egov::mapper::{self, Dialect};
+use ferrite_egov::mapper::{self, Dialect, Severity};
 
 const SKIP_DIRS: [&str; 10] = [
     ".git",
@@ -23,7 +27,8 @@ const SKIP_DIRS: [&str; 10] = [
     "target",
 ];
 
-fn xml_files(root: &Path) -> Vec<PathBuf> {
+/// 코퍼스에서 이 확장자(대소문자 무시)의 파일을 모두 찾는다.
+fn files(root: &Path, extensions: &[&str]) -> Vec<PathBuf> {
     let mut found = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
@@ -41,7 +46,8 @@ fn xml_files(root: &Path) -> Vec<PathBuf> {
                 Ok(_)
                     if path
                         .extension()
-                        .is_some_and(|e| e.eq_ignore_ascii_case("xml")) =>
+                        .and_then(|e| e.to_str())
+                        .is_some_and(|e| extensions.iter().any(|x| e.eq_ignore_ascii_case(x))) =>
                 {
                     found.push(path)
                 }
@@ -148,7 +154,7 @@ fn 코퍼스의_문자열_치환을_빠짐없이_찾는다() {
     let (mut mybatis, mut ibatis, mut found_total) = (0, 0, 0);
     let mut failures = Vec::new();
     let mut mismatches = Vec::new();
-    for path in xml_files(Path::new(&root)) {
+    for path in files(Path::new(&root), &["xml"]) {
         let Ok(bytes) = text_file::read(&path) else {
             continue;
         };
@@ -302,9 +308,9 @@ fn 코퍼스의_parameter_type_해석_통계() {
         let mut classes: Vec<String> = Vec::new();
         let mut aliases = Vec::new();
         let mut types: Vec<String> = Vec::new();
-        for path in xml_files(&project.path())
+        for path in files(&project.path(), &["xml"])
             .into_iter()
-            .chain(java_files(&project.path()))
+            .chain(files(&project.path(), &["java"]))
         {
             let Some(text) = text_file::read(&path)
                 .ok()
@@ -374,25 +380,140 @@ fn 코퍼스의_parameter_type_해석_통계() {
     }
 }
 
-fn java_files(root: &Path) -> Vec<PathBuf> {
-    let mut found = Vec::new();
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
+/// `${`의 수를 따로 센다(EL 구간 찾기의 누락 검사). JSP 주석과 `<% %>` 안은 빼고, `\${`도 뺀다.
+/// EL 안의 `${`(문자열 속)는 세지 않도록 닫는 `}`까지 건너뛴다.
+fn count_el(text: &str) -> usize {
+    let mut n = 0;
+    let mut rest = text;
+    while let Some(at) = rest.find(['<', '$']) {
+        let tail = &rest[at..];
+        if let Some(after) = tail.strip_prefix("<%--") {
+            rest = after.find("--%>").map_or("", |end| &after[end + 4..]);
+        } else if let Some(after) = tail.strip_prefix("<%") {
+            rest = after.find("%>").map_or("", |end| &after[end + 2..]);
+        } else if let Some(after) = tail.strip_prefix("${") {
+            if !rest[..at].ends_with('\\') {
+                n += 1;
+            }
+            rest = skip_el(after);
+        } else {
+            rest = &tail[1..];
+        }
+    }
+    n
+}
+
+/// EL 안쪽을 건너뛴다(따옴표와 중괄호 짝을 센다).
+fn skip_el(after: &str) -> &str {
+    let mut depth = 0;
+    let mut quote = None;
+    let mut escaped = false;
+    for (i, c) in after.char_indices() {
+        match quote {
+            Some(_) if escaped => escaped = false,
+            Some(_) if c == '\\' => escaped = true,
+            Some(q) if c == q => quote = None,
+            Some(_) => {}
+            None => match c {
+                '"' | '\'' => quote = Some(c),
+                '{' => depth += 1,
+                '}' if depth == 0 => return &after[i + 1..],
+                '}' => depth -= 1,
+                _ => {}
+            },
+        }
+    }
+    ""
+}
+
+/// 코퍼스의 JSP 전부로 구간 찾기·구문 강조·XSS 진단이 죽지 않는지, `${`를 빠짐없이 찾는지 본다.
+/// 진단이 실제 코드에서 얼마나 나오는지(잡음)도 센다.
+#[test]
+#[ignore = "로컬 egov 코퍼스가 필요하다(FERRITE_EGOV_CORPUS)"]
+fn 코퍼스의_jsp_el을_빠짐없이_찾고_xss를_센다() {
+    let Some(root) = std::env::var_os("FERRITE_EGOV_CORPUS") else {
+        eprintln!("FERRITE_EGOV_CORPUS가 없어 건너뜁니다");
+        return;
+    };
+    let (mut pages, mut el_total, mut warnings, mut infos) = (0, 0, 0, 0);
+    let mut mismatches = Vec::new();
+    let mut top: std::collections::HashMap<String, usize> = Default::default();
+    let mut request_samples = Vec::new();
+    // 단계별 누적 시간과 가장 오래 걸린 파싱(편집할 때마다 문서 전체를 다시 파싱하므로 본다).
+    let mut spent = [Duration::ZERO; 3];
+    let mut slowest = (Duration::ZERO, 0);
+    for path in files(Path::new(&root), &["jsp", "jspf", "tag"]) {
+        let Ok(bytes) = text_file::read(&path) else {
             continue;
         };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            match entry.file_type() {
-                Ok(kind) if kind.is_dir() => {
-                    if !SKIP_DIRS.iter().any(|s| entry.file_name() == *s) {
-                        stack.push(path);
+        let Ok(content) = text_file::decode(&bytes) else {
+            continue;
+        };
+        let text = &content.text;
+        pages += 1;
+        let started = Instant::now();
+        let regions = jsp::regions(text);
+        spent[0] += started.elapsed();
+        let found = regions
+            .iter()
+            .filter(|r| r.kind == Kind::El && text[r.range.start..].starts_with('$'))
+            .count();
+        el_total += found;
+        let expected = count_el(text);
+        if found != expected {
+            mismatches.push((path.clone(), found, expected));
+        }
+        // 구문 강조가 문서 전체에서 죽지 않는지.
+        let mut buffer = Buffer::new(text);
+        buffer.set_track_syntax_edits(true);
+        let mut syntax = Syntax::new(Lang::Jsp).unwrap();
+        let parse = Instant::now();
+        syntax.update(&mut buffer);
+        let parsed = parse.elapsed();
+        spent[1] += parsed;
+        slowest = slowest.max((parsed, text.len()));
+        let lines = buffer.rope().len_lines();
+        let _ = syntax.highlight_lines(buffer.rope(), 0..lines);
+        let diagnose = Instant::now();
+        let findings = ferrite_egov::jsp::diagnose(text);
+        spent[2] += diagnose.elapsed();
+        for finding in findings {
+            let shown = text[finding.range.clone()].to_owned();
+            match finding.severity {
+                Severity::Warning => {
+                    warnings += 1;
+                    if request_samples.len() < 15 {
+                        request_samples.push(shown);
                     }
                 }
-                Ok(_) if path.extension().is_some_and(|e| e == "java") => found.push(path),
-                _ => {}
+                _ => {
+                    infos += 1;
+                    *top.entry(shown).or_default() += 1;
+                }
             }
         }
     }
-    found
+    eprintln!(
+        "JSP {pages}개, EL {el_total}곳, 불일치 {}, 경고(요청 값) {warnings}, 정보(그 밖의 값) {infos}",
+        mismatches.len()
+    );
+    eprintln!(
+        "  시간: 구간 {:?}, 파싱 {:?}, 진단 {:?}. 가장 오래 걸린 파싱 {:?}({}바이트)",
+        spent[0], spent[1], spent[2], slowest.0, slowest.1
+    );
+    for (path, found, expected) in mismatches.iter().take(10) {
+        eprintln!(
+            "  불일치 {}: 찾음 {found}, 단순 검사 {expected}",
+            path.display()
+        );
+    }
+    for shown in &request_samples {
+        eprintln!("  경고 예: {shown}");
+    }
+    let mut top: Vec<_> = top.into_iter().collect();
+    top.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+    for (shown, n) in top.iter().take(20) {
+        eprintln!("  정보 상위 {n}: {shown}");
+    }
+    assert!(mismatches.is_empty());
 }

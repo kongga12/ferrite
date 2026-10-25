@@ -392,3 +392,59 @@ fn 매퍼에서_vo_필드와_param_이름과_클래스_이름을_완성한다() 
         std::thread::sleep(Duration::from_millis(100));
     }
 }
+
+#[test]
+fn jsp를_열면_이스케이프_없는_출력을_알리고_고치면_지운다() {
+    let root = project("jsp");
+    let file = root.join("list.jsp");
+    let text = "<%@ page contentType=\"text/html; charset=UTF-8\" %>\n<h1>${vo.제목}</h1>\n<input name=\"q\" value=\"${param.q}\">\n";
+    fs::write(&file, text).unwrap();
+
+    let command = ServerCommand {
+        program: env!("CARGO_BIN_EXE_ferrite-egov-ls").into(),
+        ..Default::default()
+    };
+    let lsp = LanguageServer::start(&command, &root, || {}).unwrap();
+    lsp.did_open(&file, "jsp", 1, text);
+    let rope = Rope::from_str(text);
+    let found: Vec<(String, Option<lsp_types::DiagnosticSeverity>)> =
+        diagnostics_for(&lsp, "list.jsp")
+            .iter()
+            .map(|d| {
+                let start = from_lsp(&rope, d.range.start, lsp.encoding());
+                let end = from_lsp(&rope, d.range.end, lsp.encoding());
+                (rope.slice(start..end).to_string(), d.severity)
+            })
+            .collect();
+    assert_eq!(
+        found,
+        [
+            (
+                "${vo.제목}".to_owned(),
+                Some(lsp_types::DiagnosticSeverity::INFORMATION)
+            ),
+            (
+                "${param.q}".to_owned(),
+                Some(lsp_types::DiagnosticSeverity::WARNING)
+            ),
+        ],
+        "저장된 값은 정보, 요청 값은 경고. 한글 뒤 위치도 맞아야 한다"
+    );
+
+    let fixed = text
+        .replace("${vo.제목}", "<c:out value=\"${vo.제목}\"/>")
+        .replace("${param.q}", "${fn:escapeXml(param.q)}");
+    lsp.did_change_full(&file, 2, &fixed);
+    assert!(
+        diagnostics_for(&lsp, "list.jsp").is_empty(),
+        "고치면 지운다"
+    );
+
+    drop(lsp);
+    for _ in 0..50 {
+        if fs::remove_dir_all(&root).is_ok() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}

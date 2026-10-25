@@ -11,6 +11,7 @@ use tree_sitter::{
 };
 
 use crate::buffer::{Buffer, SyntaxEdit};
+use crate::jsp::{self, Kind as JspKind, Region};
 
 /// 이보다 큰 파일은 구문 강조를 끈다(초기 파싱 시간·메모리 때문).
 // ponytail: UI 스레드에서 동기 파싱하는 상한. 백그라운드 파싱을 넣으면 상향.
@@ -37,10 +38,12 @@ pub enum Lang {
     JavaScript,
     Css,
     Properties,
+    /// HTML에 스크립틀릿(Java)·EL이 섞인 JSP. HTML 층과 Java 층을 따로 칠하고 JSP 구간을 덧칠한다.
+    Jsp,
 }
 
 impl Lang {
-    pub const ALL: [Lang; 16] = [
+    pub const ALL: [Lang; 17] = [
         Lang::Rust,
         Lang::Python,
         Lang::Go,
@@ -57,6 +60,7 @@ impl Lang {
         Lang::JavaScript,
         Lang::Css,
         Lang::Properties,
+        Lang::Jsp,
     ];
 
     pub fn from_path(path: &Path) -> Option<Lang> {
@@ -77,8 +81,8 @@ impl Lang {
             "json" => Lang::Json,
             "yml" | "yaml" => Lang::Yaml,
             "xml" | "xsd" | "xsl" | "tld" => Lang::Xml,
-            // ponytail: JSP는 HTML로만 강조한다. 스크립틀릿·EL은 Phase 2b(ferrite-egov-ls).
-            "html" | "htm" | "jsp" => Lang::Html,
+            "html" | "htm" => Lang::Html,
+            "jsp" | "jspf" | "tag" => Lang::Jsp,
             "js" | "mjs" | "cjs" => Lang::JavaScript,
             "css" => Lang::Css,
             "properties" => Lang::Properties,
@@ -104,6 +108,7 @@ impl Lang {
             Lang::JavaScript => "JavaScript",
             Lang::Css => "CSS",
             Lang::Properties => "Properties",
+            Lang::Jsp => "JSP",
         }
     }
 
@@ -126,6 +131,7 @@ impl Lang {
             Lang::JavaScript => "javascript",
             Lang::Css => "css",
             Lang::Properties => "properties",
+            Lang::Jsp => "jsp",
         }
     }
 
@@ -136,7 +142,7 @@ impl Lang {
             Lang::JavaScript => Some("//"),
             Lang::Python | Lang::Toml | Lang::Yaml | Lang::Properties => Some("#"),
             Lang::Sql => Some("--"),
-            Lang::Json | Lang::Xml | Lang::Html | Lang::Css => None,
+            Lang::Json | Lang::Xml | Lang::Html | Lang::Css | Lang::Jsp => None,
         }
     }
 
@@ -154,7 +160,7 @@ impl Lang {
             Lang::Json => tree_sitter_json::LANGUAGE.into(),
             Lang::Yaml => tree_sitter_yaml::LANGUAGE.into(),
             Lang::Xml => tree_sitter_xml::LANGUAGE_XML.into(),
-            Lang::Html => tree_sitter_html::LANGUAGE.into(),
+            Lang::Html | Lang::Jsp => tree_sitter_html::LANGUAGE.into(),
             Lang::JavaScript => tree_sitter_javascript::LANGUAGE.into(),
             Lang::Css => tree_sitter_css::LANGUAGE.into(),
             Lang::Properties => tree_sitter_properties::LANGUAGE.into(),
@@ -182,7 +188,7 @@ impl Lang {
             Lang::Json => tree_sitter_json::HIGHLIGHTS_QUERY,
             Lang::Yaml => tree_sitter_yaml::HIGHLIGHTS_QUERY,
             Lang::Xml => tree_sitter_xml::XML_HIGHLIGHT_QUERY,
-            Lang::Html => tree_sitter_html::HIGHLIGHTS_QUERY,
+            Lang::Html | Lang::Jsp => tree_sitter_html::HIGHLIGHTS_QUERY,
             Lang::JavaScript => tree_sitter_javascript::HIGHLIGHT_QUERY,
             Lang::Css => tree_sitter_css::HIGHLIGHTS_QUERY,
             Lang::Properties => tree_sitter_properties::HIGHLIGHTS_QUERY,
@@ -229,8 +235,11 @@ impl Highlight {
 /// 줄마다 (줄 안 바이트 범위, 분류) 목록. 범위는 겹치지 않고 시작 순으로 정렬되어 있다.
 pub type LineHighlights = Vec<Vec<(Range<usize>, Highlight)>>;
 
-pub struct Syntax {
-    lang: Lang,
+/// 줄마다 바이트별 (분류, 그 분류를 준 노드 길이). 짧은 노드(더 안쪽)가 이긴다.
+type Marks = Vec<Vec<Option<(Highlight, usize)>>>;
+
+/// 문법 하나의 파서·트리·쿼리.
+struct Layer {
     parser: Parser,
     tree: Option<Tree>,
     query: Query,
@@ -238,27 +247,114 @@ pub struct Syntax {
     kinds: Vec<Option<Highlight>>,
 }
 
-impl Syntax {
-    pub fn new(lang: Lang) -> Result<Self, String> {
-        let language = lang.language();
+impl Layer {
+    fn new(language: Language, query: &str, name: &str) -> Result<Self, String> {
         let mut parser = Parser::new();
         parser
             .set_language(&language)
-            .map_err(|e| format!("{} 문법을 불러오지 못했습니다: {e}", lang.name()))?;
-        let query = Query::new(&language, &lang.highlights_query())
-            .map_err(|e| format!("{} 강조 규칙 오류: {e}", lang.name()))?;
+            .map_err(|e| format!("{name} 문법을 불러오지 못했습니다: {e}"))?;
+        let query =
+            Query::new(&language, query).map_err(|e| format!("{name} 강조 규칙 오류: {e}"))?;
         let kinds = query
             .capture_names()
             .iter()
             .map(|n| Highlight::from_capture(n))
             .collect();
         Ok(Self {
-            lang,
             parser,
             tree: None,
             query,
             kinds,
         })
+    }
+
+    /// 보이는 줄 범위의 캡처를 `marks`에 칠한다.
+    fn mark(&self, rope: &Rope, view: &View, marks: &mut Marks) {
+        let Some(tree) = &self.tree else {
+            return;
+        };
+        let mut cursor = QueryCursor::new();
+        cursor.set_byte_range(view.start..view.end.min(view.start + MAX_LINE_BYTES * marks.len()));
+        let mut captures = cursor.captures(&self.query, tree.root_node(), RopeText(rope));
+        while let Some((m, i)) = captures.next() {
+            let capture = m.captures()[*i];
+            let Some(kind) = self.kinds[capture.index as usize] else {
+                continue;
+            };
+            let range = capture.node.byte_range();
+            let len = range.len();
+            view.paint(rope, marks, range, |slot| {
+                if slot.is_none_or(|(_, old)| len < old) {
+                    *slot = Some((kind, len));
+                }
+            });
+        }
+    }
+}
+
+/// 칠할 줄 범위.
+struct View {
+    lines: Range<usize>,
+    line_starts: Vec<usize>,
+    start: usize,
+    end: usize,
+}
+
+impl View {
+    /// `range`(문서 바이트)가 걸친 줄의 칸마다 `f`를 부른다.
+    fn paint(
+        &self,
+        rope: &Rope,
+        marks: &mut Marks,
+        range: Range<usize>,
+        mut f: impl FnMut(&mut Option<(Highlight, usize)>),
+    ) {
+        let (from, to) = (range.start.max(self.start), range.end.min(self.end));
+        if from >= to {
+            return;
+        }
+        for line in rope.byte_to_line(from)..=rope.byte_to_line(to - 1) {
+            let row = &mut marks[line - self.lines.start];
+            let line_start = self.line_starts[line - self.lines.start];
+            let a = from.saturating_sub(line_start).min(row.len());
+            let b = (to - line_start).min(row.len());
+            row[a..b].iter_mut().for_each(&mut f);
+        }
+    }
+
+    /// 무조건 이 분류로 덮는다(JSP 구간 덧칠).
+    fn force(&self, rope: &Rope, marks: &mut Marks, range: Range<usize>, kind: Highlight) {
+        self.paint(rope, marks, range, |slot| *slot = Some((kind, 0)));
+    }
+}
+
+/// JSP의 Java 층과 구간.
+struct JspLayers {
+    java: Layer,
+    regions: Vec<Region>,
+}
+
+pub struct Syntax {
+    lang: Lang,
+    main: Layer,
+    jsp: Option<JspLayers>,
+}
+
+impl Syntax {
+    pub fn new(lang: Lang) -> Result<Self, String> {
+        let main = Layer::new(lang.language(), &lang.highlights_query(), lang.name())?;
+        let jsp = match lang {
+            Lang::Jsp => Some(JspLayers {
+                java: Layer::new(
+                    Lang::Java.language(),
+                    &Lang::Java.highlights_query(),
+                    Lang::Java.name(),
+                )?,
+                regions: Vec::new(),
+            }),
+            _ => None,
+        };
+        Ok(Self { lang, main, jsp })
     }
 
     pub fn lang(&self) -> Lang {
@@ -269,10 +365,26 @@ impl Syntax {
     /// 버퍼는 `set_track_syntax_edits(true)` 상태여야 한다.
     pub fn update(&mut self, buffer: &mut Buffer) {
         let edits = buffer.take_syntax_edits();
-        if self.tree.is_some() && edits.is_empty() {
+        if self.main.tree.is_some() && edits.is_empty() {
             return;
         }
-        if let Some(tree) = &mut self.tree {
+        if let Some(jsp) = &mut self.jsp {
+            // ponytail: JSP는 매번 처음부터 파싱한다. `<%`를 하나 치면 구간 경계가 편집 밖까지
+            // 바뀌어 증분 파싱의 전제(편집 밖 내용은 그대로)가 깨진다. 큰 JSP에서 느리면 구간이
+            // 바뀌지 않은 편집만 증분으로.
+            let text = buffer.rope().to_string();
+            jsp.regions = jsp::regions(&text);
+            self.main.tree = self
+                .main
+                .parser
+                .parse(jsp::html_text(&text, &jsp.regions), None);
+            jsp.java.tree = jsp
+                .java
+                .parser
+                .parse(jsp::java_text(&text, &jsp.regions), None);
+            return;
+        }
+        if let Some(tree) = &mut self.main.tree {
             for edit in &edits {
                 tree.edit(&input_edit(edit));
             }
@@ -286,56 +398,92 @@ impl Syntax {
             let (chunk, chunk_start, _, _) = rope.chunk_at_byte(byte);
             &chunk.as_bytes()[byte - chunk_start..]
         };
-        self.tree = self
-            .parser
-            .parse_with_options(&mut read, self.tree.as_ref(), None);
+        self.main.tree =
+            self.main
+                .parser
+                .parse_with_options(&mut read, self.main.tree.as_ref(), None);
     }
 
     /// `lines` 범위 각 줄의 강조 구간. 여러 캡처가 겹치면 가장 안쪽(짧은) 노드가 이기고,
-    /// 같은 노드면 쿼리에서 먼저 나온 패턴이 이긴다.
+    /// 같은 노드면 쿼리에서 먼저 나온 패턴이 이긴다. JSP 구간은 그 위에 덧칠한다.
     pub fn highlight_lines(&self, rope: &Rope, lines: Range<usize>) -> LineHighlights {
-        let Some(tree) = &self.tree else {
+        if self.main.tree.is_none() {
             return vec![Vec::new(); lines.len()];
-        };
+        }
         if lines.is_empty() {
             return Vec::new();
         }
         let line_starts: Vec<usize> = lines.clone().map(|l| rope.line_to_byte(l)).collect();
-        let start = line_starts[0];
-        let end = rope.line_to_byte(lines.end);
-        let mut marks: Vec<Vec<Option<(Highlight, usize)>>> = lines
+        let view = View {
+            start: line_starts[0],
+            end: rope.line_to_byte(lines.end),
+            lines: lines.clone(),
+            line_starts,
+        };
+        let mut marks: Marks = lines
             .clone()
             .map(|l| vec![None; rope.line(l).len_bytes().min(MAX_LINE_BYTES)])
             .collect();
-
-        let mut cursor = QueryCursor::new();
-        cursor.set_byte_range(start..end.min(start + MAX_LINE_BYTES * marks.len()));
-        let mut captures = cursor.captures(&self.query, tree.root_node(), RopeText(rope));
-        while let Some((m, i)) = captures.next() {
-            let capture = m.captures()[*i];
-            let Some(kind) = self.kinds[capture.index as usize] else {
-                continue;
-            };
-            let range = capture.node.byte_range();
-            let (from, to) = (range.start.max(start), range.end.min(end));
-            if from >= to {
-                continue;
-            }
-            let first = rope.byte_to_line(from);
-            let last = rope.byte_to_line(to - 1);
-            for line in first..=last {
-                let row = &mut marks[line - lines.start];
-                let line_start = line_starts[line - lines.start];
-                let a = from.saturating_sub(line_start).min(row.len());
-                let b = (to - line_start).min(row.len());
-                for slot in &mut row[a..b] {
-                    if slot.is_none_or(|(_, len)| range.len() < len) {
-                        *slot = Some((kind, range.len()));
-                    }
-                }
+        self.main.mark(rope, &view, &mut marks);
+        if let Some(jsp) = &self.jsp {
+            jsp.java.mark(rope, &view, &mut marks);
+            for region in jsp
+                .regions
+                .iter()
+                .filter(|r| r.range.end > view.start && r.range.start < view.end)
+            {
+                paint_region(rope, &view, &mut marks, region);
             }
         }
         marks.into_iter().map(|row| compress(&row)).collect()
+    }
+}
+
+/// JSP 구간 덧칠: 주석은 통째로, 구분자는 키워드, EL 안쪽은 속성, 지시자의 문자열은 문자열.
+/// 스크립틀릿 안쪽은 Java 층이 칠한 그대로 둔다.
+fn paint_region(rope: &Rope, view: &View, marks: &mut Marks, region: &Region) {
+    let range = region.range.clone();
+    let inner = region.inner();
+    if region.kind == JspKind::Comment {
+        view.force(rope, marks, range, Highlight::Comment);
+        return;
+    }
+    view.force(rope, marks, range.start..inner.start, Highlight::Keyword);
+    view.force(rope, marks, inner.end..range.end, Highlight::Keyword);
+    match region.kind {
+        JspKind::El => view.force(rope, marks, inner, Highlight::Property),
+        JspKind::Directive => {
+            // `<%@ page contentType="…" %>`: 지시자 이름은 키워드, 따옴표 값은 문자열.
+            let text = rope.byte_slice(inner.clone()).to_string();
+            let name_len = text
+                .trim_start()
+                .find(char::is_whitespace)
+                .unwrap_or(text.trim_start().len());
+            let name_start = inner.start + (text.len() - text.trim_start().len());
+            view.force(
+                rope,
+                marks,
+                name_start..name_start + name_len,
+                Highlight::Keyword,
+            );
+            let mut quote: Option<(char, usize)> = None;
+            for (i, c) in text.char_indices() {
+                match quote {
+                    Some((q, start)) if c == q => {
+                        view.force(
+                            rope,
+                            marks,
+                            inner.start + start..inner.start + i + 1,
+                            Highlight::String,
+                        );
+                        quote = None;
+                    }
+                    None if c == '"' || c == '\'' => quote = Some((c, i)),
+                    _ => {}
+                }
+            }
+        }
+        _ => {}
     }
 }
 
@@ -452,5 +600,64 @@ mod tests {
         assert_eq!(Lang::from_path(Path::new("mapper.xml")), Some(Lang::Xml));
         assert_eq!(Lang::from_path(Path::new("Cargo.lock")), Some(Lang::Toml));
         assert_eq!(Lang::from_path(Path::new("README")), None);
+    }
+
+    #[test]
+    fn jsp는_html과_스크립틀릿_java와_el을_함께_칠한다() {
+        let text = "<%@ page contentType=\"text/html\" %>\n<p class=\"t\">${vo.title}</p>\n<% String s = \"한글\"; %>\n<%-- 주석 --%>\n";
+        let mut buffer = Buffer::new(text);
+        buffer.set_track_syntax_edits(true);
+        let mut syntax = Syntax::new(Lang::Jsp).unwrap();
+        syntax.update(&mut buffer);
+        let line = |n| kinds_on_line(&syntax, &buffer, n);
+        let directive = line(0);
+        assert!(
+            directive.contains(&("page".into(), Highlight::Keyword)),
+            "{directive:?}"
+        );
+        assert!(
+            directive.contains(&("\"text/html\"".into(), Highlight::String)),
+            "{directive:?}"
+        );
+        let html = line(1);
+        assert!(
+            html.contains(&("p".into(), Highlight::Tag)),
+            "HTML 층: {html:?}"
+        );
+        assert!(
+            html.contains(&("${".into(), Highlight::Keyword)),
+            "{html:?}"
+        );
+        assert!(
+            html.contains(&("vo.title".into(), Highlight::Property)),
+            "EL: {html:?}"
+        );
+        let java = line(2);
+        assert!(
+            java.contains(&("\"한글\"".into(), Highlight::String)),
+            "Java 층: {java:?}"
+        );
+        assert!(
+            java.contains(&("<%".into(), Highlight::Keyword)),
+            "{java:?}"
+        );
+        assert_eq!(line(3), [("<%-- 주석 --%>".into(), Highlight::Comment)]);
+    }
+
+    #[test]
+    fn jsp는_편집하면_구간을_다시_찾는다() {
+        let mut buffer = Buffer::new("<p>a</p>");
+        buffer.set_track_syntax_edits(true);
+        let mut syntax = Syntax::new(Lang::Jsp).unwrap();
+        syntax.update(&mut buffer);
+        buffer.set_selection(Selection::caret(0));
+        buffer.insert("<%-- ", Instant::now());
+        syntax.update(&mut buffer);
+        assert_eq!(
+            kinds_on_line(&syntax, &buffer, 0),
+            vec![("<%-- <p>a</p>".into(), Highlight::Comment)],
+            "닫히지 않은 JSP 주석은 끝까지"
+        );
+        assert_eq!(Lang::from_path(Path::new("list.jsp")), Some(Lang::Jsp));
     }
 }
