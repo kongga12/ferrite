@@ -1,0 +1,111 @@
+<?xml version="1.0" encoding="{{xmlEncoding}}"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!-- {{tableCommentDoc}}({{dbTableName}}), 대상 DB: {{dbLabel}} -->
+<mapper namespace="{{packageName}}.service.impl.{{className}}Mapper">
+
+	<resultMap id="{{classNameFirstCharLower}}" type="{{packageName}}.service.{{className}}VO">
+{{#each attributes}}
+		<{{#if isPrimaryKey}}id{{else}}result{{/if}} property="{{ccName}}" column="{{columnName}}"/>
+{{/each}}
+	</resultMap>
+
+	<!-- 검색: searchCondition은 화면의 검색 항목 번호다. 값은 모두 #{}로 묶는다. -->
+	<sql id="searchCondition">
+		<if test="searchKeyword != null and searchKeyword != ''">
+			<choose>
+{{#each searchAttributes}}
+				<when test='searchCondition == "{{index}}"'>
+					AND {{columnName}} LIKE {{#if @root.concatFunction}}CONCAT('%', {{concat "#{" "searchKeyword" "}"}}, '%'){{else}}'%' || {{concat "#{" "searchKeyword" "}"}} || '%'{{/if}}
+				</when>
+{{/each}}
+			</choose>
+		</if>
+	</sql>
+
+	<insert id="insert{{className}}" parameterType="{{packageName}}.service.{{className}}VO">
+		INSERT INTO {{dbTableName}} (
+{{#each attributes}}
+			{{#unless @first}}, {{/unless}}{{columnName}}
+{{/each}}
+		) VALUES (
+{{#each attributes}}
+			{{#unless @first}}, {{/unless}}{{concat "#{" ccName ",jdbcType=" jdbcType "}"}}
+{{/each}}
+		)
+	</insert>
+
+	<update id="update{{className}}" parameterType="{{packageName}}.service.{{className}}VO">
+		UPDATE {{dbTableName}}
+		<set>
+{{#each nonPkAttributes}}
+			{{columnName}} = {{concat "#{" ccName ",jdbcType=" jdbcType "}"}},
+{{/each}}
+		</set>
+		WHERE
+{{#each pkAttributes}}
+			{{#unless @first}}AND {{/unless}}{{columnName}} = {{concat "#{" ccName "}"}}
+{{/each}}
+	</update>
+
+	<delete id="delete{{className}}" parameterType="{{packageName}}.service.{{className}}VO">
+		DELETE FROM {{dbTableName}}
+		WHERE
+{{#each pkAttributes}}
+			{{#unless @first}}AND {{/unless}}{{columnName}} = {{concat "#{" ccName "}"}}
+{{/each}}
+	</delete>
+
+	<select id="select{{className}}" parameterType="{{packageName}}.service.{{className}}VO" resultMap="{{classNameFirstCharLower}}">
+		SELECT
+{{#each attributes}}
+			{{#unless @first}}, {{/unless}}{{columnName}}
+{{/each}}
+		FROM {{dbTableName}}
+		WHERE
+{{#each pkAttributes}}
+			{{#unless @first}}AND {{/unless}}{{columnName}} = {{concat "#{" ccName "}"}}
+{{/each}}
+	</select>
+
+	<select id="select{{className}}List" parameterType="{{packageName}}.service.{{className}}DefaultVO" resultMap="{{classNameFirstCharLower}}">
+{{#if oracleLike}}
+		SELECT * FROM (
+			SELECT ROWNUM RNUM, A.* FROM (
+				SELECT
+{{#each attributes}}
+					{{#unless @first}}, {{/unless}}{{columnName}}
+{{/each}}
+				FROM {{dbTableName}}
+				WHERE 1 = 1
+				<include refid="searchCondition"/>
+				ORDER BY {{#each pkAttributes}}{{#unless @first}}, {{/unless}}{{columnName}} DESC{{/each}}
+			) A
+			WHERE ROWNUM &lt;= #{lastIndex}
+		)
+		WHERE RNUM &gt; #{firstIndex}
+{{else}}
+		SELECT
+{{#each attributes}}
+			{{#unless @first}}, {{/unless}}{{columnName}}
+{{/each}}
+		FROM {{dbTableName}}
+		WHERE 1 = 1
+		<include refid="searchCondition"/>
+		ORDER BY {{#each pkAttributes}}{{#unless @first}}, {{/unless}}{{columnName}} DESC{{/each}}
+{{#if limitOffset}}
+		LIMIT #{recordCountPerPage} OFFSET #{firstIndex}
+{{/if}}
+{{#if limitComma}}
+		LIMIT #{firstIndex}, #{recordCountPerPage}
+{{/if}}
+{{/if}}
+	</select>
+
+	<select id="select{{className}}ListTotCnt" parameterType="{{packageName}}.service.{{className}}DefaultVO" resultType="int">
+		SELECT COUNT(*)
+		FROM {{dbTableName}}
+		WHERE 1 = 1
+		<include refid="searchCondition"/>
+	</select>
+
+</mapper>

@@ -1,0 +1,71 @@
+<%@ page contentType="text/html; charset=UTF-8" pageEncoding="{{fileEncoding}}" %>
+<%@ taglib prefix="c" uri="http://java.sun.com/jsp/jstl/core" %>
+<%@ taglib prefix="fn" uri="http://java.sun.com/jsp/jstl/functions" %>
+<%@ taglib prefix="ui" uri="http://egovframework.gov/ctl/ui" %>
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<title>{{tableCommentHtml}} 목록</title>
+<script>
+/* 페이지 번호를 눌렀을 때(ui:pagination의 jsFunction) */
+function fn_link_page(pageNo) {
+	var form = document.getElementById("listForm");
+	form.pageIndex.value = pageNo;
+	form.submit();
+}
+</script>
+</head>
+<body>
+<h2>{{tableCommentHtml}} 목록</h2>
+
+<form id="listForm" method="get" action="<c:url value='{{listPath}}'/>">
+	<input type="hidden" name="pageIndex" value="1">
+{{#if searchAttributes}}
+	<select name="searchCondition" title="검색 항목">
+{{#each searchAttributes}}
+		<option value="{{index}}"<c:if test="${searchVO.searchCondition == '{{index}}'}"> selected</c:if>>{{labelHtml}}</option>
+{{/each}}
+	</select>
+	<input type="text" name="searchKeyword" title="검색어" value="${fn:escapeXml(searchVO.searchKeyword)}">
+	<button type="submit">검색</button>
+{{/if}}
+	<a href="<c:url value='{{addViewPath}}'/>">등록</a>
+</form>
+
+<table border="1">
+	<thead>
+		<tr>
+{{#each listAttributes}}
+			<th scope="col">{{labelHtml}}</th>
+{{/each}}
+		</tr>
+	</thead>
+	<tbody>
+		<c:forEach var="result" items="${resultList}">
+			<c:url var="viewUrl" value="{{updateViewPath}}">
+{{#each pkAttributes}}
+				<c:param name="{{ccName}}" value="${result.{{ccName}}}"/>
+{{/each}}
+			</c:url>
+			<tr>
+{{#each listAttributes}}
+{{#if isPrimaryKey}}
+				<td><a href="${fn:escapeXml(viewUrl)}"><c:out value="${result.{{ccName}}}"/></a></td>
+{{else}}
+				<td><c:out value="${result.{{ccName}}}"/></td>
+{{/if}}
+{{/each}}
+			</tr>
+		</c:forEach>
+		<c:if test="${empty resultList}">
+			<tr><td colspan="{{listColumnCount}}">자료가 없습니다.</td></tr>
+		</c:if>
+	</tbody>
+</table>
+
+<div class="pagination">
+	<ui:pagination paginationInfo="${paginationInfo}" type="image" jsFunction="fn_link_page"/>
+</div>
+</body>
+</html>

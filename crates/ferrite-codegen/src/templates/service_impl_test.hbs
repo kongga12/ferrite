@@ -1,0 +1,83 @@
+package {{packageName}}.service.impl;
+
+{{#if junit5}}
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertSame;
+{{else}}
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertSame;
+{{/if}}
+
+import java.util.ArrayList;
+import java.util.List;
+
+{{#if junit5}}
+import org.junit.jupiter.api.Test;
+{{else}}
+import org.junit.Test;
+{{/if}}
+import org.springframework.test.util.ReflectionTestUtils;
+
+import {{packageName}}.service.{{className}}DefaultVO;
+import {{packageName}}.service.{{className}}VO;
+
+/**
+ * {{className}}ServiceImpl 단위 테스트. DB 없이 가짜 Mapper로 서비스 흐름만 본다.
+ *
+ * @author {{author}}
+ * @since {{date}}
+ */
+public class {{className}}ServiceImplTest {
+
+	/** 등록한 행을 메모리에 두는 가짜 Mapper. */
+	private static class FakeMapper implements {{className}}Mapper {
+		private final List<{{className}}VO> rows = new ArrayList<{{className}}VO>();
+
+		@Override
+		public void insert{{className}}({{className}}VO vo) {
+			rows.add(vo);
+		}
+
+		@Override
+		public int update{{className}}({{className}}VO vo) {
+			return rows.isEmpty() ? 0 : 1;
+		}
+
+		@Override
+		public int delete{{className}}({{className}}VO vo) {
+			return rows.remove(vo) ? 1 : 0;
+		}
+
+		@Override
+		public {{className}}VO select{{className}}({{className}}VO vo) {
+			return rows.contains(vo) ? vo : null;
+		}
+
+		@Override
+		public List<{{className}}VO> select{{className}}List({{className}}DefaultVO searchVO) {
+			return rows;
+		}
+
+		@Override
+		public int select{{className}}ListTotCnt({{className}}DefaultVO searchVO) {
+			return rows.size();
+		}
+	}
+
+	@Test
+	public void insertThenListAndCount() throws Exception {
+		{{className}}ServiceImpl service = new {{className}}ServiceImpl();
+		ReflectionTestUtils.setField(service, "{{classNameFirstCharLower}}Mapper", new FakeMapper());
+
+		{{className}}VO vo = new {{className}}VO();
+		service.insert{{className}}(vo);
+
+		{{className}}DefaultVO searchVO = new {{className}}DefaultVO();
+		assertEquals(1, service.select{{className}}List(searchVO).size());
+		assertEquals(1, service.select{{className}}ListTotCnt(searchVO));
+		assertSame(vo, service.select{{className}}(vo));
+
+		service.delete{{className}}(vo);
+		assertEquals(0, service.select{{className}}ListTotCnt(searchVO));
+	}
+}

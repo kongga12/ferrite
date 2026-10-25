@@ -115,7 +115,7 @@ fn el_outputs(text: &str, region: &Region) -> bool {
 }
 
 /// 태그 텍스트에서 속성값(따옴표 안). 이름은 대소문자를 가리지 않는다.
-pub(crate) fn attribute<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
+pub fn attribute<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
     attribute_range(tag, name).map(|range| &tag[range])
 }
 

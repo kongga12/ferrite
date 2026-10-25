@@ -1,0 +1,37 @@
+package {{packageName}}.service.impl;
+
+import java.util.List;
+
+import {{rte}}.psl.dataaccess.mapper.Mapper;
+
+import {{packageName}}.service.{{className}}DefaultVO;
+import {{packageName}}.service.{{className}}VO;
+
+/**
+ * {{tableCommentDoc}} 데이터 처리 매퍼. SQL은 {{className}}_SQL_*.xml(namespace = 이 인터페이스)에 있다.
+ *
+ * @author {{author}}
+ * @since {{date}}
+ * @version {{version}}
+ */
+@Mapper("{{classNameFirstCharLower}}Mapper")
+public interface {{className}}Mapper {
+
+	/** 한 건을 등록한다. */
+	void insert{{className}}({{className}}VO vo) throws Exception;
+
+	/** 한 건을 수정한다. 수정한 행 수를 돌려준다. */
+	int update{{className}}({{className}}VO vo) throws Exception;
+
+	/** 한 건을 삭제한다. 삭제한 행 수를 돌려준다. */
+	int delete{{className}}({{className}}VO vo) throws Exception;
+
+	/** 기본 키로 한 건을 조회한다. 없으면 null. */
+	{{className}}VO select{{className}}({{className}}VO vo) throws Exception;
+
+	/** 검색 조건에 맞는 목록을 한 페이지만큼 조회한다. */
+	List<{{className}}VO> select{{className}}List({{className}}DefaultVO searchVO) throws Exception;
+
+	/** 검색 조건에 맞는 전체 건수. */
+	int select{{className}}ListTotCnt({{className}}DefaultVO searchVO) throws Exception;
+}

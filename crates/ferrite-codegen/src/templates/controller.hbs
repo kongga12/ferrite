@@ -1,0 +1,140 @@
+package {{packageName}}.web;
+
+import java.util.List;
+
+import javax.annotation.Resource;
+
+import org.springframework.stereotype.Controller;
+import org.springframework.ui.Model;
+import org.springframework.validation.BindingResult;
+import org.springframework.web.bind.annotation.ModelAttribute;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestMethod;
+
+import {{rte}}.ptl.mvc.tags.ui.pagination.PaginationInfo;
+
+import {{packageName}}.service.{{className}}DefaultVO;
+import {{packageName}}.service.{{className}}Service;
+import {{packageName}}.service.{{className}}VO;
+
+/**
+ * {{tableCommentDoc}} 화면 컨트롤러.
+ *
+ * @author {{author}}
+ * @since {{date}}
+ * @version {{version}}
+ */
+@Controller
+public class {{className}}Controller {
+
+	private static final String LIST_VIEW = "{{classNameFirstCharLower}}/{{classNameFirstCharLower}}List";
+	private static final String REGISTER_VIEW = "{{classNameFirstCharLower}}/{{classNameFirstCharLower}}Register";
+	private static final String REDIRECT_LIST = "redirect:{{listPath}}";
+	/** 한 페이지 목록 수의 상한(요청 값으로 큰 페이지를 만들지 못하게). */
+	private static final int MAX_PAGE_UNIT = 100;
+
+	@Resource(name = "{{classNameFirstCharLower}}Service")
+	private {{className}}Service {{classNameFirstCharLower}}Service;
+
+	/** 목록 */
+	@RequestMapping(value = "{{listPath}}")
+	public String select{{className}}List(@ModelAttribute("searchVO") {{className}}DefaultVO searchVO, Model model) throws Exception {
+		searchVO.setPageIndex(Math.max(1, searchVO.getPageIndex()));
+		searchVO.setPageUnit(Math.min(MAX_PAGE_UNIT, Math.max(1, searchVO.getPageUnit())));
+		searchVO.setPageSize(Math.min(MAX_PAGE_UNIT, Math.max(1, searchVO.getPageSize())));
+
+		PaginationInfo paginationInfo = new PaginationInfo();
+		paginationInfo.setCurrentPageNo(searchVO.getPageIndex());
+		paginationInfo.setRecordCountPerPage(searchVO.getPageUnit());
+		paginationInfo.setPageSize(searchVO.getPageSize());
+
+		searchVO.setFirstIndex(paginationInfo.getFirstRecordIndex());
+		searchVO.setLastIndex(paginationInfo.getLastRecordIndex());
+		searchVO.setRecordCountPerPage(paginationInfo.getRecordCountPerPage());
+
+		List<{{className}}VO> resultList = {{classNameFirstCharLower}}Service.select{{className}}List(searchVO);
+		model.addAttribute("resultList", resultList);
+
+		int totCnt = {{classNameFirstCharLower}}Service.select{{className}}ListTotCnt(searchVO);
+		paginationInfo.setTotalRecordCount(totCnt);
+		model.addAttribute("paginationInfo", paginationInfo);
+		return LIST_VIEW;
+	}
+
+	/** 등록 화면 */
+	@RequestMapping(value = "{{addViewPath}}", method = RequestMethod.GET)
+	public String add{{className}}View(@ModelAttribute("searchVO") {{className}}DefaultVO searchVO, Model model) throws Exception {
+		model.addAttribute("{{voInstanceName}}", new {{className}}VO());
+		model.addAttribute("registerFlag", "create");
+		return REGISTER_VIEW;
+	}
+
+	/** 등록 */
+	@RequestMapping(value = "{{addPath}}", method = RequestMethod.POST)
+	public String add{{className}}(@ModelAttribute("searchVO") {{className}}DefaultVO searchVO,
+			@ModelAttribute("{{voInstanceName}}") {{className}}VO {{voInstanceName}}, BindingResult bindingResult, Model model)
+			throws Exception {
+		validate({{voInstanceName}}, bindingResult);
+		if (bindingResult.hasErrors()) {
+			model.addAttribute("registerFlag", "create");
+			return REGISTER_VIEW;
+		}
+		{{classNameFirstCharLower}}Service.insert{{className}}({{voInstanceName}});
+		return REDIRECT_LIST;
+	}
+
+	/** 수정 화면 */
+	@RequestMapping(value = "{{updateViewPath}}")
+	public String update{{className}}View(@ModelAttribute("searchVO") {{className}}DefaultVO searchVO,
+			@ModelAttribute("key") {{className}}VO key, Model model) throws Exception {
+		model.addAttribute("{{voInstanceName}}", {{classNameFirstCharLower}}Service.select{{className}}(key));
+		model.addAttribute("registerFlag", "modify");
+		return REGISTER_VIEW;
+	}
+
+	/** 수정 */
+	@RequestMapping(value = "{{updatePath}}", method = RequestMethod.POST)
+	public String update{{className}}(@ModelAttribute("searchVO") {{className}}DefaultVO searchVO,
+			@ModelAttribute("{{voInstanceName}}") {{className}}VO {{voInstanceName}}, BindingResult bindingResult, Model model)
+			throws Exception {
+		validate({{voInstanceName}}, bindingResult);
+		if (bindingResult.hasErrors()) {
+			model.addAttribute("registerFlag", "modify");
+			return REGISTER_VIEW;
+		}
+		{{classNameFirstCharLower}}Service.update{{className}}({{voInstanceName}});
+		return REDIRECT_LIST;
+	}
+
+	/** 삭제 */
+	@RequestMapping(value = "{{deletePath}}", method = RequestMethod.POST)
+	public String delete{{className}}(@ModelAttribute("searchVO") {{className}}DefaultVO searchVO,
+			@ModelAttribute("{{voInstanceName}}") {{className}}VO {{voInstanceName}}) throws Exception {
+		{{classNameFirstCharLower}}Service.delete{{className}}({{voInstanceName}});
+		return REDIRECT_LIST;
+	}
+
+	/** 입력값 검증(필수·길이). 화면의 maxlength와 별개로 서버에서 다시 본다. */
+	private void validate({{className}}VO vo, BindingResult bindingResult) {
+{{#each formAttributes}}
+{{#if isString}}
+{{#if notNull}}
+		if (vo.get{{pcName}}() == null || vo.get{{pcName}}().trim().isEmpty()) {
+			bindingResult.rejectValue("{{ccName}}", "required", "{{labelJava}}을(를) 입력하세요.");
+		}
+{{/if}}
+{{#if maxLength}}
+		if (vo.get{{pcName}}() != null && vo.get{{pcName}}().length() > {{maxLength}}) {
+			bindingResult.rejectValue("{{ccName}}", "maxlength", "{{labelJava}}은(는) {{maxLength}}자 이하로 입력하세요.");
+		}
+{{/if}}
+{{else}}
+{{#if notNull}}
+		if (vo.get{{pcName}}() == null && !bindingResult.hasFieldErrors("{{ccName}}")) {
+			bindingResult.rejectValue("{{ccName}}", "required", "{{labelJava}}을(를) 입력하세요.");
+		}
+{{/if}}
+{{/if}}
+{{/each}}
+	}
+}

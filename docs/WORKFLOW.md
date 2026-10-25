@@ -350,6 +350,37 @@
 - Web·Boot Web 템플릿으로 만든 프로젝트가 3개 OS에서 `mvn package`를 통과한다.
 - CRUD 생성 결과가 컴파일되고, 생성된 매퍼 XML이 Phase 2b 진단을 경고 없이 통과한다.
 
+**진행 단계**:
+- [x] 2c-1 CRUD 코드 생성(`ferrite-codegen`, 도구 > egov CRUD 코드 생성)
+  - 입력: `CREATE TABLE` DDL을 붙여 넣거나 필드를 직접 입력한다. 화면에서 열·필드 이름, Java 타입, 키, 필수, 길이, 설명을 고친다.
+    - DDL: Oracle·Tibero·PostgreSQL·MariaDB·CUBRID 모양. 표 제약 `PRIMARY KEY (…)`, MySQL `COMMENT`, `COMMENT ON COLUMN`을 읽는다.
+    - 타입: 공식 확장의 표를 따르되 `NUMBER(p,s)`는 자릿수로 고르고(≤9 Integer, ≤18 Long, 소수 BigDecimal), CLOB·NVARCHAR2·BLOB 등을 보탰다.
+  - 만드는 것: VO·검색 VO, Mapper 인터페이스·XML, Service·ServiceImpl, Controller, JSP 목록·등록(수정), ServiceImpl 테스트(가짜 Mapper)
+    - 실행환경 3.x(`egovframework.rte`)·4.x(`org.egovframe.rte`). 4.3도 `@Mapper`를 쓴다(`@EgovMapper`는 5.x).
+    - 매퍼 SQL은 DB마다 다르다: Oracle·Tibero `ROWNUM`, PostgreSQL `LIMIT … OFFSET`, MariaDB·CUBRID `LIMIT a, b`, MariaDB `CONCAT` LIKE. 값은 모두 `#{}`이고 `jdbcType`을 붙인다(Oracle의 null 값 오류 방지).
+    - Controller는 입력값을 서버에서 다시 검증한다(필수·길이, `BindingResult`). 한 페이지 목록 수에 상한을 둔다.
+    - JSP는 출력을 모두 이스케이프한다(`<c:out>`, `fn:escapeXml`, `form:*`의 `htmlEscape`).
+    - DDL의 설명은 Java 문자열·Javadoc·HTML에 맞게 이스케이프한다.
+  - 템플릿은 Ferrite가 직접 썼다. 문맥 이름과 도우미(`concat`·`setVar`·`eq` 등)는 공식 VS Code 확장과 같다.
+    - 그래서 공식 템플릿이나 고친 템플릿을 프로젝트의 `.ferrite/templates/code/`에 두면 그것으로 만든다.
+    - JS Handlebars의 `배열.length`는 handlebars-rust가 못 읽어, 읽을 때 `len` 도우미로 바꾼다.
+  - 프로젝트에서 기본값을 찾는다.
+    - 실행환경 버전, DB(`Globals.DbType`·JDBC URL), JUnit 4·5, 인코딩(pom의 `sourceEncoding`, 없으면 기존 Java 파일), 줄바꿈
+    - 기능 패키지: 가장 많은 `….service` 패키지의 부모 + 클래스 이름
+    - 매퍼 폴더·파일 이름: MyBatis `mapperLocations`를 따른다(MyBatis가 읽는 곳에 두려고). 예: `mapper/**/*_SQL_${Globals.DbType}.xml` → `mapper/{기능}/{클래스}_SQL_{db}.xml`. 없으면 매퍼가 가장 많은 폴더와 그 이름 모양. `mapperLocations`가 파일을 하나씩 적는 방식이면 목록에 더하라고 알린다.
+    - JSP 폴더: 웹 루트 + 뷰 리졸버 접두사. 웹 루트가 여럿이면(배포용 사본) `webapp`·`WebContent`를 먼저 고른다.
+    - `WEB-INF/classes`(빌드 결과물)는 보지 않는다.
+  - 파일은 프로젝트 인코딩(UTF-8·MS949)과 줄바꿈으로 쓴다. JSP `pageEncoding`, XML 선언도 맞춘다. 이미 있는 파일은 덮어쓰기를 골라야 쓴다.
+  - 검증
+    - 만든 매퍼 XML을 DB 5종 모두 2b 진단에 돌려 경고 0, JSP XSS 경고 0
+    - 로컬: `javac`로 egov 3.10(Spring 4.3, `--release 8`)·4.3(Spring 5.3, `--release 11`) jar에 대고 컴파일 성공. 3.x는 만든 JUnit 테스트도 실행해 통과
+    - 로컬: 공식 확장의 CRUD 템플릿을 Ferrite로 렌더링(`setVar`로 만드는 SET 절 확인). 확장 파일은 저장소에 넣지 않는다.
+    - 로컬 코퍼스 23개 프로젝트에서 기본값을 확인했다. 이 검사로 한글 글자 중간에서 자르는 패닉과 `WEB-INF/classes`를 고르는 문제를 고쳤다.
+  - 미룸: Thymeleaf 화면, 기본 키 생성(ID 생성 서비스·시퀀스. 2c-2 설정 생성과 함께), egov 5.x(`@EgovMapper`·jakarta), DB 테이블에서 바로 생성(Phase 5)
+- [ ] 2c-2 설정 파일 생성(Datasource·Transaction·ID 생성·Logging·Scheduling·Cache·Property, 출력 XML·Java Config·YAML·properties)
+- [ ] 2c-3 새 egov 프로젝트 마법사(공식 템플릿 버전 고정 다운로드·체크섬, Web·Boot Web `mvn package` 확인)
+- [ ] 2c-4 공통컴포넌트 추가
+
 ### Phase 3 — 프로젝트 도구
 
 - 통합 터미널: portable-pty + alacritty_terminal. 여러 탭 지원. Windows ConPTY 검증

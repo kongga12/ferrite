@@ -1,0 +1,103 @@
+package {{packageName}}.service;
+
+import java.io.Serializable;
+
+/**
+ * {{tableCommentDoc}} 검색 조건과 페이징 정보.
+ *
+ * @author {{author}}
+ * @since {{date}}
+ * @version {{version}}
+ */
+public class {{className}}DefaultVO implements Serializable {
+
+	private static final long serialVersionUID = 1L;
+
+	/** 검색 조건(검색할 항목의 번호) */
+	private String searchCondition = "";
+
+	/** 검색어 */
+	private String searchKeyword = "";
+
+	/** 현재 페이지 번호(1부터) */
+	private int pageIndex = 1;
+
+	/** 한 페이지의 목록 수 */
+	private int pageUnit = 10;
+
+	/** 페이지 번호 목록의 크기 */
+	private int pageSize = 10;
+
+	/** 첫 행 위치(0부터) */
+	private int firstIndex = 0;
+
+	/** 마지막 행 위치 */
+	private int lastIndex = 1;
+
+	/** 한 페이지의 행 수 */
+	private int recordCountPerPage = 10;
+
+	public String getSearchCondition() {
+		return searchCondition;
+	}
+
+	public void setSearchCondition(String searchCondition) {
+		this.searchCondition = searchCondition;
+	}
+
+	public String getSearchKeyword() {
+		return searchKeyword;
+	}
+
+	public void setSearchKeyword(String searchKeyword) {
+		this.searchKeyword = searchKeyword;
+	}
+
+	public int getPageIndex() {
+		return pageIndex;
+	}
+
+	public void setPageIndex(int pageIndex) {
+		this.pageIndex = pageIndex;
+	}
+
+	public int getPageUnit() {
+		return pageUnit;
+	}
+
+	public void setPageUnit(int pageUnit) {
+		this.pageUnit = pageUnit;
+	}
+
+	public int getPageSize() {
+		return pageSize;
+	}
+
+	public void setPageSize(int pageSize) {
+		this.pageSize = pageSize;
+	}
+
+	public int getFirstIndex() {
+		return firstIndex;
+	}
+
+	public void setFirstIndex(int firstIndex) {
+		this.firstIndex = firstIndex;
+	}
+
+	public int getLastIndex() {
+		return lastIndex;
+	}
+
+	public void setLastIndex(int lastIndex) {
+		this.lastIndex = lastIndex;
+	}
+
+	public int getRecordCountPerPage() {
+		return recordCountPerPage;
+	}
+
+	public void setRecordCountPerPage(int recordCountPerPage) {
+		this.recordCountPerPage = recordCountPerPage;
+	}
+}
