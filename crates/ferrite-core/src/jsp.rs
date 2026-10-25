@@ -72,17 +72,55 @@ impl Region {
     }
 }
 
+/// 커서 자리에 열려 있는 여는 태그(`<c:out value="…" ` 처럼 아직 `>`가 오지 않은 것).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OpenTag {
+    /// `<`의 위치.
+    pub start: usize,
+    /// 태그 이름 전체(커서 뒤까지 이어진 부분 포함).
+    pub name: String,
+    /// 커서가 속성값 따옴표 안에 있다.
+    pub in_value: bool,
+}
+
 /// 문서의 JSP 구간을 앞에서부터 찾는다. 닫히지 않은 구간은 문서 끝까지다.
 pub fn regions(text: &str) -> Vec<Region> {
+    scan(text, text.len()).regions
+}
+
+/// `offset`에 열려 있는 여는 태그. 커서가 JSP 구간(EL·스크립틀릿 등) 안이거나 태그 밖이면 None.
+pub fn open_tag_at(text: &str, offset: usize) -> Option<OpenTag> {
+    let state = scan(text, offset.min(text.len()));
+    if state.inside_region {
+        return None;
+    }
+    state.tag.map(|(start, name)| OpenTag {
+        start,
+        name,
+        in_value: state.quote.is_some(),
+    })
+}
+
+struct Scan {
+    regions: Vec<Region>,
+    /// 멈춘 자리에 열려 있는 여는 태그(시작 위치, 이름)와 그 안의 따옴표.
+    tag: Option<(usize, String)>,
+    quote: Option<u8>,
+    /// 멈춘 자리가 JSP 구간 안이다.
+    inside_region: bool,
+}
+
+/// `until`까지 앞에서부터 훑는다. 구간 찾기와 커서 자리 판단이 같은 규칙을 쓰게 한 곳에 둔다.
+fn scan(text: &str, until: usize) -> Scan {
     let bytes = text.as_bytes();
     let mut found = Vec::new();
-    // 지금 열려 있는 HTML 여는 태그(시작 위치, 이름)와 그 안의 따옴표.
     let mut tag: Option<(usize, String)> = None;
     let mut quote: Option<u8> = None;
     // `<script>`·`<style>` 안이면 그 이름.
     let mut raw: Option<&'static str> = None;
+    let mut inside_region = false;
     let mut i = 0;
-    while i < bytes.len() {
+    while i < until {
         let rest = &text[i..];
         let context = || match (&tag, raw) {
             (Some((start, name)), _) => Context::Attribute {
@@ -110,6 +148,7 @@ pub fn regions(text: &str) -> Vec<Region> {
                 context: context(),
                 closed: close_at.is_some(),
             });
+            inside_region = end > until || (end == until && close_at.is_none());
             i = end;
             continue;
         }
@@ -124,6 +163,8 @@ pub fn regions(text: &str) -> Vec<Region> {
                 context: context(),
                 closed: bytes.get(end.wrapping_sub(1)) == Some(&b'}'),
             });
+            inside_region =
+                end > until || (end == until && bytes.get(end.wrapping_sub(1)) != Some(&b'}'));
             i = end;
             continue;
         }
@@ -132,6 +173,13 @@ pub fn regions(text: &str) -> Vec<Region> {
             match (quote, byte) {
                 (Some(q), b) if b == q => quote = None,
                 (None, b'"' | b'\'') => quote = Some(byte),
+                // 따옴표 밖의 `<이름`은 새 태그다(입력 중이라 앞 태그가 아직 닫히지 않은 경우).
+                (None, b'<') if tag_name(&rest[1..]).is_some() => {
+                    let name = tag_name(&rest[1..]).unwrap_or_default();
+                    tag = Some((i, name.to_owned()));
+                    i += 1 + name.len();
+                    continue;
+                }
                 (None, b'>') => {
                     let (start, name) = tag.take().unwrap_or_default();
                     let self_closing = i > start && bytes[i - 1] == b'/';
@@ -162,7 +210,12 @@ pub fn regions(text: &str) -> Vec<Region> {
         }
         i += rest.chars().next().map_or(1, char::len_utf8);
     }
-    found
+    Scan {
+        regions: found,
+        tag,
+        quote,
+        inside_region,
+    }
 }
 
 /// 여는 태그의 이름(`<c:out` → `c:out`). 닫는 태그(`</…`)·선언(`<!…`)은 None.
@@ -336,6 +389,31 @@ mod tests {
             "태그 안 한글에서 글자 중간을 자르지 않는다"
         );
         assert_eq!(found[1].context, Context::Text);
+    }
+
+    #[test]
+    fn 커서_자리의_열린_태그를_안다() {
+        let text = r#"<c:out value="${a}" esc <p>x</p> <form:input path="t" ${b}"#;
+        let at = |needle: &str| text.find(needle).unwrap() + needle.len();
+        let tag = open_tag_at(text, at("esc")).unwrap();
+        assert_eq!(
+            (tag.start, tag.name.as_str(), tag.in_value),
+            (0, "c:out", false)
+        );
+        assert!(
+            open_tag_at(text, at("value=\"$")).is_none(),
+            "EL 안은 태그 자리가 아니다"
+        );
+        assert!(open_tag_at(text, at("value=\"")).unwrap().in_value);
+        assert_eq!(
+            open_tag_at(text, at("<form:in")).unwrap().name,
+            "form:input"
+        );
+        assert!(open_tag_at(text, at("<p>")).is_none(), "닫힌 태그 뒤 본문");
+        assert!(
+            open_tag_at(text, text.len() - 1).is_none(),
+            "닫히지 않은 EL 안"
+        );
     }
 
     #[test]

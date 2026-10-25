@@ -273,7 +273,31 @@
     - 경고 93건은 모두 `param.*`·`request.getParameter`를 그대로 출력하는 자리다.
     - 정보 24,011건(페이지당 약 6.6건). 대문자 상수·반복 상태를 빼서 28,507건에서 줄였다. 남은 것은 대부분 VO 값 출력이다.
     - 이 검사 중 태그 안 한글에서 글자 중간을 자르는 패닉을 찾아 고쳤다.
-- [ ] 2b-5 JSP taglib 완성, include·뷰 이름 → JSP 이동
+- [x] 2b-5 JSP taglib 완성, include·뷰 이름 → JSP 이동
+  - taglib 자동완성(egov 서버)
+    - 태그 이름: `<c`는 선언된 모든 라이브러리의 `접두사:태그`, `<c:o`는 그 접두사의 태그
+    - 속성 이름: 사용자 정의 태그 안(앞이 공백). 필수 속성 먼저, 이미 쓴 속성은 뺀다.
+    - EL 함수: `${fn:le` → `length` 등(서명을 함께 보여 준다)
+    - 선언은 파일 안과 정적 include(`<%@ include file %>`, 깊이 3)로 읽는 공통 파일에서 모은다.
+    - 새 트리거 문자는 없다. 이름 글자를 치면 이미 요청하므로 Java·XML의 동작은 그대로다.
+  - TLD를 찾는 곳(앞이 우선)
+    - 프로젝트의 `.tld` 파일. uri로도, `web.xml`의 `taglib-uri` 매핑이나 `.tld` 경로로도 찾는다.
+    - `WEB-INF/lib`의 jar(`META-INF/**/*.tld`)
+    - 로컬 Maven 저장소의 잘 알려진 jar: JSTL(javax·jakarta), spring-webmvc, egov ptl.mvc(`ui:`), Tiles, Spring Security, Spring Modules(`validator:`), SiteMesh
+      - 저장소 위치는 `~/.m2/settings.xml`의 `localRepository`(전자정부 개발환경처럼 바꾼 경우), 없으면 `~/.m2/repository`
+      - 버전은 pom.xml·build.gradle에 적힌 것을 먼저, 없으면 가장 높은 것
+  - 정의로 이동(F12)
+    - JSP include 경로(지시자 `file`, `jsp:include`·`jsp:forward`의 `page`, `c:import`의 `url`) → 파일. `/`로 시작하면 웹 루트(`WEB-INF`가 있는 폴더) 기준, 아니면 현재 JSP 기준이다.
+    - Java 문자열 뷰 이름(`return "sample/list"`, `new ModelAndView("…")`) → 뷰 리졸버의 접두사·접미사로 찾은 JSP. 파일이 있을 때만 대상이다.
+      - 뷰 리졸버: Spring XML의 `*ViewResolver` 빈(`p:prefix`·`property`), Spring Boot `spring.mvc.view.prefix`·`suffix`
+  - 구간 찾기: 따옴표 밖의 `<이름`은 새 태그로 본다. 입력 중이라 앞 태그가 닫히지 않아도 뒤가 속성으로 잘못 잡히지 않는다.
+  - 코퍼스(로컬, 프로젝트마다 실제 서버를 띄워 확인)
+    - 태그 목록이 나오는 파일: `c:` 2,246/2,319, `form:` 1,051/1,071, `spring:` 773/817, `ui:` 358/361, `validator:` 200/200, `tiles:` 220/221
+      - 못 푼 것은 대부분 다른 JSP에 include되는 조각 파일이다. taglib을 부모가 선언한다.
+    - include 5,854/6,037. 못 푼 것은 `/home.do` 같은 서블릿 URL이다.
+    - 뷰 이름 2,402/3,133. 못 푼 것 중 같은 이름의 JSP가 있는 것은 56건뿐이다.
+      - 나머지는 JSON·엑셀 빈 뷰, Thymeleaf 프로젝트, 뷰가 아닌 문자열이다.
+  - 미룸: tagdir(`.tag` 파일) 태그, 조각 파일을 include하는 부모의 taglib 선언 따라가기, Gradle 캐시의 jar, Java 설정(`@Configuration`)의 뷰 리졸버
 - [ ] 2b-6 Spring XML 설정·JPA 보완(Spring Boot LS가 다루지 못하는 부분)
 
 ### Phase 2c — egov 개발도구 (프로젝트·설정·코드 생성)

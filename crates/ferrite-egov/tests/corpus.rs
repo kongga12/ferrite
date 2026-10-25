@@ -517,3 +517,208 @@ fn 코퍼스의_jsp_el을_빠짐없이_찾고_xss를_센다() {
     }
     assert!(mismatches.is_empty());
 }
+
+/// 응답이 올 때까지 기다린다(그사이 온 진단은 버린다).
+fn response(lsp: &ferrite_lsp::client::LanguageServer, id: i64) -> Option<serde_json::Value> {
+    use ferrite_lsp::client::ServerEvent;
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while Instant::now() < deadline {
+        for event in lsp.poll_events() {
+            match event {
+                ServerEvent::Response { id: got, result } if got == id => return result.ok(),
+                ServerEvent::Exited(reason) => panic!("서버가 끝남: {reason}"),
+                _ => {}
+            }
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    panic!("응답이 오지 않음");
+}
+
+/// 프로젝트(코퍼스 바로 아래 폴더)마다 실제 서버를 띄워, JSP에서 쓰는 taglib 접두사의 태그 목록이
+/// 나오는지, include 경로와 컨트롤러의 뷰 이름이 파일로 이어지는지 센다.
+#[test]
+#[ignore = "로컬 egov 코퍼스가 필요하다(FERRITE_EGOV_CORPUS)"]
+fn 코퍼스의_taglib_include_뷰_이름_연결_통계() {
+    use std::collections::HashMap;
+
+    use ferrite_egov::{java, web};
+    use ferrite_lsp::client::{LanguageServer, ServerCommand};
+    use ferrite_lsp::features::{
+        completion_params, parse_completion, parse_locations, position_params,
+    };
+    use ropey::Rope;
+
+    let Some(root) = std::env::var_os("FERRITE_EGOV_CORPUS") else {
+        eprintln!("FERRITE_EGOV_CORPUS가 없어 건너뜁니다");
+        return;
+    };
+    let read = |path: &Path| {
+        text_file::read(path)
+            .ok()
+            .and_then(|b| text_file::decode(&b).ok())
+            .map(|c| c.text)
+    };
+    // (접두사 → (풀림, 못 풂)), include·뷰는 (풀림, 전체)와 못 푼 예.
+    let mut prefixes: HashMap<String, (usize, usize)> = HashMap::new();
+    let (mut includes, mut views) = ((0, 0), (0, 0));
+    let (mut missed_includes, mut missed_views) = (Vec::new(), Vec::new());
+    // 못 푼 뷰 중 같은 이름의 JSP가 프로젝트에 있는 것(진짜 놓친 것일 수 있다). 없으면 JSON·엑셀
+    // 같은 빈 뷰, Thymeleaf, 뷰가 아닌 문자열이다.
+    let mut views_with_jsp = 0;
+    let started = Instant::now();
+    for project in std::fs::read_dir(&root).unwrap().flatten() {
+        let project = project.path();
+        let jsps = files(&project, &["jsp"]);
+        if !project.is_dir() || jsps.is_empty() {
+            continue;
+        }
+        let command = ServerCommand {
+            program: env!("CARGO_BIN_EXE_ferrite-egov-ls").into(),
+            ..Default::default()
+        };
+        let mut lsp = LanguageServer::start(&command, &project, || {}).unwrap();
+        let encoding = lsp.encoding();
+        for path in &jsps {
+            let Some(text) = read(path) else { continue };
+            // 쓰는 접두사(`<c:`). `jsp:`는 표준 액션이라 taglib이 아니다.
+            let mut used: Vec<String> = text
+                .match_indices('<')
+                .filter_map(|(at, _)| {
+                    let rest = &text[at + 1..];
+                    let len = rest
+                        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'))
+                        .unwrap_or(rest.len());
+                    (len > 0 && rest[len..].starts_with(':')).then(|| rest[..len].to_owned())
+                })
+                .filter(|p| p != "jsp")
+                .collect();
+            used.sort();
+            used.dedup();
+            // 문서 끝에 `<접두사:`를 줄마다 붙여 그 자리에서 자동완성한다.
+            let mut probe = text.clone();
+            let mut sites = Vec::new();
+            for prefix in &used {
+                probe.push_str(&format!("\n<{prefix}:"));
+                sites.push((prefix.clone(), probe.len()));
+            }
+            lsp.did_open(path, "jsp", 1, &probe);
+            let rope = Rope::from_str(&probe);
+            for (prefix, offset) in sites {
+                let params =
+                    completion_params(path, &rope, rope.byte_to_char(offset), encoding, None)
+                        .unwrap();
+                let id = lsp.request("textDocument/completion", params);
+                let found = response(&lsp, id)
+                    .map(|r| !parse_completion(&r, &rope, encoding).items.is_empty())
+                    .unwrap_or(false);
+                let entry = prefixes.entry(prefix).or_default();
+                if found {
+                    entry.0 += 1;
+                } else {
+                    entry.1 += 1;
+                }
+            }
+            // include 경로(EL·URL이 섞인 것은 뺀다). 태그·지시자의 첫 따옴표 안에서 이동해 본다.
+            let starts = ["<%@", "<jsp:include", "<jsp:forward", "<c:import"]
+                .iter()
+                .flat_map(|needle| text.match_indices(needle).map(|(at, _)| at));
+            for start in starts.collect::<Vec<_>>() {
+                let tag_end = text[start..].find('>').map_or(text.len(), |e| start + e);
+                let Some(quote) = text[start..tag_end].find(['"', '\'']).map(|q| start + q) else {
+                    continue;
+                };
+                let Some(value) = web::include_at(&probe, quote + 1) else {
+                    continue;
+                };
+                if value.contains("${") || value.contains("<%") || value.contains("://") {
+                    continue;
+                }
+                let params =
+                    position_params(path, &rope, rope.byte_to_char(quote + 1), encoding).unwrap();
+                let id = lsp.request("textDocument/definition", params);
+                includes.1 += 1;
+                if response(&lsp, id).is_some_and(|r| !parse_locations(&r).is_empty()) {
+                    includes.0 += 1;
+                } else if missed_includes.len() < 10 {
+                    missed_includes.push(value.to_owned());
+                }
+            }
+            lsp.did_close(path);
+        }
+        // 컨트롤러의 `return "뷰";`
+        for path in files(&project, &["java"]) {
+            let Some(text) = read(&path) else { continue };
+            if !text.contains("@Controller") {
+                continue;
+            }
+            let returns: Vec<(usize, String)> = text
+                .match_indices("return \"")
+                .filter_map(|(at, m)| {
+                    let start = at + m.len();
+                    let end = start + text[start..].find('"')?;
+                    let name = &text[start..end];
+                    // 주석 처리한 코드의 return은 문자열이 아니다(Java 파서로 거른다).
+                    (!name.is_empty()
+                        && !name.contains(':')
+                        && !name.contains(char::is_whitespace)
+                        && java::target_at(&text, start + 1).is_some())
+                    .then(|| (start, name.to_owned()))
+                })
+                .collect();
+            if returns.is_empty() {
+                continue;
+            }
+            lsp.did_open(&path, "java", 1, &text);
+            let rope = Rope::from_str(&text);
+            for (start, name) in returns {
+                let params =
+                    position_params(&path, &rope, rope.byte_to_char(start + 1), encoding).unwrap();
+                let id = lsp.request("textDocument/definition", params);
+                views.1 += 1;
+                let found = response(&lsp, id).is_some_and(|r| {
+                    parse_locations(&r)
+                        .iter()
+                        .any(|t| t.path.extension().is_some_and(|e| e == "jsp"))
+                });
+                let tail = format!(
+                    "{}.jsp",
+                    name.trim_matches('/').rsplit('/').next().unwrap_or("")
+                );
+                let has_jsp = jsps.iter().any(|j| {
+                    j.file_name()
+                        .is_some_and(|f| f.to_string_lossy().eq_ignore_ascii_case(&tail))
+                });
+                if found {
+                    views.0 += 1;
+                } else if has_jsp {
+                    views_with_jsp += 1;
+                    if missed_views.len() < 15 {
+                        missed_views.push(format!(
+                            "{}: {name}",
+                            project.file_name().unwrap().to_string_lossy()
+                        ));
+                    }
+                }
+            }
+            lsp.did_close(&path);
+        }
+    }
+    let mut ranked: Vec<_> = prefixes.into_iter().collect();
+    ranked.sort_by_key(|(_, (ok, miss))| std::cmp::Reverse(ok + miss));
+    eprintln!("시간 {:?}", started.elapsed());
+    for (prefix, (ok, miss)) in ranked.iter().take(20) {
+        eprintln!("  접두사 {prefix}: 태그 목록 나옴 {ok}, 안 나옴 {miss} (파일 수)");
+    }
+    eprintln!("include {}/{} 풀림", includes.0, includes.1);
+    for value in &missed_includes {
+        eprintln!("  못 푼 include: {value}");
+    }
+    eprintln!(
+        "뷰 이름 {}/{} 풀림. 못 푼 것 중 같은 이름 JSP가 있는 것 {views_with_jsp}",
+        views.0, views.1
+    );
+    for value in &missed_views {
+        eprintln!("  못 푼 뷰: {value}");
+    }
+}

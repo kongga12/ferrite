@@ -110,16 +110,16 @@ pub fn parse(text: &str) -> Option<Mapper> {
     Some(mapper)
 }
 
-fn children(node: Node<'_>) -> impl Iterator<Item = Node<'_>> {
+pub(crate) fn children(node: Node<'_>) -> impl Iterator<Item = Node<'_>> {
     (0..node.child_count()).filter_map(move |i| node.child(i))
 }
 
 /// 요소의 여는 태그(`<a ...>` 또는 `<a .../>`).
-fn tag_of(element: Node<'_>) -> Option<Node<'_>> {
+pub(crate) fn tag_of(element: Node<'_>) -> Option<Node<'_>> {
     children(element).find(|n| matches!(n.kind(), "STag" | "EmptyElemTag"))
 }
 
-fn tag_name<'t>(tag: Node<'_>, text: &'t str) -> Option<&'t str> {
+pub(crate) fn tag_name<'t>(tag: Node<'_>, text: &'t str) -> Option<&'t str> {
     let name = children(tag).find(|n| n.kind() == "Name")?;
     text.get(name.byte_range())
 }

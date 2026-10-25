@@ -21,6 +21,8 @@ use serde_json::{Value, json};
 use crate::java::{self, JavaFile, Target, TypeDecl};
 use crate::jsp;
 use crate::mapper::{self, Aliases, Context, Dialect, Finding, Index, Kind, Severity};
+use crate::taglib::{self, Library, Site, Tld};
+use crate::web;
 
 const ENCODING: PositionEncoding = PositionEncoding::Utf16;
 /// 클래스 이름 자동완성에서 한 번에 돌려줄 최대 개수. 넘으면 목록이 미완성이라고 알린다.
@@ -47,6 +49,9 @@ const BUILTIN_ALIASES: [&str; 10] = [
     "list",
     "arraylist",
 ];
+
+/// taglib 선언을 따라 읽는 정적 include의 깊이(공통 taglib 파일이 또 다른 파일을 include하는 경우).
+const MAX_INCLUDE_DEPTH: usize = 3;
 
 /// 색인할 때 건너뛰는 폴더(빌드 결과물·도구 폴더). 빌드 결과물에는 같은 매퍼의 사본이 있다.
 const SKIP_DIRS: [&str; 10] = [
@@ -117,6 +122,16 @@ struct Server {
     open: HashMap<PathBuf, Rope>,
     /// 진단을 보낸 문서. 더 이상 대상이 아니게 되면 빈 진단으로 지운다.
     published: HashSet<PathBuf>,
+    /// 웹 루트(`WEB-INF`가 있는 폴더).
+    web_roots: Vec<PathBuf>,
+    /// 뷰 리졸버의 (접두사, 접미사).
+    views: Vec<(String, String)>,
+    /// 태그 라이브러리. `taglib_uris`·`taglib_files`는 이 목록의 번호다.
+    libraries: Vec<Library>,
+    taglib_uris: HashMap<String, usize>,
+    taglib_files: HashMap<PathBuf, usize>,
+    /// `web.xml`의 taglib-uri → taglib-location.
+    taglib_locations: HashMap<String, String>,
 }
 
 impl Server {
@@ -273,7 +288,9 @@ impl Server {
             return Value::Null;
         };
         let offset = rope.char_to_byte(from_lsp(rope, position, ENCODING));
-        let targets = if is_java(&path) {
+        let targets = if is_jsp(&path) {
+            self.jsp_targets(&path, &rope.to_string(), offset)
+        } else if is_java(&path) {
             self.java_targets(&rope.to_string(), offset)
         } else {
             self.xml_targets(&path, offset)
@@ -341,9 +358,25 @@ impl Server {
         }
     }
 
-    /// Java: Mapper 메서드(선언·호출)나 문자열 문장 id → 매퍼 XML 문장.
+    /// JSP: include 경로 → 그 파일.
+    fn jsp_targets(&self, path: &Path, text: &str, offset: usize) -> Vec<(PathBuf, Range<usize>)> {
+        let root = web::web_root_for(&self.web_roots, path).map(PathBuf::as_path);
+        web::include_at(text, offset)
+            .and_then(|include| web::resolve(include, path, root))
+            .map(|target| vec![(target, 0..0)])
+            .unwrap_or_default()
+    }
+
+    /// Java: Mapper 메서드(선언·호출)나 문자열 문장 id → 매퍼 XML 문장, 문자열 뷰 이름 → JSP.
     fn java_targets(&self, text: &str, offset: usize) -> Vec<(PathBuf, Range<usize>)> {
-        let found = match java::target_at(text, offset) {
+        let target = java::target_at(text, offset);
+        // 컨트롤러가 돌려주는 뷰 이름(`return "sample/list";`, `new ModelAndView("…")`). 파일이
+        // 있을 때만 대상이라 다른 문자열에 잘못 붙지 않는다.
+        let views = match &target {
+            Some(Target::StatementId(name)) => web::view_files(name, &self.views, &self.web_roots),
+            _ => Vec::new(),
+        };
+        let found = match target {
             Some(Target::Method { namespace, name }) => self.index.find(
                 Kind::Statement,
                 |m| m.namespace.as_deref() == Some(namespace.as_str()),
@@ -364,6 +397,7 @@ impl Server {
         found
             .into_iter()
             .filter_map(|(file, def)| Some((file?.clone(), def.range.clone())))
+            .chain(views.into_iter().map(|view| (view, 0..0)))
             .collect()
     }
 
@@ -373,15 +407,23 @@ impl Server {
         let Some(path) = document_path(params) else {
             return Value::Null;
         };
-        let (Some(rope), Some(mapper), Ok(position)) = (
+        let (Some(rope), Ok(position)) = (
             self.open.get(&path),
-            self.index.mappers.get(&path),
             serde_json::from_value::<Position>(params["position"].clone()),
         ) else {
             return Value::Null;
         };
         let text = rope.to_string();
         let offset = rope.char_to_byte(from_lsp(rope, position, ENCODING));
+        if is_jsp(&path) {
+            return match self.jsp_items(&path, rope, &text, offset) {
+                Some(items) => json!({ "isIncomplete": false, "items": items }),
+                None => Value::Null,
+            };
+        }
+        let Some(mapper) = self.index.mappers.get(&path) else {
+            return Value::Null;
+        };
         let (items, incomplete) = match mapper::context_at(&text, mapper.dialect, offset) {
             Some(Context::Parameter {
                 parameter_type,
@@ -407,6 +449,161 @@ impl Server {
             None => return Value::Null,
         };
         json!({ "isIncomplete": incomplete, "items": items })
+    }
+
+    /// JSP: 태그 라이브러리의 태그 이름, 사용자 정의 태그의 속성 이름, EL 함수.
+    fn jsp_items(&self, path: &Path, rope: &Rope, text: &str, offset: usize) -> Option<Vec<Value>> {
+        let site = taglib::site_at(text, offset)?;
+        let libraries = self.taglibs_for(path, text);
+        let library = |prefix: &str| {
+            libraries
+                .iter()
+                .find(|(p, _)| p == prefix)
+                .map(|(_, library)| *library)
+        };
+        let edit = |label: String,
+                    filter: &str,
+                    detail: &str,
+                    kind: u8,
+                    range: &Range<usize>,
+                    new_text: &str| {
+            json!({
+                "label": label,
+                "kind": kind,
+                "detail": detail,
+                "filterText": filter,
+                "textEdit": { "range": lsp_range(rope, range), "newText": new_text },
+            })
+        };
+        let items = match site {
+            // 접두사를 치는 중: 선언된 모든 라이브러리의 `접두사:태그`.
+            Site::Tag {
+                prefix: None,
+                replace,
+            } => libraries
+                .iter()
+                .flat_map(|(prefix, library)| library.tags.iter().map(move |t| (prefix, t)))
+                .map(|(prefix, tag)| {
+                    let label = format!("{prefix}:{}", tag.name);
+                    edit(label.clone(), &label, &tag.description, 1, &replace, &label)
+                })
+                .collect(),
+            Site::Tag {
+                prefix: Some(prefix),
+                replace,
+            } => library(&prefix)?
+                .tags
+                .iter()
+                .map(|tag| {
+                    edit(
+                        format!("{prefix}:{}", tag.name),
+                        &tag.name,
+                        &tag.description,
+                        1,
+                        &replace,
+                        &tag.name,
+                    )
+                })
+                .collect(),
+            Site::Attribute {
+                prefix,
+                tag,
+                written,
+                replace,
+            } => {
+                let tag = library(&prefix)?.tags.iter().find(|t| t.name == tag)?;
+                let written = &text[written];
+                tag.attributes
+                    .iter()
+                    .filter(|a| jsp::attribute(written, &a.name).is_none())
+                    .map(|a| {
+                        let mut item = edit(
+                            a.name.clone(),
+                            &a.name,
+                            if a.required { "필수" } else { "" },
+                            1,
+                            &replace,
+                            &a.name,
+                        );
+                        // 필수 속성을 먼저 보여 준다.
+                        item["sortText"] = json!(format!("{}{}", u8::from(!a.required), a.name));
+                        item
+                    })
+                    .collect()
+            }
+            Site::Function { prefix, replace } => library(&prefix)?
+                .functions
+                .iter()
+                .map(|f| edit(f.name.clone(), &f.name, &f.signature, 3, &replace, &f.name))
+                .collect(),
+        };
+        Some(items)
+    }
+
+    /// 이 JSP에서 쓸 수 있는 (접두사, 라이브러리). 정적 include로 읽는 공통 파일의 선언도 따라간다.
+    fn taglibs_for(&self, path: &Path, text: &str) -> Vec<(String, &Library)> {
+        let root = web::web_root_for(&self.web_roots, path).map(PathBuf::as_path);
+        let mut declared = taglib::declared(text);
+        let mut pending: Vec<(PathBuf, usize)> = web::static_includes(text)
+            .into_iter()
+            .filter_map(|include| web::resolve(include, path, root))
+            .map(|file| (file, 1))
+            .collect();
+        let mut seen = HashSet::new();
+        while let Some((file, depth)) = pending.pop() {
+            if !seen.insert(file.clone()) {
+                continue;
+            }
+            let Some(included) = self
+                .open
+                .get(&file)
+                .map(Rope::to_string)
+                .or_else(|| read_text(&file))
+            else {
+                continue;
+            };
+            declared.extend(taglib::declared(&included));
+            if depth < MAX_INCLUDE_DEPTH {
+                pending.extend(
+                    web::static_includes(&included)
+                        .into_iter()
+                        .filter_map(|include| web::resolve(include, &file, root))
+                        .map(|next| (next, depth + 1)),
+                );
+            }
+        }
+        let mut found: Vec<(String, &Library)> = Vec::new();
+        for (prefix, uri) in declared {
+            if found.iter().any(|(p, _)| *p == prefix) {
+                continue;
+            }
+            if let Some(library) = self.library(&uri, path, root) {
+                found.push((prefix, library));
+            }
+        }
+        found
+    }
+
+    /// taglib uri의 라이브러리: TLD가 밝힌 uri, `web.xml` 매핑, 또는 `.tld` 경로 그대로.
+    fn library(&self, uri: &str, path: &Path, root: Option<&Path>) -> Option<&Library> {
+        if let Some(&i) = self.taglib_uris.get(uri) {
+            return self.libraries.get(i);
+        }
+        let location = self.taglib_locations.get(uri).map_or(uri, String::as_str);
+        let file = web::resolve(location, path, root)?;
+        self.libraries.get(*self.taglib_files.get(&file)?)
+    }
+
+    /// 라이브러리를 넣는다. 같은 uri가 이미 있으면 먼저 넣은 것(프로젝트 것)을 쓴다.
+    fn add_library(&mut self, file: Option<PathBuf>, tld: Tld) {
+        let i = self.libraries.len();
+        self.libraries.push(tld.library);
+        if let Some(uri) = tld.uri {
+            self.taglib_uris.entry(uri).or_insert(i);
+        }
+        if let Some(file) = file {
+            self.taglib_files.insert(file, i);
+        }
     }
 
     /// `#{}` 안 속성. 타입은 문장의 parameterType(별칭 풀기), 없으면 namespace 인터페이스 메서드의
@@ -559,7 +756,10 @@ impl Server {
     }
 
     /// 프로젝트 폴더의 매퍼와 Java 인터페이스를 모두 읽어 색인한다. 열린 문서는 그대로 둔다.
+    /// 웹 구조(웹 루트, 뷰 리졸버, 태그 라이브러리)도 함께 모은다.
     fn index_project(&mut self, root: &Path) {
+        // pom.xml·build.gradle 내용(Maven 저장소에서 라이브러리 버전을 고를 때 본다).
+        let mut build = String::new();
         let mut stack = vec![root.to_path_buf()];
         while let Some(dir) = stack.pop() {
             let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -571,6 +771,9 @@ impl Server {
                     continue;
                 };
                 if kind.is_dir() {
+                    if entry.file_name() == "WEB-INF" {
+                        self.web_roots.push(dir.clone());
+                    }
                     if !SKIP_DIRS.iter().any(|s| entry.file_name() == *s) {
                         stack.push(path);
                     }
@@ -579,6 +782,10 @@ impl Server {
                 let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
                     continue;
                 };
+                let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+                if self.index_web_file(&path, &name, &ext.to_ascii_lowercase(), &mut build) {
+                    continue;
+                }
                 // 대부분의 파일은 대상이 아니므로 내용을 풀기 전에 바이트로 거른다.
                 let wanted: &[&[u8]] = match ext.to_ascii_lowercase().as_str() {
                     "xml" => &[b"<mapper", b"<sqlMap", b"<typeAlias"],
@@ -602,6 +809,74 @@ impl Server {
                 }
             }
         }
+        // 프로젝트에 없는 잘 알려진 라이브러리는 로컬 Maven 저장소의 jar에서 읽는다.
+        if !self.web_roots.is_empty()
+            && let Some(repo) = taglib::maven_repository()
+        {
+            for jar in taglib::maven_jars(&repo, &build) {
+                for tld in taglib::jar_tlds(&jar) {
+                    if tld
+                        .uri
+                        .as_ref()
+                        .is_some_and(|u| !self.taglib_uris.contains_key(u))
+                    {
+                        self.add_library(None, tld);
+                    }
+                }
+            }
+        }
+    }
+
+    /// 웹 구조 파일이면 읽고 true(매퍼·Java 색인은 하지 않는다). 매퍼일 수 있는 XML은 false.
+    fn index_web_file(&mut self, path: &Path, name: &str, ext: &str, build: &mut String) -> bool {
+        let text = || read_text(path);
+        match ext {
+            "tld" => {
+                if let Some(tld) = text().as_deref().and_then(taglib::parse_tld) {
+                    self.add_library(Some(path.to_path_buf()), tld);
+                }
+            }
+            // 예전 방식 프로젝트는 라이브러리 jar를 `WEB-INF/lib`에 둔다.
+            "jar" if path.parent().is_some_and(|p| p.ends_with("WEB-INF/lib")) => {
+                for tld in taglib::jar_tlds(path) {
+                    self.add_library(None, tld);
+                }
+            }
+            "properties" if name.starts_with("application") => {
+                if let Some(view) = text().as_deref().and_then(web::view_properties) {
+                    self.views.push(view);
+                }
+            }
+            "gradle" | "kts" if name.starts_with("build.gradle") => {
+                build.push_str(&text().unwrap_or_default());
+            }
+            "xml" => {
+                // 바이트로 먼저 거른다(대부분의 XML은 해당 없음). 매퍼 색인은 이어서 따로 한다.
+                let Ok(bytes) = text_file::read(path) else {
+                    return true;
+                };
+                let has = |needle: &[u8]| bytes.windows(needle.len()).any(|b| b == needle);
+                let decoded = || text_file::decode(&bytes).ok().map(|c| c.text);
+                if name == "pom.xml" {
+                    build.push_str(&decoded().unwrap_or_default());
+                    return true;
+                }
+                if has(b"ViewResolver")
+                    && let Some(xml) = decoded()
+                {
+                    self.views.extend(web::view_resolvers(&xml));
+                }
+                if name == "web.xml"
+                    && has(b"<taglib>")
+                    && let Some(xml) = decoded()
+                {
+                    self.taglib_locations.extend(web::taglib_locations(&xml));
+                }
+                return false;
+            }
+            _ => return false,
+        }
+        true
     }
 }
 

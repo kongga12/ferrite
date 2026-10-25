@@ -115,7 +115,12 @@ fn el_outputs(text: &str, region: &Region) -> bool {
 }
 
 /// 태그 텍스트에서 속성값(따옴표 안). 이름은 대소문자를 가리지 않는다.
-fn attribute<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
+pub(crate) fn attribute<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
+    attribute_range(tag, name).map(|range| &tag[range])
+}
+
+/// 속성값(따옴표 안)의 바이트 범위. 닫는 따옴표가 없으면(입력 중) 태그 끝까지다.
+pub(crate) fn attribute_range(tag: &str, name: &str) -> Option<std::ops::Range<usize>> {
     let lower = tag.to_ascii_lowercase();
     let name = name.to_ascii_lowercase();
     let mut from = 0;
@@ -132,8 +137,11 @@ fn attribute<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
         };
         let rest = rest.trim_start();
         let quote = rest.chars().next().filter(|c| *c == '"' || *c == '\'')?;
-        let value = &rest[1..];
-        return value.find(quote).map(|end| &value[..end]);
+        let start = tag.len() - rest.len() + 1;
+        let end = tag[start..]
+            .find(quote)
+            .map_or(tag.len(), |end| start + end);
+        return Some(start..end);
     }
     None
 }
