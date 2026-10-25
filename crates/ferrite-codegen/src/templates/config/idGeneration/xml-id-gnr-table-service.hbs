@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<beans xmlns="http://www.springframework.org/schema/beans"
+	xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xsi:schemaLocation="http://www.springframework.org/schema/beans http://www.springframework.org/schema/beans/spring-beans.xsd">
+
+	<!-- ID 테이블({{xml txtTable}})로 ID 생성. TABLE_NAME = '{{xml txtTableNameFieldValue}}'인 행의 NEXT_ID를 쓴다. -->
+	<!-- 이 서비스는 messageSource 빈이 있어야 한다(basenames에 classpath:/{{rtePath}}/fdl/idgnr/messages/idgnr 포함).
+	     egov 프로젝트는 보통 context-common.xml에 둔다. -->
+	<bean name="{{txtIdServiceName}}" class="{{rte}}.fdl.idgnr.impl.EgovTableIdGnrServiceImpl" destroy-method="destroy">
+		<property name="dataSource" ref="{{txtDatasourceName}}"/>
+		<property name="table" value="{{xml txtTable}}"/>
+		<property name="tableName" value="{{xml txtTableNameFieldValue}}"/>
+		<property name="blockSize" value="{{txtBlockSize}}"/>
+{{#if chkStrategy}}
+		<property name="strategy" ref="{{txtStrategyName}}"/>
+{{/if}}
+	</bean>
+{{#if chkStrategy}}
+
+	<!-- ID 모양: 접두어 + 0으로 채운 번호(전체 {{txtCipers}}자리) -->
+	<bean name="{{txtStrategyName}}" class="{{rte}}.fdl.idgnr.impl.strategy.EgovIdGnrStrategyImpl">
+		<property name="prefix" value="{{xml txtPrefix}}"/>
+		<property name="cipers" value="{{txtCipers}}"/>
+		<property name="fillChar" value="{{xml txtFillChar}}"/>
+	</bean>
+{{/if}}
+
+</beans>

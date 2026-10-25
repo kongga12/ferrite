@@ -1,0 +1,25 @@
+# log4j2 설정
+status = warn
+
+appender.out.type = File
+appender.out.name = {{props txtAppenderName}}
+appender.out.fileName = {{props txtLogFileName}}
+appender.out.append = {{cboAppend}}
+appender.out.layout.type = PatternLayout
+appender.out.layout.pattern = {{props txtConversionPattern}}
+
+logger.egov.name = egovframework
+logger.egov.level = debug
+logger.egov.additivity = false
+logger.egov.appenderRef.out.ref = {{props txtAppenderName}}
+logger.egovframe.name = org.egovframe
+logger.egovframe.level = debug
+logger.egovframe.additivity = false
+logger.egovframe.appenderRef.out.ref = {{props txtAppenderName}}
+logger.spring.name = org.springframework
+logger.spring.level = info
+logger.spring.additivity = false
+logger.spring.appenderRef.out.ref = {{props txtAppenderName}}
+
+rootLogger.level = info
+rootLogger.appenderRef.out.ref = {{props txtAppenderName}}

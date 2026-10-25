@@ -1,0 +1,31 @@
+# log4j2 설정
+Configuration:
+  status: warn
+  Appenders:
+    Console:
+      name: {{yaml txtAppenderName}}
+      target: SYSTEM_OUT
+      PatternLayout:
+        pattern: {{yaml txtConversionPattern}}
+
+  Loggers:
+    Logger:
+      - name: egovframework
+        level: debug
+        additivity: false
+        AppenderRef:
+          ref: {{yaml txtAppenderName}}
+      - name: org.egovframe
+        level: debug
+        additivity: false
+        AppenderRef:
+          ref: {{yaml txtAppenderName}}
+      - name: org.springframework
+        level: info
+        additivity: false
+        AppenderRef:
+          ref: {{yaml txtAppenderName}}
+    Root:
+      level: info
+      AppenderRef:
+        ref: {{yaml txtAppenderName}}

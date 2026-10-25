@@ -1,0 +1,74 @@
+package {{txtConfigPackage}};
+
+import javax.sql.DataSource;
+
+{{#if chkAopConfigTransaction}}
+import java.util.Collections;
+
+import org.springframework.aop.Advisor;
+import org.springframework.aop.aspectj.AspectJExpressionPointcut;
+import org.springframework.aop.support.DefaultPointcutAdvisor;
+{{/if}}
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+{{#if chkAopConfigTransaction}}
+import org.springframework.context.annotation.EnableAspectJAutoProxy;
+{{/if}}
+import org.springframework.transaction.PlatformTransactionManager;
+{{#if chkAnnotationTransaction}}
+import org.springframework.transaction.annotation.EnableTransactionManagement;
+{{/if}}
+{{#if chkAopConfigTransaction}}
+import org.springframework.transaction.interceptor.NameMatchTransactionAttributeSource;
+import org.springframework.transaction.interceptor.RollbackRuleAttribute;
+import org.springframework.transaction.interceptor.RuleBasedTransactionAttribute;
+import org.springframework.transaction.interceptor.TransactionInterceptor;
+{{/if}}
+
+/**
+ * MyBatis·JDBC 트랜잭션.
+ */
+@Configuration
+{{#if chkAnnotationTransaction}}
+@EnableTransactionManagement
+{{/if}}
+{{#if chkAopConfigTransaction}}
+@EnableAspectJAutoProxy
+{{/if}}
+public class {{txtFileName}} {
+
+	@Bean(name = "{{txtTransactionName}}")
+	public DataSourceTransactionManager transactionManager(@Qualifier("{{txtDataSourceName}}") DataSource dataSource) {
+		return new DataSourceTransactionManager(dataSource);
+	}
+{{#if chkAopConfigTransaction}}
+
+	/** 포인트컷에 걸리는 메서드에 트랜잭션을 건다. */
+	@Bean(name = "{{txtAdviceName}}")
+	public TransactionInterceptor transactionAdvice(@Qualifier("{{txtTransactionName}}") PlatformTransactionManager transactionManager) {
+		RuleBasedTransactionAttribute attribute = new RuleBasedTransactionAttribute();
+		attribute.setPropagationBehaviorName("PROPAGATION_{{cmbPropagation}}");
+		attribute.setIsolationLevelName("ISOLATION_{{cmbIsolation}}");
+		attribute.setReadOnly({{chkReadOnly}});
+		attribute.setTimeout({{txtTimeout}});
+{{#if txtRollbackFor}}
+		attribute.setRollbackRules(Collections.singletonList(new RollbackRuleAttribute("{{java txtRollbackFor}}")));
+{{/if}}
+		NameMatchTransactionAttributeSource source = new NameMatchTransactionAttributeSource();
+		source.addTransactionalMethod("{{java txtMethodName}}", attribute);
+		TransactionInterceptor interceptor = new TransactionInterceptor();
+		interceptor.setTransactionManager(transactionManager);
+		interceptor.setTransactionAttributeSource(source);
+		return interceptor;
+	}
+
+	@Bean(name = "{{txtPointCutName}}")
+	public Advisor transactionAdvisor(@Qualifier("{{txtAdviceName}}") TransactionInterceptor advice) {
+		AspectJExpressionPointcut pointcut = new AspectJExpressionPointcut();
+		pointcut.setExpression("{{java txtPointCutExpression}}");
+		return new DefaultPointcutAdvisor(pointcut, advice);
+	}
+{{/if}}
+}

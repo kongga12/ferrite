@@ -1,0 +1,45 @@
+package {{txtConfigPackage}};
+
+import javax.sql.DataSource;
+
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+
+import {{rte}}.fdl.idgnr.impl.EgovTableIdGnrServiceImpl;
+{{#if chkStrategy}}
+import {{rte}}.fdl.idgnr.impl.strategy.EgovIdGnrStrategyImpl;
+{{/if}}
+
+/**
+ * ID 테이블({{txtTable}})로 ID 생성.
+ */
+@Configuration
+public class {{txtFileName}} {
+
+	@Bean(name = "{{txtIdServiceName}}", destroyMethod = "destroy")
+	public EgovTableIdGnrServiceImpl idGnrService(@Qualifier("{{txtDatasourceName}}") DataSource dataSource{{#if chkStrategy}},
+			@Qualifier("{{txtStrategyName}}") EgovIdGnrStrategyImpl strategy{{/if}}) {
+		EgovTableIdGnrServiceImpl service = new EgovTableIdGnrServiceImpl();
+		service.setDataSource(dataSource);
+		service.setTable("{{java txtTable}}");
+		service.setTableName("{{java txtTableNameFieldValue}}");
+		service.setBlockSize({{txtBlockSize}});
+{{#if chkStrategy}}
+		service.setStrategy(strategy);
+{{/if}}
+		return service;
+	}
+{{#if chkStrategy}}
+
+	/** ID 모양: 접두어 + 채운 번호(전체 {{txtCipers}}자리). */
+	@Bean(name = "{{txtStrategyName}}")
+	public EgovIdGnrStrategyImpl idGnrStrategy() {
+		EgovIdGnrStrategyImpl strategy = new EgovIdGnrStrategyImpl();
+		strategy.setPrefix("{{java txtPrefix}}");
+		strategy.setCipers({{txtCipers}});
+		strategy.setFillChar('{{java txtFillChar}}');
+		return strategy;
+	}
+{{/if}}
+}

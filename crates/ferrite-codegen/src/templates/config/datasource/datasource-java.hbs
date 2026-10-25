@@ -1,0 +1,82 @@
+package {{txtConfigPackage}};
+
+import javax.sql.DataSource;
+
+{{#if (eq rdoType "DBCP")}}
+import org.apache.commons.dbcp2.BasicDataSource;
+{{/if}}
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+{{#if (eq rdoType "JDBC")}}
+import org.springframework.jdbc.datasource.DriverManagerDataSource;
+{{/if}}
+
+{{#if (eq rdoType "C3P0")}}
+import com.mchange.v2.c3p0.ComboPooledDataSource;
+
+{{/if}}
+/**
+ * {{rdoType}} 데이터소스. 값에 ${...} 플레이스홀더를 쓰면 프로퍼티 파일에서 읽는다.
+ */
+@Configuration
+public class {{txtFileName}} {
+
+	@Value("{{java txtDriver}}")
+	private String driverClassName;
+
+	@Value("{{java txtUrl}}")
+	private String url;
+
+	@Value("{{java txtUser}}")
+	private String username;
+
+	@Value("{{java txtPasswd}}")
+	private String password;
+
+{{#if (eq rdoType "DBCP")}}
+	@Bean(name = "{{txtDatasourceName}}", destroyMethod = "close")
+	public DataSource dataSource() {
+		BasicDataSource dataSource = new BasicDataSource();
+		dataSource.setDriverClassName(driverClassName);
+		dataSource.setUrl(url);
+		dataSource.setUsername(username);
+		dataSource.setPassword(password);
+		dataSource.setInitialSize(5);
+		dataSource.setMaxTotal(50);
+		dataSource.setMaxIdle(10);
+		dataSource.setMinIdle(5);
+		dataSource.setMaxWaitMillis(10000);
+		dataSource.setTestOnBorrow(true);
+		return dataSource;
+	}
+{{/if}}
+{{#if (eq rdoType "C3P0")}}
+	@Bean(name = "{{txtDatasourceName}}", destroyMethod = "close")
+	public DataSource dataSource() throws Exception {
+		ComboPooledDataSource dataSource = new ComboPooledDataSource();
+		dataSource.setDriverClass(driverClassName);
+		dataSource.setJdbcUrl(url);
+		dataSource.setUser(username);
+		dataSource.setPassword(password);
+		dataSource.setInitialPoolSize(3);
+		dataSource.setMinPoolSize(3);
+		dataSource.setMaxPoolSize(50);
+		dataSource.setAcquireIncrement(1);
+		dataSource.setIdleConnectionTestPeriod(200);
+		return dataSource;
+	}
+{{/if}}
+{{#if (eq rdoType "JDBC")}}
+	/** 풀 없는 JDBC 데이터소스(개발·테스트용). */
+	@Bean(name = "{{txtDatasourceName}}")
+	public DataSource dataSource() {
+		DriverManagerDataSource dataSource = new DriverManagerDataSource();
+		dataSource.setDriverClassName(driverClassName);
+		dataSource.setUrl(url);
+		dataSource.setUsername(username);
+		dataSource.setPassword(password);
+		return dataSource;
+	}
+{{/if}}
+}

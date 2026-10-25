@@ -1,0 +1,51 @@
+# log4j2 설정
+Configuration:
+  status: warn
+  Appenders:
+    JDBC:
+      name: {{yaml txtAppenderName}}
+      tableName: {{yaml txtTableName}}
+{{#if (eq rdoConnectionType "ConnectionFactory")}}
+      ConnectionFactory:
+        class: {{yaml txtConnectionFactoryClass}}
+        method: {{yaml txtConnectionFactoryMethod}}
+{{else}}
+      DriverManager:
+        connectionString: {{yaml txtUrl}}
+        driverClassName: {{yaml txtDriver}}
+        userName: {{yaml txtUser}}
+        password: {{yaml txtPasswd}}
+{{/if}}
+      Column:
+        - name: LOG_DATE
+          isEventTimestamp: true
+        - name: LOG_LEVEL
+          pattern: '%level'
+        - name: LOGGER
+          pattern: '%logger'
+        - name: MESSAGE
+          pattern: '%message'
+        - name: EXCEPTION
+          pattern: '%throwable'
+
+  Loggers:
+    Logger:
+      - name: egovframework
+        level: debug
+        additivity: false
+        AppenderRef:
+          ref: {{yaml txtAppenderName}}
+      - name: org.egovframe
+        level: debug
+        additivity: false
+        AppenderRef:
+          ref: {{yaml txtAppenderName}}
+      - name: org.springframework
+        level: info
+        additivity: false
+        AppenderRef:
+          ref: {{yaml txtAppenderName}}
+    Root:
+      level: info
+      AppenderRef:
+        ref: {{yaml txtAppenderName}}

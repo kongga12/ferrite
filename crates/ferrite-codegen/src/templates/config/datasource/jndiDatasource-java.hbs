@@ -1,0 +1,22 @@
+package {{txtConfigPackage}};
+
+import javax.sql.DataSource;
+
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.jdbc.datasource.lookup.JndiDataSourceLookup;
+
+/**
+ * WAS가 제공하는 데이터소스(JNDI).
+ */
+@Configuration
+public class {{txtFileName}} {
+
+	@Bean(name = "{{txtDatasourceName}}")
+	public DataSource dataSource() {
+		JndiDataSourceLookup lookup = new JndiDataSourceLookup();
+		// true면 java:comp/env/를 붙여 찾는다(Tomcat). JEUS·WebLogic의 전역 이름이면 false.
+		lookup.setResourceRef({{cboResourceRef}});
+		return lookup.getDataSource("{{java txtJndiName}}");
+	}
+}

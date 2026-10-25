@@ -1,0 +1,48 @@
+# log4j2 설정
+status = warn
+
+appender.out.type = JDBC
+appender.out.name = {{props txtAppenderName}}
+appender.out.tableName = {{props txtTableName}}
+{{#if (eq rdoConnectionType "ConnectionFactory")}}
+appender.out.connection.type = ConnectionFactory
+appender.out.connection.class = {{props txtConnectionFactoryClass}}
+appender.out.connection.method = {{props txtConnectionFactoryMethod}}
+{{else}}
+appender.out.connection.type = DriverManager
+appender.out.connection.connectionString = {{props txtUrl}}
+appender.out.connection.driverClassName = {{props txtDriver}}
+appender.out.connection.userName = {{props txtUser}}
+appender.out.connection.password = {{props txtPasswd}}
+{{/if}}
+appender.out.date.type = Column
+appender.out.date.name = LOG_DATE
+appender.out.date.isEventTimestamp = true
+appender.out.level.type = Column
+appender.out.level.name = LOG_LEVEL
+appender.out.level.pattern = %level
+appender.out.logger.type = Column
+appender.out.logger.name = LOGGER
+appender.out.logger.pattern = %logger
+appender.out.message.type = Column
+appender.out.message.name = MESSAGE
+appender.out.message.pattern = %message
+appender.out.exception.type = Column
+appender.out.exception.name = EXCEPTION
+appender.out.exception.pattern = %throwable
+
+logger.egov.name = egovframework
+logger.egov.level = debug
+logger.egov.additivity = false
+logger.egov.appenderRef.out.ref = {{props txtAppenderName}}
+logger.egovframe.name = org.egovframe
+logger.egovframe.level = debug
+logger.egovframe.additivity = false
+logger.egovframe.appenderRef.out.ref = {{props txtAppenderName}}
+logger.spring.name = org.springframework
+logger.spring.level = info
+logger.spring.additivity = false
+logger.spring.appenderRef.out.ref = {{props txtAppenderName}}
+
+rootLogger.level = info
+rootLogger.appenderRef.out.ref = {{props txtAppenderName}}

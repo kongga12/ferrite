@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<beans xmlns="http://www.springframework.org/schema/beans"
+	xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xmlns:tx="http://www.springframework.org/schema/tx"
+	xmlns:aop="http://www.springframework.org/schema/aop"
+	xsi:schemaLocation="http://www.springframework.org/schema/beans http://www.springframework.org/schema/beans/spring-beans.xsd
+		http://www.springframework.org/schema/tx http://www.springframework.org/schema/tx/spring-tx.xsd
+		http://www.springframework.org/schema/aop http://www.springframework.org/schema/aop/spring-aop.xsd">
+
+	<!-- MyBatis·JDBC 트랜잭션 -->
+	<bean id="{{txtTransactionName}}" class="org.springframework.jdbc.datasource.DataSourceTransactionManager">
+		<property name="dataSource" ref="{{txtDataSourceName}}"/>
+	</bean>
+{{#if chkAnnotationTransaction}}
+
+	<!-- @Transactional을 붙인 메서드에 트랜잭션을 건다. -->
+	<tx:annotation-driven transaction-manager="{{txtTransactionName}}"/>
+{{/if}}
+{{#if chkAopConfigTransaction}}
+
+	<!-- 포인트컷에 걸리는 메서드에 트랜잭션을 건다. -->
+	<tx:advice id="{{txtAdviceName}}" transaction-manager="{{txtTransactionName}}">
+		<tx:attributes>
+			<tx:method name="{{xml txtMethodName}}" propagation="{{cmbPropagation}}" isolation="{{cmbIsolation}}" read-only="{{chkReadOnly}}" timeout="{{txtTimeout}}"{{#if txtRollbackFor}} rollback-for="{{xml txtRollbackFor}}"{{/if}}/>
+		</tx:attributes>
+	</tx:advice>
+
+	<aop:config>
+		<aop:pointcut id="{{txtPointCutName}}" expression="{{xml txtPointCutExpression}}"/>
+		<aop:advisor advice-ref="{{txtAdviceName}}" pointcut-ref="{{txtPointCutName}}"/>
+	</aop:config>
+{{/if}}
+
+</beans>

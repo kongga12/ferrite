@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use ferrite_core::text_file::{self, Encoding, LineEnding, TextContent};
 
+use crate::config::{ConfigLayout, Placeholders};
 use crate::crud::{Db, GeneratedFile, JUnit, Layout, Rte};
 
 /// 훑을 때 건너뛰는 폴더(빌드 결과물·도구 폴더).
@@ -35,6 +36,10 @@ pub struct Defaults {
     pub base_package: String,
     /// 알려 줄 것(예: `mapperLocations`가 파일을 하나씩 적는 방식이라 새 매퍼를 목록에 더해야 함).
     pub notes: Vec<String>,
+    /// 설정 파일을 둘 곳(Spring XML 폴더 등).
+    pub config_layout: ConfigLayout,
+    /// 프로젝트의 데이터소스 프로퍼티 키(설정 생성의 기본값을 `${키}`로).
+    pub placeholders: Placeholders,
 }
 
 /// 프로젝트를 훑어 기본값을 정한다. 단서가 없으면 egov 4.x·Oracle·UTF-8이다.
@@ -110,7 +115,17 @@ pub fn defaults(root: &Path) -> Defaults {
     if let Some(jsp) = scan.jsp_dir() {
         layout.jsp = jsp;
     }
+    let config_layout = ConfigLayout {
+        spring: scan
+            .spring_dir()
+            .unwrap_or_else(|| ConfigLayout::default().spring),
+        resources: PathBuf::from(resources),
+        java: layout.java.clone(),
+    };
+    let placeholders = Placeholders::from_keys(scan.property_keys.iter().map(String::as_str));
     Defaults {
+        config_layout,
+        placeholders,
         rte,
         db: scan.db().unwrap_or(Db::Oracle),
         junit,
@@ -157,6 +172,10 @@ struct Scan {
     views: Vec<(String, String)>,
     /// MyBatis `mapperLocations`(Spring XML)·`mybatis.mapper-locations`(Boot) 값.
     mapper_locations: Vec<String>,
+    /// Spring XML 설정(`context-*.xml`)이 있는 폴더(프로젝트 기준).
+    spring_configs: Vec<PathBuf>,
+    /// 데이터소스에 쓰는 프로퍼티 키(`…DriverClassName`·`…Url` 등).
+    property_keys: Vec<String>,
     db_hints: Vec<Db>,
 }
 
@@ -197,6 +216,14 @@ impl Scan {
                 && let Some(text) = read(&path)
             {
                 self.db_hints.extend(db_hints(&text));
+                const DATASOURCE_KEYS: [&str; 5] =
+                    ["DriverClassName", "Url", "URL", "UserName", "Password"];
+                self.property_keys.extend(
+                    ferrite_egov::spring::property_keys(&text)
+                        .into_iter()
+                        .map(|(key, _)| key)
+                        .filter(|key| DATASOURCE_KEYS.iter().any(|s| key.ends_with(s))),
+                );
                 // Spring Boot `mybatis.mapper-locations=classpath:mapper/**/*.xml`
                 for line in text.lines() {
                     let line = line.trim();
@@ -259,6 +286,12 @@ impl Scan {
         } else if text.contains("ViewResolver") {
             self.views.extend(ferrite_egov::web::view_resolvers(&text));
         }
+        if name.starts_with("context-")
+            && head.contains("<beans")
+            && let Some(dir) = path.parent().and_then(|d| d.strip_prefix(root).ok())
+        {
+            self.spring_configs.push(dir.to_path_buf());
+        }
         if text.contains("mapperLocations") {
             self.mapper_locations.extend(mapper_location_values(&text));
         }
@@ -278,6 +311,18 @@ impl Scan {
         }
         let pattern = patterns.into_iter().max_by_key(|(_, n)| *n)?.0;
         Some((dir.to_path_buf(), pattern))
+    }
+
+    /// `context-*.xml`이 가장 많은 폴더.
+    fn spring_dir(&self) -> Option<PathBuf> {
+        let mut counts: HashMap<&Path, usize> = HashMap::new();
+        for dir in &self.spring_configs {
+            *counts.entry(dir.as_path()).or_default() += 1;
+        }
+        counts
+            .into_iter()
+            .max_by_key(|(dir, n)| (*n, std::cmp::Reverse(dir.components().count())))
+            .map(|(dir, _)| dir.to_path_buf())
     }
 
     /// 웹 루트 + 뷰 리졸버 접두사(프로젝트 루트 기준). 웹 루트가 여럿이면(배포용 사본 등)
@@ -563,7 +608,12 @@ mod tests {
         write_file(
             &root,
             "src/main/resources/egovframework/egovProps/globals.properties",
-            b"Globals.DbType = tibero\n",
+            b"Globals.DbType = tibero\nGlobals.DriverClassName = com.tmax.tibero.jdbc.TbDriver\nGlobals.Url = jdbc:tibero:thin:@db:8629:egov\nGlobals.UserName = egov\nGlobals.Password = x\n",
+        );
+        write_file(
+            &root,
+            "src/main/resources/egovframework/spring/com/context-common.xml",
+            b"<beans></beans>",
         );
         write_file(&root, "src/main/webapp/WEB-INF/config/egovframework/springmvc/dispatcher-servlet.xml", b"<beans><bean class=\"org.springframework.web.servlet.view.UrlBasedViewResolver\" p:prefix=\"/WEB-INF/jsp/egovframework/example/\" p:suffix=\".jsp\"/></beans>");
         let found = defaults(&root);
@@ -572,6 +622,11 @@ mod tests {
         assert_eq!(found.encoding, Encoding::Cp949);
         assert_eq!(found.line_ending, LineEnding::CrLf);
         assert_eq!(found.db, Db::Tibero);
+        assert_eq!(
+            found.config_layout.spring,
+            PathBuf::from("src/main/resources/egovframework/spring/com")
+        );
+        assert_eq!(found.placeholders.url.as_deref(), Some("Globals.Url"));
         assert_eq!(found.base_package, "egovframework.example");
         assert_eq!(
             found.layout.mapper,

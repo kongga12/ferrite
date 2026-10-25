@@ -387,6 +387,8 @@ pub struct FerriteApp {
     servers: ServerManager,
     /// egov CRUD 코드 생성 창.
     codegen: crate::codegen::CodegenWindow,
+    /// egov 설정 파일 생성 창.
+    config_gen: crate::config_gen::ConfigWindow,
     /// 아래쪽 "문제" 목록을 보이는지.
     show_problems: bool,
     /// 응답을 기다리는 언어 서버 요청.
@@ -452,6 +454,7 @@ impl FerriteApp {
             hub: LspHub::new(cc.egui_ctx.clone(), servers_root()),
             servers: ServerManager::new(servers_root()),
             codegen: Default::default(),
+            config_gen: Default::default(),
             show_problems: false,
             pending: std::collections::HashMap::new(),
             completion: None,
@@ -1486,6 +1489,11 @@ impl FerriteApp {
                         let root = self.tree.as_ref().map(|t| t.root().to_path_buf());
                         self.codegen.show(root.as_deref());
                     }
+                    if ui.button("egov 설정 파일 생성…").clicked() {
+                        ui.close();
+                        let root = self.tree.as_ref().map(|t| t.root().to_path_buf());
+                        self.config_gen.show(root.as_deref());
+                    }
                 });
             });
         });
@@ -2134,6 +2142,10 @@ impl eframe::App for FerriteApp {
         let ctx = ui.ctx().clone();
         if let Some(action) = self.servers.ui(&ctx) {
             self.start_server_action(action, &ctx);
+        }
+        if let Some(path) = self.config_gen.ui(&ctx) {
+            self.status = format!("설정 파일을 만들었습니다: {}", path.display());
+            self.open_file(path);
         }
         if let Some(written) = self.codegen.ui(&ctx) {
             self.status = format!("코드를 만들었습니다: 파일 {}개", written.len());
@@ -3164,6 +3176,90 @@ mod tests {
         harness.run();
         harness.get_by_label_contains("이미 있는 파일:");
         harness.get_by_label("이미 있는 파일 덮어쓰기");
+        drop(harness);
+        remove_project(&dir);
+    }
+
+    #[test]
+    fn egov_설정_파일을_만들고_연다() {
+        let dir = std::env::temp_dir().join(format!("ferrite-config-ui-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let write = |path: &str, text: &str| {
+            let file = dir.join(path);
+            fs::create_dir_all(file.parent().unwrap()).unwrap();
+            fs::write(file, text).unwrap();
+        };
+        // 프로젝트의 Spring 설정 폴더와 데이터소스 프로퍼티 키를 따라야 한다.
+        write(
+            "pom.xml",
+            "<project><dependency><groupId>org.egovframe.rte</groupId></dependency></project>",
+        );
+        write(
+            "src/main/java/egovframework/example/sample/service/SampleService.java",
+            "package egovframework.example.sample.service;\n",
+        );
+        write(
+            "src/main/resources/egovframework/spring/com/context-common.xml",
+            "<beans></beans>",
+        );
+        write(
+            "src/main/resources/egovframework/egovProps/globals.properties",
+            "Globals.DriverClassName=org.h2.Driver\nGlobals.Url=jdbc:h2:mem:x\nGlobals.UserName=sa\nGlobals.Password=\n",
+        );
+
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(1400.0, 1300.0))
+            .build_eframe(|cc| FerriteApp::new(cc, Some(dir.clone())));
+        harness.get_by_label("도구").click();
+        harness.run();
+        harness.get_by_label("egov 설정 파일 생성…").click();
+        harness.run();
+
+        // 기본 종류(DBCP 데이터소스, XML)
+        harness.get_by_label("생성").click();
+        harness.run();
+        let xml = dir.join("src/main/resources/egovframework/spring/com/context-datasource.xml");
+        let text = fs::read_to_string(&xml).unwrap();
+        assert!(
+            text.contains("org.apache.commons.dbcp2.BasicDataSource"),
+            "{text}"
+        );
+        assert!(
+            text.contains(r#"value="${Globals.Url}""#),
+            "프로젝트의 프로퍼티 키를 플레이스홀더로: {text}"
+        );
+        assert!(
+            harness
+                .state()
+                .docs
+                .iter()
+                .any(|d| d.path.ends_with("context-datasource.xml"))
+        );
+
+        // 같은 종류를 Java Config로
+        harness.get_by_label("Java Config").click();
+        harness.run();
+        harness.get_by_label("생성").click();
+        harness.run();
+        let java = dir.join("src/main/java/egovframework/example/config/EgovConfigDatasource.java");
+        let text = fs::read_to_string(&java).unwrap();
+        assert!(
+            text.contains("package egovframework.example.config;"),
+            "{text}"
+        );
+        assert!(text.contains(r#"@Value("${Globals.Url}")"#), "{text}");
+
+        // 다른 종류(로그) 고르기
+        harness
+            .get_by_role_and_label(egui::accesskit::Role::ComboBox, "설정 종류")
+            .click();
+        harness.run();
+        harness.get_by_label("Logging > 콘솔 로그").click();
+        harness.run();
+        harness.get_by_label("생성").click();
+        harness.run();
+        let log = fs::read_to_string(dir.join("src/main/resources/log4j2.xml")).unwrap();
+        assert!(log.contains("<Console name=\"console\""), "{log}");
         drop(harness);
         remove_project(&dir);
     }

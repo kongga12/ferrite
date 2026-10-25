@@ -377,7 +377,31 @@
     - 로컬: 공식 확장의 CRUD 템플릿을 Ferrite로 렌더링(`setVar`로 만드는 SET 절 확인). 확장 파일은 저장소에 넣지 않는다.
     - 로컬 코퍼스 23개 프로젝트에서 기본값을 확인했다. 이 검사로 한글 글자 중간에서 자르는 패닉과 `WEB-INF/classes`를 고르는 문제를 고쳤다.
   - 미룸: Thymeleaf 화면, 기본 키 생성(ID 생성 서비스·시퀀스. 2c-2 설정 생성과 함께), egov 5.x(`@EgovMapper`·jakarta), DB 테이블에서 바로 생성(Phase 5)
-- [ ] 2c-2 설정 파일 생성(Datasource·Transaction·ID 생성·Logging·Scheduling·Cache·Property, 출력 XML·Java Config·YAML·properties)
+- [x] 2c-2 설정 파일 생성(도구 > egov 설정 파일 생성)
+  - 종류 21가지(공식 확장과 같다)
+    - Datasource: DBCP2·C3P0·JDBC, JNDI
+    - Transaction: DataSource·JPA(Hibernate)·JTA. `@Transactional`과 AOP 포인트컷 적용을 고른다.
+    - ID 생성: 시퀀스·테이블(접두어·자릿수 전략)·UUID
+    - Logging(log4j2): 콘솔·파일·크기별·날짜별 롤링·JDBC
+    - Scheduling(Quartz): QuartzJobBean Job, 메서드 호출 Job, Simple·Cron 트리거, 스케줄러
+    - Cache: Ehcache 2 `ehcache.xml`, Spring 캐시. Property: EgovPropertyService
+  - 형식: XML, Java Config(로깅 제외), YAML·properties(로깅). 종류마다 표(입력 칸·기본값·형식)로 정의해 화면 하나로 그린다.
+  - 공식 확장과 같은 입력 칸 이름·고르는 값이라, 공식 템플릿이나 고친 템플릿을 `.ferrite/templates/config/<폴더>/<파일>`에 두면 그것으로 만든다.
+  - 공식 확장과 다르게 고친 것
+    - 실행환경 3.x·4.x를 모두 지원한다.
+    - Java Config는 `javax.sql.DataSource`를 쓴다(공식 템플릿은 없는 `jakarta.sql.DataSource`).
+    - 로깅은 log4j2로만 만든다(공식 Java 로깅은 지원이 끝난 log4j 1).
+    - 값을 형식에 맞게 바꾼다(XML `&`, Java 문자열·properties의 `\`, YAML 따옴표). 이름 칸은 식별자만, 숫자 칸은 정수만 받는다.
+    - Java Config 값은 `@Value`로 받아 `${…}` 플레이스홀더도 된다.
+  - 프로젝트에서 기본값을 찾는다: Spring XML 폴더(`context-*.xml`이 가장 많은 곳), DB별 드라이버·URL·시퀀스 SQL·Hibernate 방언, 데이터소스 프로퍼티 키(`Globals.Url` 등이 있으면 `${Globals.Url}`로 채운다)
+  - 파일은 XML·YAML·properties를 UTF-8(선언과 같게)로, Java Config는 프로젝트 인코딩으로 쓴다.
+  - 검증(로컬, 실제 jar와 JDK)
+    - egov 3.10(Spring 4.3)·4.3(Spring 5.3) 모두 확인했다.
+    - XML: 컨테이너를 띄워 빈을 모두 만든다. 데이터소스 3종, AOP 트랜잭션, ID 생성 3종, 프로퍼티(내부·외부 파일), Quartz Job·트리거·스케줄러, Ehcache를 다룬다. JPA는 4.x에서 Hibernate 5.6 + H2로 띄웠다. JNDI·JTA는 WAS가 있어야 하므로 XSD 검증과 빈 클래스 확인까지만 했다.
+    - Java Config 18개: 컴파일하고 같은 묶음으로 띄웠다.
+    - log4j2: 어펜더 5종의 XML·properties를 log4j2로 읽어 어펜더가 생기는 것을 확인했다(JDBC는 H2). YAML은 문법만 확인했다.
+    - 찾은 것: egov 프로퍼티 서비스는 초기화 때 `messageSource`(…/fdl/property/messages/properties)가 있어야 한다. 만든 파일에 주석으로 알린다.
+  - 미룸: Ehcache 3(로컬에 jar가 없어 검증 못 함), 공통 설정(context-common의 messageSource 등) 생성
 - [ ] 2c-3 새 egov 프로젝트 마법사(공식 템플릿 버전 고정 다운로드·체크섬, Web·Boot Web `mvn package` 확인)
 - [ ] 2c-4 공통컴포넌트 추가
 

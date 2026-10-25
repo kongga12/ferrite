@@ -1,0 +1,22 @@
+package {{txtConfigPackage}};
+
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.scheduling.quartz.MethodInvokingJobDetailFactoryBean;
+
+/**
+ * Job: {{txtServiceName}} 빈의 {{txtServiceMethod}}() 호출.
+ */
+@Configuration
+public class {{txtFileName}} {
+
+	@Bean(name = "{{txtJobName}}")
+	public MethodInvokingJobDetailFactoryBean jobDetail(@Qualifier("{{txtServiceName}}") Object target) {
+		MethodInvokingJobDetailFactoryBean factory = new MethodInvokingJobDetailFactoryBean();
+		factory.setTargetObject(target);
+		factory.setTargetMethod("{{java txtServiceMethod}}");
+		factory.setConcurrent({{cboConcurrent}});
+		return factory;
+	}
+}

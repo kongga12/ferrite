@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<beans xmlns="http://www.springframework.org/schema/beans"
+	xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xsi:schemaLocation="http://www.springframework.org/schema/beans http://www.springframework.org/schema/beans/spring-beans.xsd">
+
+	<!-- cron 식 "{{xml txtCronExpression}}"에 맞춰 {{txtJobName}} 실행 -->
+	<bean id="{{txtTriggerName}}" class="org.springframework.scheduling.quartz.CronTriggerFactoryBean">
+		<property name="jobDetail" ref="{{txtJobName}}"/>
+		<property name="cronExpression" value="{{xml txtCronExpression}}"/>
+	</bean>
+
+</beans>

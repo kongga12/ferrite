@@ -1,0 +1,22 @@
+package {{txtConfigPackage}};
+
+import org.quartz.JobDetail;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.scheduling.quartz.CronTriggerFactoryBean;
+
+/**
+ * cron 식 "{{java txtCronExpression}}"에 맞춰 {{txtJobName}} 실행.
+ */
+@Configuration
+public class {{txtFileName}} {
+
+	@Bean(name = "{{txtTriggerName}}")
+	public CronTriggerFactoryBean trigger(@Qualifier("{{txtJobName}}") JobDetail jobDetail) {
+		CronTriggerFactoryBean factory = new CronTriggerFactoryBean();
+		factory.setJobDetail(jobDetail);
+		factory.setCronExpression("{{java txtCronExpression}}");
+		return factory;
+	}
+}

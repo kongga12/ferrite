@@ -1,0 +1,21 @@
+package {{txtConfigPackage}};
+
+import org.quartz.Trigger;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.scheduling.quartz.SchedulerFactoryBean;
+
+/**
+ * 스케줄러: 트리거 {{txtTriggerName}}를 실행한다.
+ */
+@Configuration
+public class {{txtFileName}} {
+
+	@Bean(name = "{{txtSchedulerName}}")
+	public SchedulerFactoryBean scheduler(@Qualifier("{{txtTriggerName}}") Trigger trigger) {
+		SchedulerFactoryBean factory = new SchedulerFactoryBean();
+		factory.setTriggers(trigger);
+		return factory;
+	}
+}
