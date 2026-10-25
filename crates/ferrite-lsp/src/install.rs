@@ -246,10 +246,14 @@ fn install_with(
             let total: u64 = assets.iter().map(|a| a.size).sum();
             let mut done = 0;
             for asset in &assets {
-                let result = fetch(agent, asset, &download, &mut |received, _| {
-                    progress(done + received, total)
-                })
-                .and_then(|()| verify(&download, asset))
+                let result = fetch(
+                    agent,
+                    asset.url,
+                    asset.size,
+                    &download,
+                    &mut |received, _| progress(done + received, total),
+                )
+                .and_then(|()| verify(&download, asset.size, asset.sha256))
                 .and_then(|()| unpack(asset, &download, &dir));
                 let _ = fs::remove_file(&download);
                 result?;
@@ -308,7 +312,10 @@ pub fn install_from_files(
     let mut matched = Vec::new();
     let mut missing = Vec::new();
     for asset in &assets {
-        match files.iter().find(|f| verify(f, asset).is_ok()) {
+        match files
+            .iter()
+            .find(|f| verify(f, asset.size, asset.sha256).is_ok())
+        {
             Some(file) => matched.push((*asset, file)),
             None => missing.push(asset.url.rsplit('/').next().unwrap_or(asset.url)),
         }
@@ -350,16 +357,51 @@ fn agent() -> Agent {
         .into()
 }
 
+/// 고정한 크기·SHA-256과 맞는 파일만 `dest`에 둔다(언어 서버 밖의 배포 파일, 예: 프로젝트
+/// 템플릿). 받는 동안은 옆의 `.download` 파일에 쓰고, 맞지 않으면 지운다. UI 스레드가 아닌
+/// 곳에서 부른다.
+pub fn download(
+    url: &str,
+    size: u64,
+    sha256: &str,
+    dest: &Path,
+    progress: &mut dyn FnMut(u64, u64),
+) -> Result<(), InstallError> {
+    download_with(&agent(), url, size, sha256, dest, progress)
+}
+
+fn download_with(
+    agent: &Agent,
+    url: &str,
+    size: u64,
+    sha256: &str,
+    dest: &Path,
+    progress: &mut dyn FnMut(u64, u64),
+) -> Result<(), InstallError> {
+    if let Some(dir) = dest.parent() {
+        fs::create_dir_all(dir)?;
+    }
+    let mut partial = dest.as_os_str().to_owned();
+    partial.push(".download");
+    let partial = PathBuf::from(partial);
+    let result = fetch(agent, url, size, &partial, progress)
+        .and_then(|()| verify(&partial, size, sha256))
+        .and_then(|()| Ok(fs::rename(&partial, dest)?));
+    let _ = fs::remove_file(&partial);
+    result
+}
+
 /// 내려받는다. 목록의 크기보다 많이 오면 거기서 멈춘다(검증에서 걸린다).
 fn fetch(
     agent: &Agent,
-    asset: &Asset,
+    url: &str,
+    size: u64,
     dest: &Path,
     progress: &mut dyn FnMut(u64, u64),
 ) -> Result<(), InstallError> {
     let network = |e: &dyn fmt::Display| InstallError::Network(e.to_string());
-    let mut response = agent.get(asset.url).call().map_err(|e| network(&e))?;
-    let mut body = response.body_mut().as_reader().take(asset.size + 1);
+    let mut response = agent.get(url).call().map_err(|e| network(&e))?;
+    let mut body = response.body_mut().as_reader().take(size + 1);
     let mut file = File::create(dest)?;
     let mut buf = vec![0; 64 * 1024];
     let mut received = 0;
@@ -370,7 +412,7 @@ fn fetch(
         }
         file.write_all(&buf[..n])?;
         received += n as u64;
-        progress(received, asset.size);
+        progress(received, size);
     }
     file.sync_all()?;
     Ok(())
@@ -398,7 +440,7 @@ fn unpack(asset: &Asset, file: &Path, dir: &Path) -> Result<(), InstallError> {
     Ok(())
 }
 
-fn verify(file: &Path, asset: &Asset) -> Result<(), InstallError> {
+fn verify(file: &Path, expected_size: u64, sha256: &str) -> Result<(), InstallError> {
     let mut reader = File::open(file)?;
     let mut hasher = Sha256::new();
     let mut buf = vec![0; 64 * 1024];
@@ -416,11 +458,11 @@ fn verify(file: &Path, asset: &Asset) -> Result<(), InstallError> {
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect();
-    if size == asset.size && actual == asset.sha256 {
+    if size == expected_size && actual == sha256 {
         Ok(())
     } else {
         Err(InstallError::Checksum {
-            expected: asset.sha256.to_owned(),
+            expected: sha256.to_owned(),
             actual,
         })
     }
@@ -754,6 +796,62 @@ mod tests {
 
         let err = install_with(&agent, &root, &server, &mut |_, _| {}).unwrap_err();
         assert!(matches!(err, InstallError::Checksum { .. }), "{err}");
+        server_thread.join().unwrap();
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn 파일_내려받기는_해시가_맞을_때만_남긴다() {
+        let payload = b"template zip".to_vec();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/template.zip", listener.local_addr().unwrap());
+        let served = payload.clone();
+        let server_thread = thread::spawn(move || {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                while reader.read_line(&mut line).unwrap() > 2 {
+                    line.clear();
+                }
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK
+Content-Length: {}
+Connection: close
+
+",
+                    served.len()
+                )
+                .unwrap();
+                stream.write_all(&served).unwrap();
+            }
+        });
+        let root = temp_root("download");
+        let agent: Agent = Agent::config_builder().build().into();
+        let size = payload.len() as u64;
+
+        let dest = root.join("cache/template.zip");
+        let mut seen = None;
+        download_with(
+            &agent,
+            &url,
+            size,
+            &sha256(&payload),
+            &dest,
+            &mut |done, total| seen = Some((done, total)),
+        )
+        .unwrap();
+        assert_eq!(seen, Some((size, size)));
+        assert_eq!(fs::read(&dest).unwrap(), payload);
+        assert!(!root.join("cache/template.zip.download").exists());
+
+        let other = root.join("cache/other.zip");
+        let err = download_with(&agent, &url, size, &sha256(b"else"), &other, &mut |_, _| {})
+            .unwrap_err();
+        assert!(matches!(err, InstallError::Checksum { .. }), "{err}");
+        assert!(!other.exists(), "해시가 다르면 남기지 않는다");
+        assert!(!root.join("cache/other.zip.download").exists());
         server_thread.join().unwrap();
         fs::remove_dir_all(&root).unwrap();
     }

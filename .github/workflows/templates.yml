@@ -1,0 +1,32 @@
+name: egov 템플릿 mvn package
+
+# 공식 템플릿(Web·Boot Web)을 실제로 GitHub에서 받아 Ferrite로 프로젝트를 만들고 3개 OS에서
+# `mvn package`를 돌린다(Phase 2c 완료 조건). 템플릿 약 31MB와 Maven 의존성을 받고 Windows·macOS
+# 분이 비싸므로(비공개 저장소는 ×2·×10) 수동 실행("Run workflow")만 한다. 템플릿 목록·만들기
+# 코드를 바꾼 PR은 머지 전에 돌린다.
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  mvn-package:
+    name: mvn package (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # egov 5 템플릿의 최소 Java 버전으로 확인한다.
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: 템플릿 받기 → 프로젝트 만들기 → mvn package
+        run: cargo test -p ferrite-codegen --test template_download -- --ignored --nocapture
