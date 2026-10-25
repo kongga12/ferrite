@@ -1,13 +1,15 @@
 # Ferrite 개발 워크플로우
 
 > 모든 Phase는 **Windows / macOS / Linux 3개 OS CI 통과**를 완료 조건에 포함한다.
+> 3개 OS 전체 CI는 수동 실행과 주 1회로 돈다. PR은 Ubuntu로 검사하고, Phase를 마치는 PR은 머지 전에 3개 OS를 수동으로 돌린다.
 
 ## 1. 공통 개발 규칙
 
 | 항목 | 규칙 |
 |---|---|
 | 브랜치 | `main`은 보호 브랜치. 작업은 `feature/<phase>-<기능>`에서 하고 PR로 병합 |
-| CI 게이트 | `cargo fmt --check` → `cargo clippy -- -D warnings` → `cargo test` → `cargo build --release`, 3개 OS 매트릭스 |
+| CI 게이트 | PR·main 푸시는 Ubuntu에서 `cargo fmt --check` → `cargo clippy -- -D warnings` → `cargo test`, 그리고 커버리지를 본다. 3개 OS(+ `cargo build --release`, 실행 파일)는 `ci.yml`의 `full` 작업이 맡고, 수동 실행·주 1회 돈다. 같은 브랜치의 이전 실행은 자동 취소한다. 비공개 저장소는 Actions 분을 Windows ×2, macOS ×10으로 세기 때문이다(2026-10에 무료 2,000분의 95% 사용). |
+| 3개 OS·실제 서버 수동 실행 | `gh workflow run ci.yml --ref <브랜치>`, `gh workflow run servers.yml --ref <브랜치>` |
 | 주석·커밋 메시지 | 한국어 |
 | 테스트 | 코어 로직(인코딩, 버퍼, 프로토콜 파싱)은 단위 테스트 필수. UI는 수동 체크리스트로 검증 |
 | 플랫폼 분기 | `#[cfg(target_os = "...")]`는 한 함수 안에 모으고, 호출부에는 분기를 흩뿌리지 않음 |

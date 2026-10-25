@@ -1,22 +1,17 @@
 name: 언어 서버 실제 설치
 
 # 실제 배포처에서 언어 서버를 받아 설치·실행하고, jdt.ls ↔ Spring Boot LS 중계까지 3개 OS에서
-# 확인한다. 한 번에 약 150MB를 받으므로 PR마다 돌리지 않고, 서버 관련 코드가 바뀐 PR과
-# 수동 실행, 매주 한 번(고정한 배포 파일이 사라지거나 바뀌었는지 확인) 돈다.
+# 확인한다. 한 번에 약 150MB를 받고 Windows·macOS 분이 비싸므로(비공개 저장소는 ×2·×10)
+# PR에서는 돌리지 않는다. 수동 실행("Run workflow")과 매주 한 번(고정한 배포 파일이 사라지거나
+# 바뀌었는지 확인)만 돈다. 서버 목록·설치·중계 코드를 바꾼 PR은 머지 전에 수동으로 돌린다.
 on:
   workflow_dispatch:
   schedule:
     - cron: '0 18 * * 0' # 매주 월요일 03:00 KST
-  pull_request:
-    paths:
-      - crates/ferrite-lsp/src/catalog.rs
-      - crates/ferrite-lsp/src/install.rs
-      - crates/ferrite-lsp/src/java.rs
-      - crates/ferrite-lsp/src/spring.rs
-      - crates/ferrite-lsp/src/client.rs
-      - crates/ferrite-lsp/tests/download.rs
-      - crates/ferrite-app/src/lsp_hub.rs
-      - .github/workflows/servers.yml
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   servers:
