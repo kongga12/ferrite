@@ -1,0 +1,65 @@
+package {{packageName}}.service.impl;
+
+import java.util.List;
+
+import javax.annotation.Resource;
+
+import org.springframework.stereotype.Service;
+
+import {{rte}}.fdl.cmmn.EgovAbstractServiceImpl;
+
+import {{packageName}}.service.{{className}}DefaultVO;
+import {{packageName}}.service.{{className}}Service;
+import {{packageName}}.service.{{className}}VO;
+
+/**
+ * {{tableCommentDoc}} 서비스 구현.
+ *
+ * @author {{author}}
+ * @since {{date}}
+ * @version {{version}}
+ */
+@Service("{{classNameFirstCharLower}}Service")
+public class {{className}}ServiceImpl extends EgovAbstractServiceImpl implements {{className}}Service {
+
+	@Resource(name = "{{classNameFirstCharLower}}Mapper")
+	private {{className}}Mapper {{classNameFirstCharLower}}Mapper;
+
+	@Override
+	public void insert{{className}}({{className}}VO vo) throws Exception {
+		{{classNameFirstCharLower}}Mapper.insert{{className}}(vo);
+	}
+
+	@Override
+	public void update{{className}}({{className}}VO vo) throws Exception {
+		if ({{classNameFirstCharLower}}Mapper.update{{className}}(vo) == 0) {
+			throw processException("info.nodata.msg");
+		}
+	}
+
+	@Override
+	public void delete{{className}}({{className}}VO vo) throws Exception {
+		if ({{classNameFirstCharLower}}Mapper.delete{{className}}(vo) == 0) {
+			throw processException("info.nodata.msg");
+		}
+	}
+
+	@Override
+	public {{className}}VO select{{className}}({{className}}VO vo) throws Exception {
+		{{className}}VO result = {{classNameFirstCharLower}}Mapper.select{{className}}(vo);
+		if (result == null) {
+			throw processException("info.nodata.msg");
+		}
+		return result;
+	}
+
+	@Override
+	public List<{{className}}VO> select{{className}}List({{className}}DefaultVO searchVO) throws Exception {
+		return {{classNameFirstCharLower}}Mapper.select{{className}}List(searchVO);
+	}
+
+	@Override
+	public int select{{className}}ListTotCnt({{className}}DefaultVO searchVO) throws Exception {
+		return {{classNameFirstCharLower}}Mapper.select{{className}}ListTotCnt(searchVO);
+	}
+}

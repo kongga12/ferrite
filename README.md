@@ -5,7 +5,7 @@ Rust로 작성한 크로스플랫폼(Windows / macOS / Linux) 경량 IDE.
 
 - 개발 워크플로우와 로드맵: [docs/WORKFLOW.md](docs/WORKFLOW.md)
 
-## 현재 상태: Phase 2 완료 (LSP 연동), Phase 2b 진행 중 (egov 언어 지원)
+## 현재 상태: Phase 2 완료 (LSP 연동), Phase 2b 기능 완료 (3개 OS 검증 남음), Phase 2c 진행 중 (egov 개발도구)
 
 - 폴더 열기, 지연 로딩 프로젝트 트리(파일 감시로 자동 갱신), 탭 에디터
 - 트리 우클릭: 새 파일·새 폴더·이름 바꾸기·휴지통으로 삭제
@@ -28,6 +28,9 @@ Rust로 작성한 크로스플랫폼(Windows / macOS / Linux) 경량 IDE.
   - 자동완성 팝업, 호버 정보
   - 정의로 이동, 참조 목록
   - 문서 포맷, 기호 이름 바꾸기(여러 파일), 코드 액션(빠른 수정·리팩터링)
+- egov CRUD 코드 생성(`도구 > egov CRUD 코드 생성`): DDL을 붙여 넣으면 VO·Mapper(인터페이스·XML)·Service·ServiceImpl·Controller·JSP·테스트를 만든다.
+  - egov 3.x·4.x, Oracle·Tibero·PostgreSQL·MariaDB·CUBRID SQL. 매퍼 위치·이름, JSP 폴더, 인코딩(UTF-8·MS949)은 프로젝트에서 찾는다.
+  - 공식 VS Code 확장과 같은 템플릿 문맥이라, 공식·직접 고친 Handlebars 템플릿을 `.ferrite/templates/code/`에 두면 그것으로 만든다.
 - 구문 강조(tree-sitter): Rust, Python, Go, C/C++, PHP, Java, SQL, TOML, JSON, YAML, XML, HTML, JSP(HTML + 스크립틀릿 Java + EL), JavaScript, CSS, Properties
 - UTF-8(BOM 포함)·CP949 인코딩과 CRLF 감지·보존, 들여쓰기 방식 감지
 - 원자적 저장, 미저장 변경 확인(탭 닫기, 창 종료), 외부 변경 시 다시 불러오기·충돌 안내

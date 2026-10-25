@@ -13,6 +13,7 @@ path = "src/main.rs"
 [dependencies]
 dirs = "7.0.0"
 eframe.workspace = true
+ferrite-codegen.workspace = true
 ferrite-core.workspace = true
 ferrite-egov.workspace = true
 ferrite-lsp.workspace = true

@@ -1,0 +1,61 @@
+<%@ page contentType="text/html; charset=UTF-8" pageEncoding="{{fileEncoding}}" %>
+<%@ taglib prefix="c" uri="http://java.sun.com/jsp/jstl/core" %>
+<%@ taglib prefix="fn" uri="http://java.sun.com/jsp/jstl/functions" %>
+<%@ taglib prefix="form" uri="http://www.springframework.org/tags/form" %>
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<title>{{tableCommentHtml}} 등록·수정</title>
+</head>
+<body>
+<c:choose>
+	<c:when test="${registerFlag == 'modify'}">
+		<c:url var="actionUrl" value="{{updatePath}}"/>
+	</c:when>
+	<c:otherwise>
+		<c:url var="actionUrl" value="{{addPath}}"/>
+	</c:otherwise>
+</c:choose>
+<h2>{{tableCommentHtml}} <c:out value="${registerFlag == 'modify' ? '수정' : '등록'}"/></h2>
+
+<form:form modelAttribute="{{voInstanceName}}" action="${actionUrl}" method="post" htmlEscape="true">
+	<input type="hidden" name="pageIndex" value="${fn:escapeXml(searchVO.pageIndex)}">
+	<table>
+{{#each formAttributes}}
+		<tr>
+			<th scope="row"><label for="{{ccName}}">{{labelHtml}}{{#if notNull}} *{{/if}}</label></th>
+			<td>
+{{#if isPrimaryKey}}
+				<c:choose>
+					<c:when test="${registerFlag == 'modify'}">
+						<form:input path="{{ccName}}" readonly="true" htmlEscape="true"/>
+					</c:when>
+					<c:otherwise>
+						<form:input path="{{ccName}}" htmlEscape="true"{{#if maxLength}} maxlength="{{maxLength}}"{{/if}}/>
+					</c:otherwise>
+				</c:choose>
+{{else}}
+				<form:input path="{{ccName}}" htmlEscape="true"{{#if maxLength}} maxlength="{{maxLength}}"{{/if}}/>
+{{/if}}
+				<form:errors path="{{ccName}}" htmlEscape="true"/>
+			</td>
+		</tr>
+{{/each}}
+	</table>
+	<button type="submit">저장</button>
+	<a href="<c:url value='{{listPath}}'/>">목록</a>
+</form:form>
+
+<c:if test="${registerFlag == 'modify'}">
+	<c:url var="deleteUrl" value="{{deletePath}}"/>
+	<form:form id="deleteForm" modelAttribute="{{voInstanceName}}" action="${deleteUrl}" method="post" htmlEscape="true"
+		onsubmit="return confirm('삭제할까요?');">
+{{#each pkAttributes}}
+		<form:hidden id="delete_{{ccName}}" path="{{ccName}}" htmlEscape="true"/>
+{{/each}}
+		<button type="submit">삭제</button>
+	</form:form>
+</c:if>
+</body>
+</html>

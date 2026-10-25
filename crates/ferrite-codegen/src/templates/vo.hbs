@@ -1,0 +1,34 @@
+package {{packageName}}.service;
+{{#if voImports}}
+
+{{#each voImports}}
+import {{this}};
+{{/each}}
+{{/if}}
+
+/**
+ * {{tableCommentDoc}}({{dbTableName}}) VO.
+ *
+ * @author {{author}}
+ * @since {{date}}
+ * @version {{version}}
+ */
+public class {{className}}VO extends {{className}}DefaultVO {
+
+	private static final long serialVersionUID = 1L;
+{{#each attributes}}
+
+	/** {{labelDoc}} */
+	private {{javaSimpleType}} {{ccName}};
+{{/each}}
+{{#each attributes}}
+
+	public {{javaSimpleType}} get{{pcName}}() {
+		return {{ccName}};
+	}
+
+	public void set{{pcName}}({{javaSimpleType}} {{ccName}}) {
+		this.{{ccName}} = {{ccName}};
+	}
+{{/each}}
+}

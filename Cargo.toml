@@ -12,6 +12,7 @@ publish = false
 ferrite-core = { path = "crates/ferrite-core" }
 ferrite-lsp = { path = "crates/ferrite-lsp" }
 ferrite-egov = { path = "crates/ferrite-egov" }
+ferrite-codegen = { path = "crates/ferrite-codegen" }
 eframe = "0.37"
 egui_kittest = { version = "0.37", features = ["eframe"] }
 encoding_rs = "0.8"

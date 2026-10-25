@@ -385,6 +385,8 @@ pub struct FerriteApp {
     confirm_delete: Option<PathBuf>,
     hub: LspHub,
     servers: ServerManager,
+    /// egov CRUD 코드 생성 창.
+    codegen: crate::codegen::CodegenWindow,
     /// 아래쪽 "문제" 목록을 보이는지.
     show_problems: bool,
     /// 응답을 기다리는 언어 서버 요청.
@@ -449,6 +451,7 @@ impl FerriteApp {
             confirm_delete: None,
             hub: LspHub::new(cc.egui_ctx.clone(), servers_root()),
             servers: ServerManager::new(servers_root()),
+            codegen: Default::default(),
             show_problems: false,
             pending: std::collections::HashMap::new(),
             completion: None,
@@ -1478,6 +1481,11 @@ impl FerriteApp {
                         ui.close();
                         self.servers.show();
                     }
+                    if ui.button("egov CRUD 코드 생성…").clicked() {
+                        ui.close();
+                        let root = self.tree.as_ref().map(|t| t.root().to_path_buf());
+                        self.codegen.show(root.as_deref());
+                    }
                 });
             });
         });
@@ -2126,6 +2134,17 @@ impl eframe::App for FerriteApp {
         let ctx = ui.ctx().clone();
         if let Some(action) = self.servers.ui(&ctx) {
             self.start_server_action(action, &ctx);
+        }
+        if let Some(written) = self.codegen.ui(&ctx) {
+            self.status = format!("코드를 만들었습니다: 파일 {}개", written.len());
+            // 만든 Controller를 연다(흐름의 시작점). 트리는 파일 감시로 갱신된다.
+            if let Some(controller) = written
+                .iter()
+                .find(|p| p.to_string_lossy().ends_with("Controller.java"))
+                .or(written.first())
+            {
+                self.open_file(controller.clone());
+            }
         }
     }
 }
@@ -3064,6 +3083,87 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(200));
         }
 
+        drop(harness);
+        remove_project(&dir);
+    }
+
+    #[test]
+    fn egov_crud_코드를_만들고_controller를_연다() {
+        use egui::accesskit::Role;
+
+        let dir = std::env::temp_dir().join(format!("ferrite-codegen-ui-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let write = |path: &str, text: &str| {
+            let file = dir.join(path);
+            fs::create_dir_all(file.parent().unwrap()).unwrap();
+            fs::write(file, text).unwrap();
+        };
+        // egov 3.x 프로젝트 모양: 매퍼 폴더·이름 모양과 뷰 리졸버 접두사를 그대로 따라야 한다.
+        write(
+            "pom.xml",
+            "<project><dependency><groupId>egovframework.rte</groupId></dependency></project>",
+        );
+        write(
+            "src/main/java/egovframework/example/sample/service/SampleService.java",
+            "package egovframework.example.sample.service;\n",
+        );
+        write(
+            "src/main/resources/egovframework/sqlmap/example/mappers/EgovSample_Sample_SQL.xml",
+            "<mapper namespace=\"x\"></mapper>",
+        );
+        write(
+            "src/main/webapp/WEB-INF/config/springmvc/dispatcher-servlet.xml",
+            "<beans><bean class=\"org.springframework.web.servlet.view.UrlBasedViewResolver\" p:prefix=\"/WEB-INF/jsp/egovframework/example/\" p:suffix=\".jsp\"/></beans>",
+        );
+
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(1400.0, 1300.0))
+            .build_eframe(|cc| FerriteApp::new(cc, Some(dir.clone())));
+        harness.get_by_label("도구").click();
+        harness.run();
+        harness.get_by_label("egov CRUD 코드 생성…").click();
+        harness.run();
+
+        let ddl = harness.get_by_role(Role::MultilineTextInput);
+        ddl.focus();
+        ddl.type_text("CREATE TABLE TB_NOTICE (NOTICE_ID VARCHAR2(20) PRIMARY KEY, TITLE VARCHAR2(100) NOT NULL)");
+        harness.run();
+        harness.get_by_label("DDL 읽기").click();
+        harness.run();
+        harness.get_by_label("열 2개를 읽었습니다");
+        harness.get_by_label("생성").click();
+        harness.run();
+
+        let java = dir.join("src/main/java/egovframework/example/notice");
+        assert!(java.join("service/NoticeVO.java").is_file());
+        assert!(java.join("service/impl/NoticeServiceImpl.java").is_file());
+        let mapper =
+            dir.join("src/main/resources/egovframework/sqlmap/example/mappers/Notice_SQL.xml");
+        assert!(
+            mapper.is_file(),
+            "기존 매퍼 폴더·이름 모양(_SQL.xml)을 따른다"
+        );
+        assert!(
+            dir.join("src/main/webapp/WEB-INF/jsp/egovframework/example/notice/noticeList.jsp")
+                .is_file(),
+            "뷰 리졸버 접두사 아래"
+        );
+        let vo = fs::read_to_string(java.join("service/NoticeVO.java")).unwrap();
+        assert!(vo.contains("private String noticeId;"));
+        let app = harness.state();
+        assert!(app.status.contains("파일 10개"), "{}", app.status);
+        assert!(
+            app.docs
+                .iter()
+                .any(|d| d.path.ends_with("NoticeController.java")),
+            "만든 Controller를 연다"
+        );
+
+        // 다시 만들면 이미 있다고 막는다(덮어쓰기를 고르지 않았으므로).
+        harness.get_by_label("생성").click();
+        harness.run();
+        harness.get_by_label_contains("이미 있는 파일:");
+        harness.get_by_label("이미 있는 파일 덮어쓰기");
         drop(harness);
         remove_project(&dir);
     }
