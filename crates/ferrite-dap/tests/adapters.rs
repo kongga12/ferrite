@@ -302,3 +302,134 @@ fn php_debug를_설치해_php를_디버그한다() {
     let _ = std::fs::remove_dir_all(&servers);
     let _ = std::fs::remove_dir_all(&project);
 }
+
+/// jdt.ls에 `workspace/executeCommand`를 보내고 응답을 기다린다(최대 120초).
+fn execute(
+    lsp: &mut ferrite_lsp::client::LanguageServer,
+    command: &str,
+    arguments: &[Value],
+) -> Result<Value, String> {
+    let id = lsp.request(
+        "workspace/executeCommand",
+        json!({ "command": command, "arguments": arguments }),
+    );
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_secs(120) {
+        for event in lsp.poll_events() {
+            match event {
+                ferrite_lsp::client::ServerEvent::Response { id: got, result } if got == id => {
+                    return result.map_err(|e| e.to_string());
+                }
+                ferrite_lsp::client::ServerEvent::Exited(reason) => {
+                    panic!("jdt.ls가 끝남: {reason}")
+                }
+                _ => {}
+            }
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    panic!("{command} 응답 시간 초과");
+}
+
+#[test]
+#[ignore = "jdt.ls(약 51MB)와 java-debug(약 3MB)를 받는다. Java 21 이상이 필요하다"]
+fn java_debug를_jdtls에_실어_java를_디버그한다() {
+    use ferrite_dap::java::{JavaStart, Next, RESOLVE_MAIN_CLASS};
+    if !require("Java 21", ferrite_lsp::java::find_java().is_ok()) {
+        return;
+    }
+    let (servers, project) = (temp_dir("java-servers"), temp_dir("java"));
+    // 빌드 도구 없는 Eclipse 프로젝트(.project·.classpath). egov 프로젝트도 흔히 이 꼴이고, 의존을 받지 않는다.
+    std::fs::write(
+        project.join(".project"),
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<projectDescription><name>demo</name><comment></comment><projects></projects>\
+         <buildSpec><buildCommand><name>org.eclipse.jdt.core.javabuilder</name><arguments></arguments></buildCommand></buildSpec>\
+         <natures><nature>org.eclipse.jdt.core.javanature</nature></natures></projectDescription>\n",
+    )
+    .unwrap();
+    std::fs::write(
+        project.join(".classpath"),
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<classpath><classpathentry kind=\"src\" path=\"src\"/>\
+         <classpathentry kind=\"con\" path=\"org.eclipse.jdt.launching.JRE_CONTAINER\"/>\
+         <classpathentry kind=\"output\" path=\"bin\"/></classpath>\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(project.join("src/demo")).unwrap();
+    let source = project.join("src/demo/Main.java");
+    let text = "package demo;\n\npublic class Main {\n    static int add(int a, int b) {\n        int total = a + b;\n        return total;\n    }\n\n    public static void main(String[] args) {\n        int y = add(41, 1);\n        System.out.println(\"결과 \" + y);\n    }\n}\n";
+    std::fs::write(&source, text).unwrap();
+
+    let jdtls = ferrite_lsp::catalog::SERVERS
+        .iter()
+        .find(|s| s.name == "jdtls")
+        .unwrap();
+    install::install(&servers, jdtls, &mut |_, _| {}).expect("jdt.ls 설치");
+    install::install(
+        &servers,
+        adapters::find("java-debug").unwrap(),
+        &mut |_, _| {},
+    )
+    .expect("java-debug 설치");
+    let command = install::command(&servers, jdtls, &project)
+        .unwrap()
+        .unwrap();
+    assert!(
+        command
+            .init_options
+            .to_string()
+            .contains("com.microsoft.java.debug.plugin"),
+        "java-debug 번들을 싣는다: {}",
+        command.init_options
+    );
+    let mut lsp = ferrite_lsp::client::LanguageServer::start(&command, &project, || {}).unwrap();
+    let started = Instant::now();
+    while !lsp.is_ready() {
+        assert!(
+            started.elapsed() < Duration::from_secs(180),
+            "jdt.ls 준비 시간 초과"
+        );
+        for event in lsp.poll_events() {
+            if let ferrite_lsp::client::ServerEvent::Exited(reason) = event {
+                panic!("jdt.ls가 끝남: {reason}");
+            }
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    lsp.did_open(&source, "java", 1, text);
+
+    let mut start = JavaStart::new(
+        json!({ "cwd": project, "console": "internalConsole" }),
+        false,
+        Some(&source),
+    );
+    let mut next = start.command();
+    let (port, arguments) = loop {
+        match next {
+            Next::Command(name, args) => {
+                // 프로젝트를 다 읽기 전에는 메인 클래스가 비어 있다. 잠시 뒤 다시 묻는다.
+                let mut result = execute(&mut lsp, name, &args);
+                for _ in 0..90 {
+                    let empty = result
+                        .as_ref()
+                        .is_ok_and(|v| v.as_array().is_some_and(Vec::is_empty));
+                    if name != RESOLVE_MAIN_CLASS || !empty {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_secs(1));
+                    result = execute(&mut lsp, name, &args);
+                }
+                next = start.answer(result);
+            }
+            Next::Ready { port, arguments } => break (port, arguments),
+            Next::Failed(e) => panic!("java-debug 준비 실패: {e}"),
+        }
+    };
+    assert_eq!(arguments["mainClass"], "demo.Main");
+    let adapter = Adapter::Tcp(([127, 0, 0, 1], port).into());
+    assert_locals(&locals_at_breakpoint(
+        &adapter, "java", arguments, &source, 6,
+    ));
+    drop(lsp);
+    let _ = std::fs::remove_dir_all(&servers);
+    let _ = std::fs::remove_dir_all(&project);
+}

@@ -501,6 +501,25 @@ impl LspHub {
         Some(first.1)
     }
 
+    /// 이름으로 고른 서버(jdt.ls 등)에 `workspace/executeCommand`를 보낸다. 서버가 준비되지 않았으면 None.
+    /// 응답은 `lang`의 `HubUpdate::Response`로 온다.
+    pub fn execute_command(
+        &mut self,
+        server: &str,
+        lang: Lang,
+        command: &str,
+        arguments: Vec<Value>,
+    ) -> Option<i64> {
+        let (&name, server) = self.servers.iter_mut().find(|(n, _)| **n == server)?;
+        let lsp = server.lsp.as_mut().filter(|l| l.is_ready())?;
+        let id = lsp.request(
+            "workspace/executeCommand",
+            json!({ "command": command, "arguments": arguments }),
+        );
+        self.requests.insert((name, id), lang);
+        Some(id)
+    }
+
     /// 입력하면 자동완성을 여는 문자(`.`, `::`의 `:` 등). 자동완성을 맡는 서버들이 알려 준 것을 합친다
     /// (요청도 그 서버들에 함께 간다).
     pub fn trigger_characters(&self, path: &Path, lang: Lang) -> Vec<char> {

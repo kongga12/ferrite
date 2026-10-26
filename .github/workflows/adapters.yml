@@ -1,7 +1,7 @@
 name: 디버그 어댑터 실제 설치
 
-# 디버그 어댑터(debugpy·codelldb·delve·vscode-php-debug)를 실제 배포처에서 받아 Ferrite 설치기로
-# 설치하고, 언어마다 예제의 중단점에서 멈춰 변수를 읽는다(3개 OS). 한 번에 약 70MB를 받고 Go·PHP를
+# 디버그 어댑터(debugpy·codelldb·delve·vscode-php-debug·java-debug)를 실제 배포처에서 받아 Ferrite 설치기로
+# 설치하고, 언어마다 예제의 중단점에서 멈춰 변수를 읽는다(3개 OS). 한 번에 약 120MB(jdt.ls 포함)를 받고 Go·PHP·Java를
 # 준비하느라 오래 걸리므로, 어댑터 목록·설치·연결 코드를 바꾼 PR에서만 돈다. 그 밖에는 수동 실행
 # ("Run workflow")과 매주 한 번(고정한 배포 파일이 사라지거나 바뀌었는지 확인).
 on:
@@ -43,6 +43,11 @@ jobs:
         with:
           go-version: stable
           cache: false
+      # java-debug는 jdt.ls(Java 21 이상)에 실어 띄운다.
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '21'
       # vscode-php-debug는 Xdebug 3과 말한다. node는 러너에 있다.
       - uses: shivammathur/setup-php@v2
         with:

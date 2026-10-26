@@ -110,6 +110,19 @@ struct Retry {
     version: u64,
 }
 
+/// jdt.ls에 메인 클래스·클래스패스·디버그 포트를 묻는 중인 java-debug 시작.
+struct JavaDebugPending {
+    /// 기다리는 jdt.ls 요청 번호.
+    id: i64,
+    start: ferrite_dap::java::JavaStart,
+    config: ferrite_core::debug_config::DebugConfig,
+    file: Option<PathBuf>,
+    ctx: egui::Context,
+}
+
+/// java-debug를 싣는 언어 서버.
+const JDTLS: &str = "jdtls";
+
 /// 에디터를 그린 프레임에서 언어 서버 기능에 넘길 정보.
 struct EditorFrame {
     path: PathBuf,
@@ -465,6 +478,8 @@ pub struct FerriteApp {
     breakpoints: std::collections::BTreeMap<PathBuf, Vec<ferrite_dap::Breakpoint>>,
     /// 조건을 고치고 있는 중단점(파일, 줄(1부터), 조건식).
     breakpoint_condition: Option<(PathBuf, usize, String)>,
+    /// jdt.ls에 묻는 중인 java-debug 시작.
+    java_debug: Option<JavaDebugPending>,
     /// git 상태·소스 제어 창(Ctrl+Shift+G).
     git: crate::git_ui::GitPanel,
     /// 다음 프레임에 에디터로 키보드 포커스를 돌려준다(찾기 막대를 닫은 뒤 등).
@@ -524,6 +539,7 @@ impl FerriteApp {
             debugger: Default::default(),
             breakpoints: Default::default(),
             breakpoint_condition: None,
+            java_debug: None,
             git: Default::default(),
             focus_editor: false,
             settings,
@@ -1162,6 +1178,13 @@ impl FerriteApp {
         result: Result<Value, RpcError>,
         encoding: PositionEncoding,
     ) {
+        if server == JDTLS
+            && let Some(java) = self.java_debug.as_mut().filter(|j| j.id == id)
+        {
+            let next = java.start.answer(result.map_err(|e| e.to_string()));
+            self.continue_java_debug(next);
+            return;
+        }
         let Some((pending, retry)) = self.pending.remove(&(lang, id)) else {
             return;
         };
@@ -1513,20 +1536,112 @@ impl FerriteApp {
             return;
         };
         let file = self.active.map(|i| self.docs[i].path.clone());
-        match self.debugger.start(
-            config,
-            &root,
-            file.as_deref(),
-            self.breakpoints.clone(),
-            &servers_root(),
-            ctx,
-        ) {
+        if config.adapter == "java-debug" {
+            self.begin_java_debug(config, &root, file, ctx);
+            return;
+        }
+        self.launch_debug(config, &root, file.as_deref(), None, ctx);
+    }
+
+    fn launch_debug(
+        &mut self,
+        config: &ferrite_core::debug_config::DebugConfig,
+        root: &Path,
+        file: Option<&Path>,
+        adapter: Option<ferrite_dap::Adapter>,
+        ctx: &egui::Context,
+    ) {
+        // 어댑터 문제(설치 안 됨 등)는 빌드하기 전에 알린다.
+        let adapter = match adapter {
+            Some(adapter) => Ok(adapter),
+            None => ferrite_dap::adapters::resolve(&config.adapter, &servers_root(), root),
+        };
+        let started = adapter.and_then(|adapter| {
+            self.debugger
+                .start(config, root, file, self.breakpoints.clone(), adapter, ctx)
+        });
+        match started {
             Ok(()) => {
                 dock::show(&mut self.layout, Pane::DebugConsole);
                 dock::show(&mut self.layout, Pane::Debug);
                 self.status = format!("디버그 시작: {}", config.name);
             }
             Err(e) => self.status = format!("디버그를 시작하지 못했습니다: {e}"),
+        }
+    }
+
+    /// java-debug는 jdt.ls에 실린 번들이라 jdt.ls에 차례로 묻고(메인 클래스·클래스패스·Java·빌드) 받은
+    /// 디버그 포트로 붙는다. jdt.ls는 Java 파일을 열면 뜬다.
+    fn begin_java_debug(
+        &mut self,
+        config: &ferrite_core::debug_config::DebugConfig,
+        root: &Path,
+        file: Option<PathBuf>,
+        ctx: &egui::Context,
+    ) {
+        let arguments = match config.resolved_arguments(root, file.as_deref()) {
+            Ok(arguments) => arguments,
+            Err(e) => {
+                self.status = format!("디버그를 시작하지 못했습니다: {e}");
+                return;
+            }
+        };
+        let start = ferrite_dap::java::JavaStart::new(arguments, config.attach(), file.as_deref());
+        let pending = JavaDebugPending {
+            id: 0,
+            start,
+            config: config.clone(),
+            file,
+            ctx: ctx.clone(),
+        };
+        let next = pending.start.command();
+        self.java_debug = Some(pending);
+        self.status = format!("디버그 준비 중(jdt.ls): {}", config.name);
+        self.continue_java_debug(next);
+    }
+
+    fn continue_java_debug(&mut self, next: ferrite_dap::java::Next) {
+        use ferrite_dap::java::Next;
+        match next {
+            Next::Command(command, arguments) => {
+                match self
+                    .hub
+                    .execute_command(JDTLS, Lang::Java, command, arguments)
+                {
+                    Some(id) => {
+                        if let Some(pending) = &mut self.java_debug {
+                            pending.id = id;
+                        }
+                    }
+                    None => {
+                        self.java_debug = None;
+                        self.status = "jdt.ls가 준비되지 않았습니다. Java 파일을 열고 jdt.ls가 \
+                                       준비되면 다시 시작하세요"
+                            .into();
+                    }
+                }
+            }
+            Next::Ready { port, arguments } => {
+                let Some(mut pending) = self.java_debug.take() else {
+                    return;
+                };
+                let Some(root) = self.tree.as_ref().map(|t| t.root().to_path_buf()) else {
+                    return;
+                };
+                pending.config.arguments = arguments;
+                let adapter = ferrite_dap::Adapter::Tcp(([127, 0, 0, 1], port).into());
+                self.launch_debug(
+                    &pending.config,
+                    &root,
+                    pending.file.as_deref(),
+                    Some(adapter),
+                    &pending.ctx,
+                );
+            }
+            Next::Failed(message) => {
+                self.java_debug = None;
+                self.status = format!("디버그를 시작하지 못했습니다: {message}");
+            }
         }
     }
 
@@ -2033,6 +2148,10 @@ impl FerriteApp {
     fn finish_server_jobs(&mut self) {
         for done in self.servers.poll() {
             self.hub.stop(done.server.name);
+            // jdt.ls 번들(java-debug)은 jdt.ls를 다시 띄워야 싣거나 뺀다.
+            if done.server.launch == ferrite_lsp::catalog::Launch::JdtlsBundle {
+                self.hub.stop(JDTLS);
+            }
             self.status = match done.result {
                 Ok(()) => format!("{} {}를 마쳤습니다", done.server.name, done.verb),
                 Err(e) => format!("{} {} 실패: {e}", done.server.name, done.verb),
@@ -4411,7 +4530,7 @@ mod tests {
         harness.run_ok();
         harness.get_by_label("사용자 구성");
         harness.get_by_label("자동 감지");
-        harness.get_by_label("mvn tomcat7:run");
+        harness.get_by_label("mvn tomcat7:run (디버그 5005)");
         harness.key_press(Key::Enter);
         wait_for_terminal(&mut harness, |text| {
             text.lines().any(|line| line.trim() == "run-ok")

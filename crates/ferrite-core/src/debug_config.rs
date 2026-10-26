@@ -179,6 +179,27 @@ pub fn detect(file: Option<&Path>, root: &Path) -> Vec<DebugConfig> {
             })
             .into_iter()
             .collect(),
+        // java-debug(jdt.ls 번들): 메인 클래스·클래스패스는 시작할 때 jdt.ls에 묻는다. 톰캣·Boot는 실행의
+        // "디버그 5005"로 띄운 뒤 붙는다.
+        Some("java") => vec![
+            config(
+                "Java: 현재 파일(main)".into(),
+                "java-debug",
+                json!({ "cwd": "${workspaceFolder}", "console": "internalConsole" }),
+            ),
+            DebugConfig {
+                request: "attach".into(),
+                ..config(
+                    format!(
+                        "Java: {} 포트에 붙기(실행의 \"디버그 {}\")",
+                        crate::run::JDWP_PORT,
+                        crate::run::JDWP_PORT
+                    ),
+                    "java-debug",
+                    json!({ "hostName": "localhost", "port": crate::run::JDWP_PORT }),
+                )
+            },
+        ],
         // delve가 그 폴더의 패키지를 디버그용으로 빌드해 띄운다.
         Some("go") => vec![config(
             "Go: 현재 패키지".into(),
@@ -269,6 +290,11 @@ mod tests {
             json!(root.join("cmd").to_string_lossy())
         );
         assert_eq!(arguments["mode"], "debug");
+
+        let java = detect(Some(&root.join("src/Main.java")), &root);
+        assert_eq!(java.len(), 2);
+        assert!(!java[0].attach() && java[1].attach());
+        assert_eq!(java[1].arguments["port"], 5005);
 
         let php = &detect(Some(&root.join("index.php")), &root)[0];
         let arguments = php

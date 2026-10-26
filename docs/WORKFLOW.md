@@ -645,8 +645,33 @@
     - 실제 설치·디버그(`crates/ferrite-dap/tests/adapters.rs`, 무시 표시): 예제 `add(41, 1)`의 중단점에서 a=41·b=1·total=42를 읽고 끝까지 이어 간다.
       - 로컬(Windows): debugpy(가상환경 pip)·codelldb(VSIX) 통과. Go와 Xdebug 3을 쓸 PHP가 없어 delve·php-debug는 건너뛰었다.
       - 3개 OS: `.github/workflows/adapters.yml`(어댑터 코드를 바꾼 PR·수동·주 1회)이 Python·Go·PHP+Xdebug를 갖춰 넷 모두 돌린다.
-- [ ] 4-4b java-debug(jdt.ls 번들, 메인 클래스·클래스패스 찾기, egov 톰캣에 붙기)
-- [ ] 3개 OS 검증
+- [x] 4-4b java-debug(jdt.ls 번들, 메인 클래스·클래스패스 찾기, egov 톰캣에 붙기)
+  - java-debug 0.53.1(Maven Central, EPL-1.0)을 어댑터 목록에 "jdt.ls 번들"(`Launch::JdtlsBundle`)로 넣었다.
+    - Maven Central은 SHA-1만 준다. 그 SHA-1과 맞는 jar에서 SHA-256을 구해 고정했다.
+    - 설치되어 있으면 jdt.ls를 띄울 때 Spring Boot LS 번들과 함께 싣는다. 설치·삭제하면 jdt.ls를 다시 띄운다.
+    - 따로 띄우는 프로그램이 아니므로 어댑터 고르기는 "따로 띄우지 않는다"고 알린다.
+  - 시작 준비(`ferrite-dap::java::JavaStart`, 응답 해석과 순서만 맡는 상태 기계)
+    - jdt.ls에 `workspace/executeCommand`로 차례로 묻는다: 메인 클래스(`vscode.java.resolveMainClass`, 열린 파일의 것을 먼저) → 클래스패스 → Java 실행 파일 → 작업 공간 빌드 → 디버그 세션 포트(`vscode.java.startDebugSession`)
+    - launch에서 사용자가 적은 값(mainClass·classPaths·javaExec)은 묻지 않는다. attach는 포트만 받는다.
+    - 받은 포트로 DAP를 TCP로 붙는다.
+    - jdt.ls가 명령을 모르면(번들이 안 실림) "java-debug를 설치하세요"로 알린다. 빌드 실패(0)·취소(3)면 시작하지 않는다(컴파일 오류가 있어도 끝난 빌드(2)는 띄운다).
+  - 앱
+    - 허브에 이름으로 고른 서버로 명령을 보내는 길(`execute_command`)을 냈다.
+    - jdt.ls 응답은 기다리는 요청 번호로 가로채 준비를 이어 간다(문서 위치 요청의 재시도 목록과 따로 둔다).
+    - jdt.ls는 Java 파일을 열면 뜬다. 준비되지 않았으면 그렇게 알린다.
+  - 자동 구성
+    - Java 파일: "Java: 현재 파일(main)", "Java: 5005 포트에 붙기"(attach)
+    - 실행(Maven): "`tomcat7:run` (디버그 5005)"(Maven JVM에 `MAVEN_OPTS`로 JDWP. 사용자 MAVEN_OPTS 뒤에 붙임), "`spring-boot:run` (디버그 5005)"(띄운 앱 JVM에 `jvmArguments`). 보통 실행 바로 뒤에 둔다.
+    - JDWP는 `suspend=n,address=5005`: 멈추지 않고 뜨고, Java 9 이상에서는 이 컴퓨터에서만 붙을 수 있다.
+    - egov 웹 프로젝트는 실행의 "디버그 5005"로 톰캣을 띄우고, 디버그의 "5005 포트에 붙기"로 붙는다.
+  - 검증
+    - 단위 테스트: 준비 순서(launch 전체, 적은 값은 건너뜀, attach는 포트만), 실패 안내(메인 클래스 없음, 번들 없음, 빌드 실패), 자동 구성(Java 둘, Maven 디버그 실행 위치와 MAVEN_OPTS)
+    - 실제 jdt.ls 1.61 + java-debug(어댑터 시험, 무시 표시)
+      - Eclipse 프로젝트(.project·.classpath)를 jdt.ls가 읽고 빌드하면, 위 순서로 포트를 받아 띄운다.
+      - `return total;` 줄에서 멈춰 a=41·b=1·total=42를 읽는다. 로컬 Windows에서 통과했다(35초).
+      - 3개 OS는 어댑터 워크플로가 Java 21을 갖춰 함께 돌린다.
+    - 앱 화면에서 java-debug로 디버그하는 것은 확인하지 못했다. 앱은 사용자 데이터 폴더의 jdt.ls·java-debug를 쓰는데, 이번에는 임시 폴더에만 받았다.
+- [x] 3개 OS 검증(2026-10-26): CI 3개 OS 전체(실행 40284841958) 통과. 완료 조건(5개 어댑터로 중단점 정지와 변수 확인, 3개 OS)은 어댑터 워크플로(실행 40284842805)에서 5종 × 3개 OS 시험 15개가 모두 통과해 확인했다.
 
 ### Phase 5 — DB 도구
 
