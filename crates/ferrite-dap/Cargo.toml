@@ -1,0 +1,13 @@
+[package]
+name = "ferrite-dap"
+description = "Ferrite DAP 클라이언트: 디버그 어댑터와 Debug Adapter Protocol로 말한다"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+# 메시지 틀(Content-Length)과 콘솔 창 숨기기는 LSP 클라이언트와 같다.
+ferrite-lsp.workspace = true
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"

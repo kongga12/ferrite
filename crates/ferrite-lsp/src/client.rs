@@ -82,7 +82,7 @@ fn is_relayed_request(method: &str) -> bool {
 }
 
 /// 창 없는 앱(릴리스 빌드)에서 콘솔 프로그램을 띄우면 검은 창이 잠깐 뜨므로 막는다.
-pub(crate) fn hide_console(cmd: &mut Command) {
+pub fn hide_console(cmd: &mut Command) {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
