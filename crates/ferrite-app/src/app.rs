@@ -3910,7 +3910,13 @@ mod tests {
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
-        panic!("터미널 시간 초과. 화면:\n{}", terminal_text(harness));
+        let app = harness.state();
+        panic!(
+            "터미널 시간 초과({}, 창 보임 {}). 화면:\n{}",
+            app.terminal.describe(),
+            dock::is_shown(&app.layout, Pane::Terminal),
+            terminal_text(harness)
+        );
     }
 
     #[test]
@@ -3972,8 +3978,10 @@ mod tests {
             .unwrap()
             .type_text("echo kittest-ferrite");
         harness.key_press(Key::Enter);
+        // 출력이 한 줄로 따로 찍혔는지 본다. 입력한 명령 줄은 프롬프트가 길면(macOS CI의 호스트 이름)
+        // 터미널 폭에서 접혀 낱말이 끊기므로 세지 않는다.
         wait_for_terminal(&mut harness, |text| {
-            text.matches("kittest-ferrite").count() >= 2
+            text.lines().any(|line| line.trim() == "kittest-ferrite")
         });
 
         // 두 번째 탭을 열고 첫 탭을 닫는다(셸을 끝낸다).

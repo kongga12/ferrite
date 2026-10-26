@@ -39,6 +39,17 @@ impl TerminalPanel {
         self.tabs.len()
     }
 
+    /// 시험이 실패했을 때 남길 상태.
+    #[cfg(test)]
+    pub fn describe(&self) -> String {
+        let exited = self.tabs.get(self.active).map(|t| t.terminal.exited());
+        format!(
+            "탭 {}개, 오류 {:?}, 셸 종료 {exited:?}",
+            self.tabs.len(),
+            self.error
+        )
+    }
+
     /// 다음에 그릴 때 화면에 키보드 포커스를 준다.
     pub fn request_focus(&mut self) {
         self.focus = true;
