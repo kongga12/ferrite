@@ -7,6 +7,7 @@ mod app;
 mod codegen;
 mod commngt_ui;
 mod config_gen;
+mod dock;
 mod editor_view;
 mod file_tree;
 mod find_bar;

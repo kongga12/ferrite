@@ -20,7 +20,8 @@ struct Tab {
 
 #[derive(Default)]
 pub struct TerminalPanel {
-    open: bool,
+    /// 이번 실행에서 셸을 띄운 적이 있는지. 창을 처음 그릴 때 하나 띄운다.
+    started: bool,
     tabs: Vec<Tab>,
     active: usize,
     next_number: usize,
@@ -38,15 +39,9 @@ impl TerminalPanel {
         self.tabs.len()
     }
 
-    /// 패널을 열고 닫는다. 처음 열면 셸을 하나 띄운다. 닫아도 셸은 그대로 둔다.
-    pub fn toggle(&mut self, cwd: Option<&Path>, ctx: &egui::Context) {
-        self.open = !self.open;
-        if self.open {
-            self.focus = true;
-            if self.tabs.is_empty() {
-                self.new_tab(cwd, ctx);
-            }
-        }
+    /// 다음에 그릴 때 화면에 키보드 포커스를 준다.
+    pub fn request_focus(&mut self) {
+        self.focus = true;
     }
 
     fn new_tab(&mut self, cwd: Option<&Path>, ctx: &egui::Context) {
@@ -78,26 +73,23 @@ impl TerminalPanel {
         }
     }
 
+    /// 터미널 창을 그린다. 창을 닫아도(숨겨도) 셸은 그대로 둔다.
     pub fn ui(&mut self, ui: &mut egui::Ui, cwd: Option<&Path>) {
-        if !self.open {
-            return;
+        let ctx = ui.ctx().clone();
+        // 저장된 배치로 처음부터 열려 있어도 같다. 탭을 모두 닫은 뒤에는 "+"로 띄운다.
+        if !std::mem::replace(&mut self.started, true) {
+            self.new_tab(cwd, &ctx);
         }
         for tab in &mut self.tabs {
             tab.terminal.poll();
         }
-        let ctx = ui.ctx().clone();
-        egui::Panel::bottom("terminal")
-            .resizable(true)
-            .default_size(260.0)
-            .show(ui, |ui| {
-                self.tabs_ui(ui, cwd, &ctx);
-                if let Some(error) = &self.error {
-                    ui.colored_label(ui.visuals().error_fg_color, error);
-                }
-                if self.active < self.tabs.len() {
-                    self.screen_ui(ui);
-                }
-            });
+        self.tabs_ui(ui, cwd, &ctx);
+        if let Some(error) = &self.error {
+            ui.colored_label(ui.visuals().error_fg_color, error);
+        }
+        if self.active < self.tabs.len() {
+            self.screen_ui(ui);
+        }
     }
 
     fn tabs_ui(&mut self, ui: &mut egui::Ui, cwd: Option<&Path>, ctx: &egui::Context) {
@@ -119,9 +111,6 @@ impl TerminalPanel {
             }
             if ui.small_button("+").on_hover_text("새 터미널").clicked() {
                 self.new_tab(cwd, ctx);
-            }
-            if ui.small_button("숨기기").clicked() {
-                self.open = false;
             }
         });
         if let Some(i) = close {

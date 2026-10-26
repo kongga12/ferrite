@@ -1,4 +1,4 @@
-//! 메인 창: 메뉴바, 프로젝트 트리, 탭 에디터, 상태바, 미저장 변경 확인.
+//! 메인 창: 메뉴바, 도킹 창(프로젝트 트리·탭 에디터·도구 창), 상태바, 미저장 변경 확인.
 
 use std::collections::HashSet;
 use std::io;
@@ -12,6 +12,7 @@ use ferrite_core::syntax::{Lang, MAX_SYNTAX_BYTES, Syntax};
 use ferrite_core::text_file::{self, Encoding, LineEnding, TextContent, TextFileError};
 use ferrite_core::{fs_ops, search};
 
+use crate::dock::{self, Pane};
 use crate::editor_view::{self, EditorOptions, EditorState, Styler};
 use crate::file_tree::{FileTree, TreeAction};
 use crate::find_bar::{FindAction, FindBar};
@@ -162,6 +163,14 @@ fn templates_root() -> PathBuf {
 
 fn settings_path() -> Option<PathBuf> {
     Some(dirs::config_dir()?.join("ferrite").join("settings.toml"))
+}
+
+/// 창 배치 파일. 테스트는 사용자 배치를 읽거나 덮어쓰지 않는다.
+fn layout_path() -> Option<PathBuf> {
+    if cfg!(test) {
+        return None;
+    }
+    Some(dirs::config_dir()?.join("ferrite").join("layout.json"))
 }
 
 /// 심볼릭 링크를 푼 실제 절대 경로. 파일 감시 알림은 실제 경로로 오므로(macOS의 `/var` →
@@ -419,8 +428,8 @@ pub struct FerriteApp {
     new_project: crate::new_project::NewProjectWindow,
     /// 공통컴포넌트 추가 창.
     commngt: crate::commngt_ui::CommngtWindow,
-    /// 아래쪽 "문제" 목록을 보이는지.
-    show_problems: bool,
+    /// 창 배치. 그리는 동안에는 창들이 앱을 빌려 쓰므로 잠시 밖으로 꺼낸다(`ui`).
+    layout: dock::Layout,
     /// 응답을 기다리는 언어 서버 요청.
     pending: std::collections::HashMap<(Lang, i64), (Pending, Retry)>,
     completion: Option<CompletionPopup>,
@@ -501,7 +510,7 @@ impl FerriteApp {
             config_gen: Default::default(),
             new_project: crate::new_project::NewProjectWindow::new(templates_root()),
             commngt: crate::commngt_ui::CommngtWindow::new(templates_dir()),
-            show_problems: false,
+            layout: dock::load(layout_path().as_deref()),
             pending: std::collections::HashMap::new(),
             completion: None,
             actions: None,
@@ -914,7 +923,7 @@ impl FerriteApp {
             self.open_quick_open(ctx);
         }
         if ctx.input_mut(|i| i.consume_shortcut(&TOGGLE_TERMINAL)) {
-            self.toggle_terminal(ctx);
+            self.toggle_terminal();
         }
         if ctx.input_mut(|i| i.consume_shortcut(&SOURCE_CONTROL)) {
             self.git.toggle();
@@ -1163,7 +1172,7 @@ impl FerriteApp {
                     _ => {
                         let root = self.tree.as_ref().map(FileTree::root);
                         let list = ReferenceList::new("정의", &name, targets, encoding, root);
-                        self.references = Some(list);
+                        self.show_references(list);
                     }
                 }
             }
@@ -1174,7 +1183,7 @@ impl FerriteApp {
                 } else {
                     let root = self.tree.as_ref().map(FileTree::root);
                     let list = ReferenceList::new("참조", &name, targets, encoding, root);
-                    self.references = Some(list);
+                    self.show_references(list);
                 }
             }
             Pending::Format { path } => {
@@ -1398,9 +1407,14 @@ impl FerriteApp {
         }
     }
 
-    fn toggle_terminal(&mut self, ctx: &egui::Context) {
-        let root = self.tree.as_ref().map(|t| t.root().to_path_buf());
-        self.terminal.toggle(root.as_deref(), ctx);
+    fn toggle_terminal(&mut self) {
+        dock::toggle(&mut self.layout, Pane::Terminal);
+        self.terminal.request_focus();
+    }
+
+    fn show_references(&mut self, list: ReferenceList) {
+        self.references = Some(list);
+        dock::show(&mut self.layout, Pane::References);
     }
 
     fn open_find_in_files(&mut self) {
@@ -1409,6 +1423,7 @@ impl FerriteApp {
             .map(|i| self.docs[i].buffer.selected_text())
             .filter(|s| !s.is_empty());
         self.find_in_files.show(selected);
+        dock::show(&mut self.layout, Pane::Search);
     }
 
     fn find_in_files_panel(&mut self, ui: &mut egui::Ui) {
@@ -1595,12 +1610,20 @@ impl FerriteApp {
                         }
                     }
                 });
+                ui.menu_button("보기", |ui| {
+                    if ui.button("창 배치 초기화").clicked() {
+                        ui.close();
+                        self.find_in_files.stop();
+                        self.references = None;
+                        self.layout = dock::default_layout();
+                    }
+                });
                 ui.menu_button("도구", |ui| {
                     let item = egui::Button::new("터미널")
                         .shortcut_text(ctx.format_shortcut(&TOGGLE_TERMINAL));
                     if ui.add(item).clicked() {
                         ui.close();
-                        self.toggle_terminal(&ctx);
+                        self.toggle_terminal();
                     }
                     let item = egui::Button::new("소스 제어")
                         .shortcut_text(ctx.format_shortcut(&SOURCE_CONTROL));
@@ -1700,40 +1723,36 @@ impl FerriteApp {
         }
     }
 
-    /// 아래쪽 "문제" 목록. 항목을 누르면 그 위치로 이동한다.
+    /// "문제" 창(현재 문서의 진단). 항목을 누르면 그 위치로 이동한다.
     fn problems_panel(&mut self, ui: &mut egui::Ui) {
-        let (true, Some(index)) = (self.show_problems, self.active) else {
+        let Some(index) = self.active else {
+            ui.weak("열린 파일이 없습니다");
             return;
         };
         let mut jump = None;
-        egui::Panel::bottom("problems")
-            .resizable(true)
-            .default_size(140.0)
+        let doc = &self.docs[index];
+        ui.strong(format!("문제 — {}", doc.name()));
+        egui::ScrollArea::vertical()
+            .auto_shrink(false)
             .show(ui, |ui| {
-                let doc = &self.docs[index];
-                ui.strong(format!("문제 — {}", doc.name()));
-                egui::ScrollArea::vertical()
-                    .auto_shrink(false)
-                    .show(ui, |ui| {
-                        if doc.lsp.problems.is_empty() {
-                            ui.weak("문제가 없습니다");
-                        }
-                        for problem in &doc.lsp.problems {
-                            let start = problem.range.start.min(doc.buffer.len_chars());
-                            let (line, col) = doc.buffer.pos_to_line_col(start);
-                            let message = problem.message.lines().next().unwrap_or_default();
-                            let text = egui::RichText::new(format!(
-                                "{}:{}  [{}] {message}",
-                                line + 1,
-                                col + 1,
-                                problem.severity.label()
-                            ))
-                            .color(editor_view::severity_color(ui.visuals(), problem.severity));
-                            if ui.selectable_label(false, text).clicked() {
-                                jump = Some(start);
-                            }
-                        }
-                    });
+                if doc.lsp.problems.is_empty() {
+                    ui.weak("문제가 없습니다");
+                }
+                for problem in &doc.lsp.problems {
+                    let start = problem.range.start.min(doc.buffer.len_chars());
+                    let (line, col) = doc.buffer.pos_to_line_col(start);
+                    let message = problem.message.lines().next().unwrap_or_default();
+                    let text = egui::RichText::new(format!(
+                        "{}:{}  [{}] {message}",
+                        line + 1,
+                        col + 1,
+                        problem.severity.label()
+                    ))
+                    .color(editor_view::severity_color(ui.visuals(), problem.severity));
+                    if ui.selectable_label(false, text).clicked() {
+                        jump = Some(start);
+                    }
+                }
             });
         if let Some(pos) = jump {
             let doc = &mut self.docs[index];
@@ -1753,13 +1772,13 @@ impl FerriteApp {
                     let (errors, warnings) = (count(Severity::Error), count(Severity::Warning));
                     if ui
                         .selectable_label(
-                            self.show_problems,
+                            dock::is_shown(&self.layout, Pane::Problems),
                             format!("오류 {errors} · 경고 {warnings}"),
                         )
                         .on_hover_text("문제 목록 보기/숨기기")
                         .clicked()
                     {
-                        self.show_problems = !self.show_problems;
+                        dock::toggle(&mut self.layout, Pane::Problems);
                     }
                     if let Some(lang) = doc.lang
                         && let Some((server, state)) = self.hub.status(&doc.path, lang)
@@ -1865,20 +1884,15 @@ impl FerriteApp {
     fn project_panel(&mut self, ui: &mut egui::Ui) {
         let mut tree_action = None;
         let mut pick_folder = false;
-        egui::Panel::left("project")
-            .resizable(true)
-            .default_size(260.0)
-            .show(ui, |ui| {
-                egui::ScrollArea::both()
-                    .auto_shrink(false)
-                    .show(ui, |ui| match &mut self.tree {
-                        Some(tree) => {
-                            tree_action = tree.ui(ui);
-                        }
-                        None => {
-                            pick_folder = ui.button("폴더 열기…").clicked();
-                        }
-                    });
+        egui::ScrollArea::both()
+            .auto_shrink(false)
+            .show(ui, |ui| match &mut self.tree {
+                Some(tree) => {
+                    tree_action = tree.ui(ui);
+                }
+                None => {
+                    pick_folder = ui.button("폴더 열기…").clicked();
+                }
             });
         if pick_folder {
             self.open_folder_dialog();
@@ -2017,39 +2031,27 @@ impl FerriteApp {
         }
     }
 
-    /// 아래쪽 "참조" 목록. 항목을 누르면 그 위치로 이동한다.
+    /// "참조" 창(정의·참조 찾기 결과). 항목을 누르면 그 위치로 이동한다.
     fn references_panel(&mut self, ui: &mut egui::Ui) {
         let Some(list) = &self.references else {
+            ui.weak("결과가 없습니다");
             return;
         };
-        let (mut jump, mut close) = (None, false);
-        egui::Panel::bottom("references")
-            .resizable(true)
-            .default_size(160.0)
+        let mut jump = None;
+        ui.strong(&list.title);
+        egui::ScrollArea::vertical()
+            .auto_shrink(false)
             .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.strong(&list.title);
-                    close = ui.small_button("×").on_hover_text("닫기").clicked();
-                });
-                egui::ScrollArea::vertical()
-                    .auto_shrink(false)
-                    .show(ui, |ui| {
-                        for (n, item) in list.items.iter().enumerate() {
-                            if ui
-                                .selectable_label(
-                                    false,
-                                    egui::RichText::new(&item.label).monospace(),
-                                )
-                                .clicked()
-                            {
-                                jump = Some(n);
-                            }
-                        }
-                    });
+                for (n, item) in list.items.iter().enumerate() {
+                    if ui
+                        .selectable_label(false, egui::RichText::new(&item.label).monospace())
+                        .clicked()
+                    {
+                        jump = Some(n);
+                    }
+                }
             });
-        if close {
-            self.references = None;
-        } else if let Some(n) = jump {
+        if let Some(n) = jump {
             let item = &list.items[n];
             let (path, range, encoding) =
                 (item.target.path.clone(), item.target.range, list.encoding);
@@ -2075,7 +2077,7 @@ impl FerriteApp {
         let mut reload = false;
         // 스크린리더가 에디터를 "현재 탭 이름"으로 읽도록 에디터를 활성 탭에 연결한다.
         let mut active_tab = None;
-        egui::CentralPanel::default().show(ui, |ui| {
+        ui.scope(|ui| {
             egui::ScrollArea::horizontal()
                 .id_salt("tabs")
                 .show(ui, |ui| {
@@ -2259,7 +2261,75 @@ impl FerriteApp {
     }
 }
 
+/// 창마다 앱의 해당 화면을 그린다. 그리는 동안 배치는 앱 밖에 있으므로 여기서 `layout`을 바꾸면
+/// 사라진다(배치를 바꾸는 일은 단축키·메뉴·응답 처리처럼 창 밖에서 한다).
+struct Dock<'a>(&'a mut FerriteApp);
+
+impl egui_tiles::Behavior<Pane> for Dock<'_> {
+    fn pane_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        _tile: egui_tiles::TileId,
+        pane: &mut Pane,
+    ) -> egui_tiles::UiResponse {
+        let app = &mut *self.0;
+        egui::CentralPanel::default().show(ui, |ui| match pane {
+            Pane::Project => app.project_panel(ui),
+            Pane::Editor => app.editor(ui),
+            Pane::Terminal => {
+                let root = app.tree.as_ref().map(|t| t.root().to_path_buf());
+                app.terminal.ui(ui, root.as_deref());
+            }
+            Pane::Problems => app.problems_panel(ui),
+            Pane::Search => app.find_in_files_panel(ui),
+            Pane::References => app.references_panel(ui),
+        });
+        egui_tiles::UiResponse::None
+    }
+
+    fn tab_title_for_pane(&mut self, pane: &Pane) -> egui::WidgetText {
+        pane.title().into()
+    }
+
+    fn is_tab_closable(
+        &self,
+        tiles: &egui_tiles::Tiles<Pane>,
+        tile_id: egui_tiles::TileId,
+    ) -> bool {
+        matches!(tiles.get(tile_id), Some(egui_tiles::Tile::Pane(pane)) if pane.closable())
+    }
+
+    fn on_tab_close(
+        &mut self,
+        tiles: &mut egui_tiles::Tiles<Pane>,
+        tile_id: egui_tiles::TileId,
+    ) -> bool {
+        match tiles.get(tile_id) {
+            Some(egui_tiles::Tile::Pane(Pane::Search)) => self.0.find_in_files.stop(),
+            Some(egui_tiles::Tile::Pane(Pane::References)) => self.0.references = None,
+            _ => {}
+        }
+        true
+    }
+
+    fn simplification_options(&self) -> egui_tiles::SimplificationOptions {
+        // 창 하나만 있어도 탭 머리를 남겨, 끌어 옮길 손잡이와 창 이름을 보인다.
+        egui_tiles::SimplificationOptions {
+            all_panes_must_have_tabs: true,
+            ..Default::default()
+        }
+    }
+}
+
 impl eframe::App for FerriteApp {
+    fn on_exit(&mut self) {
+        if let Some(path) = layout_path()
+            && let Err(e) = dock::save(&path, &self.layout)
+        {
+            eprintln!("창 배치를 저장하지 못했습니다({}): {e}", path.display());
+        }
+    }
+
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.git
             .tick(ctx, self.docs.iter().map(|d| d.path.clone()).collect());
@@ -2282,13 +2352,12 @@ impl eframe::App for FerriteApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.menu_bar(ui);
         self.status_bar(ui);
-        self.problems_panel(ui);
-        self.references_panel(ui);
-        self.find_in_files_panel(ui);
-        let root = self.tree.as_ref().map(|t| t.root().to_path_buf());
-        self.terminal.ui(ui, root.as_deref());
-        self.project_panel(ui);
-        self.editor(ui);
+        let mut layout = std::mem::replace(
+            &mut self.layout,
+            egui_tiles::Tree::empty(egui::Id::unique("dock")),
+        );
+        layout.ui(&mut Dock(self), ui);
+        self.layout = layout;
         if let Some(path) = self.quick_open.ui(ui.ctx()) {
             self.open_file(path);
             self.focus_editor = true;
@@ -3842,6 +3911,48 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
         panic!("터미널 시간 초과. 화면:\n{}", terminal_text(harness));
+    }
+
+    #[test]
+    fn 도구_창은_탭으로_모이고_닫거나_배치를_초기화한다() {
+        let dir = search_project("dock");
+        let file = dir.join("src/main/java/egov/web/SampleController.java");
+        let mut harness = harness_builder()
+            .with_size(egui::vec2(1200.0, 800.0))
+            .build_eframe(|cc| FerriteApp::new(cc, Some(file.clone())));
+        harness.run_ok();
+        harness.get_by_label("프로젝트");
+        harness.get_by_label("에디터");
+        let shown = |h: &Harness<'_, FerriteApp>, pane| dock::is_shown(&h.state().layout, pane);
+        let exists =
+            |h: &Harness<'_, FerriteApp>, pane| h.state().layout.tiles.find_pane(&pane).is_some();
+
+        // 검색 창을 열고, 상태바로 문제 창을 열면 같은 묶음의 앞 탭이 된다.
+        harness.key_press_modifiers(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::F);
+        harness.run_ok();
+        assert!(shown(&harness, Pane::Search));
+        harness.get_by_label_contains(" · 경고").click();
+        harness.run_ok();
+        assert!(shown(&harness, Pane::Problems) && !shown(&harness, Pane::Search));
+
+        // 탭을 누르면 앞으로 온다. 탭의 닫기 단추로 닫는다(검색이 먼저 열려 첫 탭).
+        harness.get_by_label("검색").click();
+        harness.run_ok();
+        assert!(shown(&harness, Pane::Search) && !shown(&harness, Pane::Problems));
+        harness.get_all_by_label("Close").next().unwrap().click();
+        harness.run_ok();
+        assert!(!exists(&harness, Pane::Search));
+        assert!(shown(&harness, Pane::Problems));
+
+        // 보기 > 창 배치 초기화는 도구 창을 모두 걷는다.
+        harness.get_by_label("보기").click();
+        harness.run_ok();
+        harness.get_by_label("창 배치 초기화").click();
+        harness.run_ok();
+        assert!(!exists(&harness, Pane::Problems));
+        harness.get_by_label("에디터");
+        drop(harness);
+        remove_project(&dir);
     }
 
     #[test]

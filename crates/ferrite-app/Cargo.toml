@@ -13,6 +13,7 @@ path = "src/main.rs"
 [dependencies]
 dirs = "7.0.0"
 eframe.workspace = true
+egui_tiles = "0.18"
 ferrite-codegen.workspace = true
 ferrite-core.workspace = true
 ferrite-egov.workspace = true
@@ -22,6 +23,7 @@ ropey.workspace = true
 lsp-types = "0.97"
 notify = "8"
 rfd.workspace = true
+serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 
 [dev-dependencies]
