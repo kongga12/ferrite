@@ -28,6 +28,8 @@ pub enum Launch {
     Jdtls,
     /// Spring Boot LS: Java 21 이상으로 띄우고, 클라이언트가 jdt.ls와의 메시지를 중계한다.
     SpringBoot,
+    /// jdt.ls에 싣는 확장 번들(java-debug). 따로 띄우지 않는다.
+    JdtlsBundle,
 }
 
 pub enum Source {
@@ -419,6 +421,25 @@ pub const ADAPTERS: &[Server] = &[
         args: &["dap"],
         launch: Launch::Binary,
         source: Source::Go("github.com/go-delve/delve/cmd/dlv"),
+    },
+    Server {
+        // jdt.ls에 싣는 확장 번들이다. 따로 띄우지 않고, jdt.ls에 디버그 세션을 열게 해 받은 포트로 붙는다.
+        // 설치·삭제하면 jdt.ls를 다시 띄워야 실린다.
+        name: "java-debug",
+        languages: &["java"],
+        version: "0.53.1",
+        program: "java-debug",
+        args: &[],
+        launch: Launch::JdtlsBundle,
+        source: Source::Release(&[Asset {
+            os: "",
+            arch: "",
+            url: "https://repo1.maven.org/maven2/com/microsoft/java/com.microsoft.java.debug.plugin/0.53.1/com.microsoft.java.debug.plugin-0.53.1.jar",
+            sha256: "4f4778d452a6a0665536f43ce4e32403a24be6593336b80dc85a322912859e24",
+            size: 2_960_556,
+            archive: Archive::Plain,
+            bin: "com.microsoft.java.debug.plugin-0.53.1.jar",
+        }]),
     },
     Server {
         // Xdebug 3과 말한다. 디버그 대상 PHP에 Xdebug 확장이 있어야 한다.

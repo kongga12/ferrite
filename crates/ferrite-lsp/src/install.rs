@@ -189,13 +189,24 @@ pub fn command(
             }),
         Launch::Jdtls => java::find_java().map(|(java, major)| {
             let data = workspace_dir(root, server, project);
-            // Spring Boot LS가 설치되어 있으면 그 확장 번들을 실어야 중계가 된다.
-            let bundles = catalog::by_launch(Launch::SpringBoot)
+            // Spring Boot LS가 설치되어 있으면 그 확장 번들을 실어야 중계가 된다. java-debug도 번들로 싣는다.
+            let mut bundles = catalog::by_launch(Launch::SpringBoot)
                 .and_then(|spring| crate::install::installed(root, spring))
                 .map(|spring| java::spring_bundles(&spring.dir))
                 .unwrap_or_default();
+            bundles.extend(
+                catalog::ADAPTERS
+                    .iter()
+                    .filter(|a| a.launch == Launch::JdtlsBundle)
+                    .filter_map(|a| crate::install::installed(root, a))
+                    .map(|i| i.bin),
+            );
             java::jdtls_command(java, major, &installed.dir, &installed.bin, &data, &bundles)
         }),
+        Launch::JdtlsBundle => Err(format!(
+            "{}은(는) jdt.ls에 싣는 확장이라 따로 띄우지 않습니다",
+            server.name
+        )),
         Launch::SpringBoot => java::find_java().map(|(java, _)| {
             let log = workspace_dir(root, server, project).join("server.log");
             java::spring_boot_command(java, &installed.bin, &log, project)

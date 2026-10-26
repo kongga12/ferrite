@@ -10,6 +10,14 @@ use serde::Deserialize;
 /// 사용자 구성 파일(프로젝트 루트 기준).
 pub const CUSTOM_FILE: &str = ".ferrite/run.toml";
 
+/// 디버그 대기 실행이 여는 포트. 디버그의 "5005 포트에 붙기" 구성이 여기로 붙는다.
+pub const JDWP_PORT: u16 = 5005;
+
+/// JVM을 디버거가 붙을 수 있게 띄우는 옵션. 멈추지 않고 뜨며 이 컴퓨터에서만 붙을 수 있다(Java 9 이상).
+pub fn jdwp_agent() -> String {
+    format!("-agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address={JDWP_PORT}")
+}
+
 /// 사용자 구성 파일을 처음 만들 때의 내용.
 pub const CUSTOM_TEMPLATE: &str = r#"# Ferrite 실행 구성. [[run]]마다 하나씩 적는다.
 #   name    목록에 보일 이름
@@ -93,6 +101,8 @@ pub fn detect(root: &Path) -> Vec<RunConfig> {
     let has = |name: &str| root.join(name).is_file();
     let read = |name: &str| std::fs::read_to_string(root.join(name)).unwrap_or_default();
     let mut commands: Vec<String> = Vec::new();
+    // 디버거가 붙을 수 있게 띄우는 실행. 같은 명령의 보통 실행 바로 뒤에 둔다.
+    let mut debug_runs: Vec<RunConfig> = Vec::new();
 
     if has("Cargo.toml") {
         commands.extend(["cargo run", "cargo test", "cargo build"].map(String::from));
@@ -111,6 +121,29 @@ pub fn detect(root: &Path) -> Vec<RunConfig> {
         ] {
             if pom.contains(plugin) {
                 commands.push(format!("{mvn} {goal}"));
+            }
+        }
+        let debug_name = |goal: &str| format!("{mvn} {goal} (디버그 {JDWP_PORT})");
+        // tomcat7:run은 톰캣을 Maven JVM 안에서 띄우므로 Maven JVM에 옵션을 준다(사용자 MAVEN_OPTS 뒤에).
+        if pom.contains("tomcat7-maven-plugin") {
+            let opts = std::env::var("MAVEN_OPTS")
+                .map(|o| format!("{o} {}", jdwp_agent()))
+                .unwrap_or_else(|_| jdwp_agent());
+            debug_runs.push(RunConfig {
+                name: debug_name("tomcat7:run"),
+                command: format!("{mvn} tomcat7:run"),
+                cwd: None,
+                env: BTreeMap::from([("MAVEN_OPTS".to_owned(), opts)]),
+            });
+        }
+        // spring-boot:run은 앱을 따로 띄우므로 그 JVM에 준다. 쉼표·등호가 있어 인자 전체를 따옴표로 묶는다.
+        if pom.contains("spring-boot-maven-plugin") {
+            debug_runs.push(RunConfig::command(format!(
+                "{mvn} spring-boot:run \"-Dspring-boot.run.jvmArguments={}\"",
+                jdwp_agent()
+            )));
+            if let Some(last) = debug_runs.last_mut() {
+                last.name = debug_name("spring-boot:run");
             }
         }
         commands.extend(["package", "test"].map(|goal| format!("{mvn} {goal}")));
@@ -172,7 +205,21 @@ pub fn detect(root: &Path) -> Vec<RunConfig> {
             commands.push("php artisan serve".into());
         }
     }
-    commands.into_iter().map(RunConfig::command).collect()
+    let mut configs: Vec<RunConfig> = commands.into_iter().map(RunConfig::command).collect();
+    for debug in debug_runs {
+        let base = debug
+            .command
+            .split_whitespace()
+            .take(2)
+            .collect::<Vec<_>>()
+            .join(" ");
+        let at = configs
+            .iter()
+            .position(|c| c.command == base)
+            .map_or(configs.len(), |i| i + 1);
+        configs.insert(at, debug);
+    }
+    configs
 }
 
 /// composer.json의 스크립트 이름. 다른 단계 앞뒤에 저절로 도는 것(`pre-`·`post-`)은 뺀다.
@@ -237,8 +284,16 @@ mod tests {
         let dir = project("maven", &[("pom.xml", pom)]);
         assert_eq!(
             names(&detect(&dir)),
-            ["mvn tomcat7:run", "mvn package", "mvn test"]
+            [
+                "mvn tomcat7:run",
+                "mvn tomcat7:run (디버그 5005)",
+                "mvn package",
+                "mvn test"
+            ]
         );
+        let debug = &detect(&dir)[1];
+        assert_eq!(debug.command, "mvn tomcat7:run");
+        assert!(debug.env["MAVEN_OPTS"].ends_with(&jdwp_agent()));
 
         // 래퍼가 있으면 래퍼를 쓴다.
         let wrapper = if cfg!(windows) { "mvnw.cmd" } else { "mvnw" };

@@ -6,6 +6,7 @@
 //! 진행한다. 어댑터마다 다른 것(띄우는 명령, launch 인자)은 [`Adapter`]와 [`Launch`]로 받는다.
 
 pub mod adapters;
+pub mod java;
 pub mod types;
 
 use std::collections::{BTreeMap, HashMap, VecDeque};

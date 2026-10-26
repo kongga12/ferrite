@@ -90,18 +90,18 @@ impl Debugger {
     }
 
     /// 구성으로 세션을 시작한다. 빌드 명령이 있으면 먼저 별도 스레드에서 빌드하고, 성공하면 띄운다.
-    /// 돌고 있는 세션은 먼저 끝낸다. `servers`는 언어 서버·어댑터 설치 폴더.
+    /// 돌고 있는 세션은 먼저 끝낸다. 어댑터는 부르는 쪽이 고른다(`adapters::resolve`, java-debug는 jdt.ls가
+    /// 연 포트).
     pub fn start(
         &mut self,
         config: &DebugConfig,
         root: &Path,
         file: Option<&Path>,
         breakpoints: BTreeMap<PathBuf, Vec<Breakpoint>>,
-        servers: &Path,
+        adapter: Adapter,
         ctx: &egui::Context,
     ) -> Result<(), String> {
-        // 어댑터·인자 문제는 빌드하기 전에 알린다.
-        let adapter = adapters::resolve(&config.adapter, servers, root)?;
+        // 인자 문제는 빌드하기 전에 알린다.
         let mut arguments = config.resolved_arguments(root, file)?;
         adapters::complete_arguments(&config.adapter, &mut arguments);
         let launch = Launch {
