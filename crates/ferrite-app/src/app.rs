@@ -188,6 +188,23 @@ fn settings_path() -> Option<PathBuf> {
     Some(dirs::config_dir()?.join("ferrite").join("settings.toml"))
 }
 
+/// DB 연결 목록 파일. 테스트는 사용자 목록을 읽거나 덮어쓰지 않는다.
+fn connections_path() -> Option<PathBuf> {
+    if cfg!(test) {
+        return None;
+    }
+    Some(dirs::config_dir()?.join("ferrite").join("connections.toml"))
+}
+
+/// DB 비밀번호 저장소. 테스트는 사용자 키체인을 건드리지 않는다.
+fn secret_store() -> std::sync::Arc<dyn ferrite_db::secret::SecretStore> {
+    if cfg!(test) {
+        std::sync::Arc::new(ferrite_db::secret::MemoryStore::default())
+    } else {
+        std::sync::Arc::new(ferrite_db::secret::Keychain)
+    }
+}
+
 /// 창 배치 파일. 테스트는 사용자 배치를 읽거나 덮어쓰지 않는다.
 fn layout_path() -> Option<PathBuf> {
     if cfg!(test) {
@@ -451,6 +468,8 @@ pub struct FerriteApp {
     new_project: crate::new_project::NewProjectWindow,
     /// 공통컴포넌트 추가 창.
     commngt: crate::commngt_ui::CommngtWindow,
+    /// DB 연결 창.
+    db: crate::db_ui::DbWindow,
     /// 창 배치. 그리는 동안에는 창들이 앱을 빌려 쓰므로 잠시 밖으로 꺼낸다(`ui`).
     layout: dock::Layout,
     /// 응답을 기다리는 언어 서버 요청.
@@ -553,6 +572,7 @@ impl FerriteApp {
             config_gen: Default::default(),
             new_project: crate::new_project::NewProjectWindow::new(templates_root()),
             commngt: crate::commngt_ui::CommngtWindow::new(templates_dir()),
+            db: crate::db_ui::DbWindow::new(connections_path(), secret_store()),
             layout: dock::load(layout_path().as_deref()),
             pending: std::collections::HashMap::new(),
             completion: None,
@@ -2130,6 +2150,11 @@ impl FerriteApp {
                         let root = self.tree.as_ref().map(|t| t.root().to_path_buf());
                         self.commngt.show(root.as_deref());
                     }
+                    ui.separator();
+                    if ui.button("DB 연결…").clicked() {
+                        ui.close();
+                        self.db.show();
+                    }
                 });
             });
         });
@@ -2904,6 +2929,7 @@ impl eframe::App for FerriteApp {
             self.open_folder(&dir);
         }
         self.commngt.ui(&ctx);
+        self.db.ui(&ctx);
         self.git.ui(&ctx);
         if let Some(path) = self.config_gen.ui(&ctx) {
             self.status = format!("설정 파일을 만들었습니다: {}", path.display());
@@ -4809,6 +4835,85 @@ mod tests {
             "빌드 출력(한글)을 보인다: {console}"
         );
         assert!(console.contains("[빌드 실패"), "{console}");
+        drop(harness);
+        remove_project(&dir);
+    }
+
+    /// 글자 칸(비밀번호 칸 포함)에 포커스를 주고 적는다.
+    fn type_into(harness: &mut Harness<'_, FerriteApp>, label: &str, text: &str) {
+        use egui::accesskit::Role;
+        let role = if harness
+            .query_by_role_and_label(Role::PasswordInput, label)
+            .is_some()
+        {
+            Role::PasswordInput
+        } else {
+            Role::TextInput
+        };
+        harness.get_by_role_and_label(role, label).focus();
+        harness.run_ok();
+        harness.get_by_role_and_label(role, label).type_text(text);
+        harness.run_ok();
+    }
+
+    #[test]
+    fn db_연결을_추가하고_시험하고_비밀번호는_키체인에_둔다() {
+        use egui::accesskit::Role;
+        let dir = std::env::temp_dir().join(format!("ferrite-db-ui-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let mut harness = harness_builder()
+            .with_size(egui::vec2(1200.0, 900.0))
+            .build_eframe(|cc| FerriteApp::new(cc, Some(dir.clone())));
+        harness.run_ok();
+        harness.get_by_label("도구").click();
+        harness.run_ok();
+        harness.get_by_label("DB 연결…").click();
+        harness.run_ok();
+        harness.get_by_label("연결이 없습니다. [새 연결]로 추가하세요.");
+
+        // SQLite 연결: 이름·파일을 적고 저장한 뒤 시험한다.
+        harness
+            .get_by_role_and_label(Role::Button, "SQLite")
+            .click();
+        harness.run_ok();
+        type_into(&mut harness, "이름", "로컬 파일");
+        harness.run_ok();
+        let file = dir.join("시험.db");
+        type_into(&mut harness, "파일", &file.to_string_lossy());
+        harness.run_ok();
+        harness.get_by_label("저장").click();
+        harness.run_ok();
+        assert_eq!(harness.state().db.connections().len(), 1);
+        harness.get_by_label("로컬 파일");
+        harness.get_by_label("연결 시험").click();
+        wait_debugger(&mut harness, "SQLite 연결 시험", |h| {
+            h.query_by_label_contains("연결됨: SQLite").is_some()
+        });
+
+        // PostgreSQL 연결: 빠진 값을 알리고, 비밀번호는 목록이 아니라 키체인에 둔다.
+        harness
+            .get_by_role_and_label(Role::Button, "PostgreSQL")
+            .click();
+        harness.run_ok();
+        harness.get_by_label("저장").click();
+        harness.run_ok();
+        harness.get_by_label_contains("이름을 적으세요");
+        type_into(&mut harness, "이름", "운영");
+        type_into(&mut harness, "사용자", "egov");
+        type_into(&mut harness, "비밀번호", "비밀!");
+        harness.run_ok();
+        harness.get_by_label("저장").click();
+        harness.run_ok();
+        let app = harness.state();
+        let pg = app
+            .db
+            .connections()
+            .iter()
+            .find(|c| c.name == "운영")
+            .unwrap();
+        assert_eq!(pg.port, 5432);
+        assert_eq!(app.db.saved_password(&pg.id).as_deref(), Some("비밀!"));
         drop(harness);
         remove_project(&dir);
     }

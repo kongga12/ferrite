@@ -24,6 +24,21 @@ jobs:
   linux:
     name: ubuntu-latest
     runs-on: ubuntu-latest
+    # DB 시험: MariaDB는 서비스 컨테이너로 띄운다(Linux 러너만 된다). PostgreSQL은 러너에 깔린 initdb로
+    # 시험이 임시 클러스터를 띄운다.
+    services:
+      mariadb:
+        image: mariadb:11.4
+        env:
+          MARIADB_ROOT_PASSWORD: ferrite
+          MARIADB_DATABASE: ferrite
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=5s --health-timeout=5s --health-retries=30
+    env:
+      FERRITE_TEST_MARIADB: 127.0.0.1:3306:root:ferrite:ferrite
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
