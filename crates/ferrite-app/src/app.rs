@@ -458,9 +458,11 @@ impl FerriteApp {
             Some(path) => (None, format!("열 수 없는 경로입니다: {}", path.display())),
             None => (
                 None,
+                // Context::format_shortcut은 macOS에서 ⌘ 기호를 그릴 수 있는지 글꼴로 확인하는데, 첫 프레임 전에는
+                // 글꼴이 없어 패닉한다. 그래서 기호 대신 이름(Cmd·Ctrl)으로 직접 만든다.
                 format!(
                     "폴더를 열어 시작하세요 ({})",
-                    cc.egui_ctx.format_shortcut(&OPEN_FOLDER)
+                    OPEN_FOLDER.format(&egui::ModifierNames::NAMES, cfg!(target_os = "macos"))
                 ),
             ),
         };
@@ -2517,8 +2519,10 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
 
+        // 파일을 만들면 감시 알림이 다른 스레드에서 와서 다시 그리는 프레임이 늘어난다(CI에서 4프레임을 넘김).
         let mut harness = Harness::builder()
             .with_size(egui::vec2(1000.0, 700.0))
+            .with_max_steps(32)
             .build_eframe(|cc| FerriteApp::new(cc, Some(dir.clone())));
         harness.run();
 
