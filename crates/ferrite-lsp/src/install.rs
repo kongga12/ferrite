@@ -624,7 +624,8 @@ mod tests {
 
     #[test]
     fn 목록은_https_고정_해시와_언어를_갖춘다() {
-        for server in SERVERS {
+        // 디버그 어댑터도 같은 설치 폴더를 쓰므로 함께 본다.
+        for server in crate::catalog::all() {
             assert!(!server.languages.is_empty(), "{}", server.name);
             if let Source::Release(assets) = server.source {
                 // 첫 파일(서버 본체)의 주소에는 고정 버전이 들어 있어야 한다.
@@ -647,11 +648,17 @@ mod tests {
                 }
             }
         }
-        let names: std::collections::HashSet<_> = SERVERS.iter().map(|s| s.name).collect();
+        let names: std::collections::HashSet<_> = crate::catalog::all().map(|s| s.name).collect();
         assert_eq!(
             names.len(),
-            SERVERS.len(),
+            crate::catalog::all().count(),
             "이름(설치 폴더)이 겹치면 안 된다"
+        );
+        assert!(
+            crate::catalog::ADAPTERS.iter().all(|a| !SERVERS
+                .iter()
+                .any(|s| s.languages.is_empty() || s.name == a.name)),
+            "어댑터는 언어 서버로 띄우지 않는다(SERVERS에 없다)"
         );
         assert_eq!(for_language("cpp").map(|s| s.name), Some("clangd"));
         assert_eq!(for_language("xml").map(|s| s.name), Some("lemminx"));

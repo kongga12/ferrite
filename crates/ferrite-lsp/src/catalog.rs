@@ -341,6 +341,110 @@ pub const SERVERS: &[Server] = &[
     },
 ];
 
+/// Ferrite가 설치해 줄 수 있는 디버그 어댑터. 이름은 디버그 구성의 `adapter` 값이고, `languages`는
+/// 디버그하는 언어(화면 표시용)다. 언어 서버와 같은 방식으로 설치·업데이트·삭제한다(`crate::install`).
+pub const ADAPTERS: &[Server] = &[
+    Server {
+        // 어댑터와 디버그 대상 모두 Python 모듈로 돈다. 대상은 사용자의 Python으로 띄운다(가상환경이 아니라).
+        name: "debugpy",
+        languages: &["python"],
+        version: "1.8.22",
+        program: "python",
+        args: &["-m", "debugpy.adapter"],
+        launch: Launch::Binary,
+        source: Source::Pip("debugpy"),
+    },
+    Server {
+        // LLDB 기반. VSIX 안의 어댑터와 lldb 라이브러리를 폴더째 쓴다.
+        name: "codelldb",
+        languages: &["rust", "c", "cpp"],
+        version: "1.12.3",
+        program: "codelldb",
+        args: &[],
+        launch: Launch::Binary,
+        source: Source::Release(&[
+            Asset {
+                os: "windows",
+                arch: "x86_64",
+                url: "https://github.com/vadimcn/codelldb/releases/download/v1.12.3/codelldb-win32-x64.vsix",
+                sha256: "a916e509308dac817732f63ca604a8b93ed29cd16f38a2fa9f0b64ed58e8f51a",
+                size: 50_943_475,
+                archive: Archive::Zip,
+                bin: "extension/adapter/codelldb.exe",
+            },
+            Asset {
+                os: "macos",
+                arch: "x86_64",
+                url: "https://github.com/vadimcn/codelldb/releases/download/v1.12.3/codelldb-darwin-x64.vsix",
+                sha256: "e25cc716b94c62c07fec268ff2785d2b797245b160502baef8b9c970a0c4d8e8",
+                size: 47_735_596,
+                archive: Archive::Zip,
+                bin: "extension/adapter/codelldb",
+            },
+            Asset {
+                os: "macos",
+                arch: "aarch64",
+                url: "https://github.com/vadimcn/codelldb/releases/download/v1.12.3/codelldb-darwin-arm64.vsix",
+                sha256: "2f114a990e1b368dd1dbd33c80c0e719767af2d228391ec0df0571c957f9ac91",
+                size: 45_390_048,
+                archive: Archive::Zip,
+                bin: "extension/adapter/codelldb",
+            },
+            Asset {
+                os: "linux",
+                arch: "x86_64",
+                url: "https://github.com/vadimcn/codelldb/releases/download/v1.12.3/codelldb-linux-x64.vsix",
+                sha256: "1cd7f386598022b51a5b93b9ffa23e812b23f519cfe1833384ec4bef4bfd1be1",
+                size: 55_571_094,
+                archive: Archive::Zip,
+                bin: "extension/adapter/codelldb",
+            },
+            Asset {
+                os: "linux",
+                arch: "aarch64",
+                url: "https://github.com/vadimcn/codelldb/releases/download/v1.12.3/codelldb-linux-arm64.vsix",
+                sha256: "0887f67d440554617894266f80706b700907c36b95e6e49d23b95a0e05318101",
+                size: 54_544_514,
+                archive: Archive::Zip,
+                bin: "extension/adapter/codelldb",
+            },
+        ]),
+    },
+    Server {
+        // 배포 실행 파일이 없어 `go install`로 만든다. Go 디버그에는 어차피 Go가 있어야 한다.
+        name: "delve",
+        languages: &["go"],
+        version: "v1.27.2",
+        program: "dlv",
+        args: &["dap"],
+        launch: Launch::Binary,
+        source: Source::Go("github.com/go-delve/delve/cmd/dlv"),
+    },
+    Server {
+        // Xdebug 3과 말한다. 디버그 대상 PHP에 Xdebug 확장이 있어야 한다.
+        name: "php-debug",
+        languages: &["php"],
+        version: "1.40.2",
+        program: "php-debug",
+        args: &[],
+        launch: Launch::Runtime("node"),
+        source: Source::Release(&[Asset {
+            os: "",
+            arch: "",
+            url: "https://github.com/xdebug/vscode-php-debug/releases/download/v1.40.2/php-debug-1.40.2.vsix",
+            sha256: "17631993fe800083a2fc89a6782c8bf58a79603ad201ddff60d9b59ba2345d5f",
+            size: 1_797_181,
+            archive: Archive::Zip,
+            bin: "extension/out/phpDebug.js",
+        }]),
+    },
+];
+
+/// 언어 서버와 디버그 어댑터 모두(설치 창 순서).
+pub fn all() -> impl Iterator<Item = &'static Server> {
+    SERVERS.iter().chain(ADAPTERS)
+}
+
 /// 이 언어(LSP 언어 ID)를 맡는 주 서버. 기능 요청(자동완성, 정의 이동 등)은 이 서버로 보낸다.
 pub fn for_language(language_id: &str) -> Option<&'static Server> {
     servers_for(language_id).next()
