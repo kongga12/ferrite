@@ -2,6 +2,7 @@
 
 pub mod buffer;
 pub mod fs_ops;
+pub mod git;
 pub mod jsp;
 pub mod project_search;
 pub mod search;

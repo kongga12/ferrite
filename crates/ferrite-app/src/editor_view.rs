@@ -9,6 +9,7 @@ use eframe::egui::{
     text::{CCursor, Galley, LayoutJob},
 };
 use ferrite_core::buffer::{Buffer, Indent};
+use ferrite_core::git::LineChange;
 use ferrite_lsp::problem::{Problem, Severity};
 use std::sync::Arc;
 
@@ -16,6 +17,8 @@ use std::sync::Arc;
 // ponytail: 압축된 한 줄짜리 파일 대응. 가로 가상화(보이는 열만 레이아웃)가 필요해지면 교체.
 const MAX_RENDERED_CHARS: usize = 10_000;
 const GUTTER_PAD: f32 = 8.0;
+/// 거터 오른쪽 git 변경 막대의 폭.
+const CHANGE_BAR: f32 = 3.0;
 const CURSOR_WIDTH: f32 = 2.0;
 
 /// 줄마다 (줄 안 바이트 범위, 색) 목록.
@@ -53,6 +56,8 @@ pub struct EditorOptions<'a> {
     pub problems: &'a [Problem],
     /// 언어 서버 호버 정보와 그것을 요청한 위치. 마우스가 그 위치에 있으면 말풍선에 함께 보인다.
     pub hover: Option<(usize, &'a str)>,
+    /// git 인덱스 대비 줄 변경(줄 순). 거터 오른쪽에 색 막대로 보인다.
+    pub line_changes: &'a [(usize, LineChange)],
 }
 
 /// 앱이 언어 서버 기능을 붙이는 데 쓰는 정보.
@@ -637,6 +642,37 @@ fn paint(
     );
     painter.rect_filled(gutter, 0.0, visuals.panel_fill);
     for line in lines {
+        if let Ok(i) = opts
+            .line_changes
+            .binary_search_by_key(&line, |(changed, _)| *changed)
+        {
+            let y = geom.line_y(line);
+            let (color, rect) = match opts.line_changes[i].1 {
+                LineChange::Added => (
+                    Color32::from_rgb(70, 170, 90),
+                    Rect::from_min_max(
+                        Pos2::new(gutter.max.x - CHANGE_BAR, y),
+                        Pos2::new(gutter.max.x, y + geom.row_height),
+                    ),
+                ),
+                LineChange::Modified => (
+                    Color32::from_rgb(70, 130, 210),
+                    Rect::from_min_max(
+                        Pos2::new(gutter.max.x - CHANGE_BAR, y),
+                        Pos2::new(gutter.max.x, y + geom.row_height),
+                    ),
+                ),
+                // 지운 자리는 줄 경계에 짧은 막대로 보인다.
+                LineChange::DeletedAbove => (
+                    Color32::from_rgb(210, 80, 80),
+                    Rect::from_min_max(
+                        Pos2::new(gutter.max.x - CHANGE_BAR * 2.0, y - 1.5),
+                        Pos2::new(gutter.max.x, y + 1.5),
+                    ),
+                ),
+            };
+            painter.rect_filled(rect, 0.0, color);
+        }
         let color = if line == cursor_line {
             visuals.strong_text_color()
         } else {

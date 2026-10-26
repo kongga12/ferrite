@@ -8,6 +8,7 @@ Rust로 작성한 크로스플랫폼(Windows / macOS / Linux) 경량 IDE.
 ## 현재 상태: Phase 2·2b·2c 완료 (LSP 연동, egov 언어 지원·개발도구, 3개 OS 검증), Phase 3 진행 중 (프로젝트 도구)
 
 - 폴더 열기, 지연 로딩 프로젝트 트리(파일 감시로 자동 갱신), 탭 에디터
+- Git(`Ctrl+Shift+G`): 거터에 변경 줄 표시(저장 전 편집 포함), 상태바에 브랜치, 소스 제어 창에서 diff·스테이지·커밋·푸시·브랜치 전환(git CLI)
 - 통합 터미널(`` Ctrl+` ``): 탭 여러 개, Windows는 ConPTY(PowerShell), 한글 입출력, 256색·트루컬러, 복사(고른 글자)·붙여넣기
 - 파일로 이동(`Ctrl+P`): 파일 이름 퍼지 검색. 파일에서 찾기(`Ctrl+Shift+F`): 프로젝트 전체 검색(대소문자·단어·정규식·파일 패턴, UTF-8·CP949 파일). 둘 다 `.gitignore`를 따른다.
 - 트리 우클릭: 새 파일·새 폴더·이름 바꾸기·휴지통으로 삭제
@@ -55,6 +56,7 @@ Rust로 작성한 크로스플랫폼(Windows / macOS / Linux) 경량 IDE.
 | 찾기 / 바꾸기 / 다음·이전 | `Ctrl+F` / `Ctrl+H` / `F3`·`Shift+F3` |
 | 파일로 이동 / 파일에서 찾기 | `Ctrl+P` / `Ctrl+Shift+F` |
 | 터미널 열기·숨기기 | `` Ctrl+` `` (macOS도 Ctrl) |
+| 소스 제어(Git) | `Ctrl+Shift+G` |
 | 실행 취소 / 다시 실행 | `Ctrl+Z` / `Ctrl+Y`, `Ctrl+Shift+Z` |
 | 줄 주석 토글 | `Ctrl+/` |
 | 줄 위·아래로 이동 | `Alt+↑` / `Alt+↓` |
