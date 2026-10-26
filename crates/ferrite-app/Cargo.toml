@@ -16,6 +16,7 @@ eframe.workspace = true
 egui_tiles = "0.18"
 ferrite-codegen.workspace = true
 ferrite-core.workspace = true
+ferrite-dap.workspace = true
 ferrite-egov.workspace = true
 ferrite-lsp.workspace = true
 ferrite-term.workspace = true

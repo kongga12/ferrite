@@ -13,7 +13,7 @@ use ferrite_core::text_file::{self, Encoding, LineEnding, TextContent, TextFileE
 use ferrite_core::{fs_ops, search};
 
 use crate::dock::{self, Pane};
-use crate::editor_view::{self, EditorOptions, EditorState, Styler};
+use crate::editor_view::{self, BreakpointMark, EditorOptions, EditorState, Styler};
 use crate::file_tree::{FileTree, TreeAction};
 use crate::find_bar::{FindAction, FindBar};
 use crate::lsp_hub::{DocSync, HubUpdate, LspHub, ServerState};
@@ -61,6 +61,14 @@ const SOURCE_CONTROL: KeyboardShortcut =
 const TOGGLE_TERMINAL: KeyboardShortcut = KeyboardShortcut::new(Modifiers::CTRL, Key::Backtick);
 // macOS의 Cmd+F5는 VoiceOver를 켜므로 모든 OS에서 Ctrl을 쓴다.
 const RUN: KeyboardShortcut = KeyboardShortcut::new(Modifiers::CTRL, Key::F5);
+// 디버그. egui는 덧붙은 Shift를 무시하고 맞추므로 Shift 조합을 먼저 확인한다.
+const DEBUG: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::F5);
+const DEBUG_STOP: KeyboardShortcut = KeyboardShortcut::new(Modifiers::SHIFT, Key::F5);
+const DEBUG_PAUSE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::F6);
+const TOGGLE_BREAKPOINT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::F9);
+const STEP_OVER: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::F10);
+const STEP_IN: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::F11);
+const STEP_OUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::SHIFT, Key::F11);
 const FIND_IN_FILES: KeyboardShortcut =
     KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::F);
 /// 마우스가 한 자리에 이만큼 머물면 호버 정보를 요청한다.
@@ -178,7 +186,7 @@ fn layout_path() -> Option<PathBuf> {
 /// 심볼릭 링크를 푼 실제 절대 경로. 파일 감시 알림은 실제 경로로 오므로(macOS의 `/var` →
 /// `/private/var` 등) 문서·트리 경로를 이것으로 통일해야 알림과 비교할 수 있다.
 /// 아직 없는 경로면 절대 경로만 만든다.
-fn real_path(path: &Path) -> PathBuf {
+pub(crate) fn real_path(path: &Path) -> PathBuf {
     let Ok(real) = std::fs::canonicalize(path) else {
         return std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
     };
@@ -449,7 +457,14 @@ pub struct FerriteApp {
     /// 통합 터미널(Ctrl+`) 패널.
     terminal: crate::terminal_ui::TerminalPanel,
     /// 실행 구성 고르기(Ctrl+F5).
-    run: crate::run_ui::RunPicker,
+    run: crate::picker::Picker<ferrite_core::run::RunConfig>,
+    /// 디버그 구성 고르기(F5).
+    debug_picker: crate::picker::Picker<ferrite_core::debug_config::DebugConfig>,
+    debugger: crate::debug_ui::Debugger,
+    /// 파일별 중단점(줄 순, 1부터). 디버그하지 않을 때도 둔다.
+    breakpoints: std::collections::BTreeMap<PathBuf, Vec<ferrite_dap::Breakpoint>>,
+    /// 조건을 고치고 있는 중단점(파일, 줄(1부터), 조건식).
+    breakpoint_condition: Option<(PathBuf, usize, String)>,
     /// git 상태·소스 제어 창(Ctrl+Shift+G).
     git: crate::git_ui::GitPanel,
     /// 다음 프레임에 에디터로 키보드 포커스를 돌려준다(찾기 막대를 닫은 뒤 등).
@@ -501,7 +516,14 @@ impl FerriteApp {
             quick_open: Default::default(),
             find_in_files: Default::default(),
             terminal: Default::default(),
-            run: Default::default(),
+            run: crate::picker::Picker::new("실행", ferrite_core::run::CUSTOM_FILE),
+            debug_picker: crate::picker::Picker::new(
+                "디버그",
+                ferrite_core::debug_config::CUSTOM_FILE,
+            ),
+            debugger: Default::default(),
+            breakpoints: Default::default(),
+            breakpoint_condition: None,
             git: Default::default(),
             focus_editor: false,
             settings,
@@ -932,6 +954,32 @@ impl FerriteApp {
         }
         if ctx.input_mut(|i| i.consume_shortcut(&RUN)) {
             self.open_run_picker(ctx);
+        }
+        if ctx.input_mut(|i| i.consume_shortcut(&DEBUG_STOP)) {
+            self.debugger.stop();
+        }
+        if ctx.input_mut(|i| i.consume_shortcut(&DEBUG)) {
+            self.debug_continue_or_start(ctx);
+        }
+        if ctx.input_mut(|i| i.consume_shortcut(&DEBUG_PAUSE)) {
+            self.debugger.pause();
+        }
+        if ctx.input_mut(|i| i.consume_shortcut(&STEP_OUT)) {
+            self.debugger.resume(crate::debug_ui::Step::Out);
+        }
+        if ctx.input_mut(|i| i.consume_shortcut(&STEP_IN)) {
+            self.debugger.resume(crate::debug_ui::Step::In);
+        }
+        if ctx.input_mut(|i| i.consume_shortcut(&STEP_OVER)) {
+            self.debugger.resume(crate::debug_ui::Step::Over);
+        }
+        if ctx.input_mut(|i| i.consume_shortcut(&TOGGLE_BREAKPOINT))
+            && let Some(i) = self.active
+        {
+            let doc = &self.docs[i];
+            let line = doc.buffer.pos_to_line_col(doc.buffer.selection().head).0 + 1;
+            let path = doc.path.clone();
+            self.toggle_breakpoint(&path, line);
         }
         if ctx.input_mut(|i| i.consume_shortcut(&SOURCE_CONTROL)) {
             self.git.toggle();
@@ -1421,10 +1469,205 @@ impl FerriteApp {
     }
 
     fn open_run_picker(&mut self, ctx: &egui::Context) {
-        match &self.tree {
-            Some(tree) => self.run.show(tree.root(), ctx),
-            None => self.status = "먼저 프로젝트 폴더를 여세요".into(),
+        let Some(root) = self.tree.as_ref().map(|t| t.root().to_path_buf()) else {
+            self.status = "먼저 프로젝트 폴더를 여세요".into();
+            return;
+        };
+        let (custom, error) = match ferrite_core::run::load_custom(&root) {
+            Ok(custom) => (custom, None),
+            Err(e) => (Vec::new(), Some(e)),
+        };
+        self.run
+            .show(custom, ferrite_core::run::detect(&root), error, ctx);
+    }
+
+    /// F5: 멈춰 있으면 계속, 디버그 중이 아니면 구성을 고르게 한다.
+    fn debug_continue_or_start(&mut self, ctx: &egui::Context) {
+        if self.debugger.is_stopped() {
+            self.debugger.resume(crate::debug_ui::Step::Continue);
+        } else if !self.debugger.is_active() {
+            self.open_debug_picker(ctx);
         }
+    }
+
+    fn open_debug_picker(&mut self, ctx: &egui::Context) {
+        let Some(root) = self.tree.as_ref().map(|t| t.root().to_path_buf()) else {
+            self.status = "먼저 프로젝트 폴더를 여세요".into();
+            return;
+        };
+        let (custom, error) = match ferrite_core::debug_config::load_custom(&root) {
+            Ok(custom) => (custom, None),
+            Err(e) => (Vec::new(), Some(e)),
+        };
+        let file = self.active.map(|i| self.docs[i].path.as_path());
+        let detected = ferrite_core::debug_config::detect(file);
+        self.debug_picker.show(custom, detected, error, ctx);
+    }
+
+    fn start_debug(
+        &mut self,
+        config: &ferrite_core::debug_config::DebugConfig,
+        ctx: &egui::Context,
+    ) {
+        let Some(root) = self.tree.as_ref().map(|t| t.root().to_path_buf()) else {
+            return;
+        };
+        let file = self.active.map(|i| self.docs[i].path.clone());
+        match self.debugger.start(
+            config,
+            &root,
+            file.as_deref(),
+            self.breakpoints.clone(),
+            ctx,
+        ) {
+            Ok(()) => {
+                dock::show(&mut self.layout, Pane::DebugConsole);
+                dock::show(&mut self.layout, Pane::Debug);
+                self.status = format!("디버그 시작: {}", config.name);
+            }
+            Err(e) => self.status = format!("디버그를 시작하지 못했습니다: {e}"),
+        }
+    }
+
+    /// 디버거가 알린 일(멈춘 자리 보이기, 상태 글)을 한다.
+    fn process_debug_notices(&mut self) {
+        for notice in self.debugger.poll() {
+            self.on_debug_notice(notice);
+        }
+    }
+
+    fn on_debug_notice(&mut self, notice: crate::debug_ui::DebugNotice) {
+        match notice {
+            crate::debug_ui::DebugNotice::Reveal(path, line) => {
+                self.open_file(path.clone());
+                if let Some(i) = self.active.filter(|&i| self.docs[i].path == path) {
+                    let doc = &mut self.docs[i];
+                    let line = line.min(doc.buffer.line_count().saturating_sub(1));
+                    doc.buffer.move_to(doc.buffer.line_start(line), false);
+                    doc.view.reveal_cursor();
+                }
+            }
+            crate::debug_ui::DebugNotice::Status(text) => self.status = text,
+        }
+    }
+
+    /// 그 줄(1부터)의 중단점을 켜고 끈다.
+    fn toggle_breakpoint(&mut self, path: &Path, line: usize) {
+        let list = self.breakpoints.entry(path.to_path_buf()).or_default();
+        match list.iter().position(|b| b.line == line) {
+            Some(i) => {
+                list.remove(i);
+            }
+            None => {
+                list.push(ferrite_dap::Breakpoint {
+                    line,
+                    condition: None,
+                });
+                list.sort_by_key(|b| b.line);
+            }
+        }
+        self.sync_breakpoints(path);
+    }
+
+    /// 바뀐 중단점을 디버그 중인 어댑터에 보낸다. 빈 목록은 지운다.
+    fn sync_breakpoints(&mut self, path: &Path) {
+        let list = self.breakpoints.get(path).cloned().unwrap_or_default();
+        if list.is_empty() {
+            self.breakpoints.remove(path);
+        }
+        self.debugger.set_breakpoints(path, list);
+    }
+
+    /// 중단점 조건 창. 빈 조건이면 보통 중단점이 된다.
+    fn breakpoint_condition_dialog(&mut self, ctx: &egui::Context) {
+        let Some((path, line, condition)) = &mut self.breakpoint_condition else {
+            return;
+        };
+        let (mut apply, mut remove, mut open) = (false, false, true);
+        egui::Window::new("중단점 조건")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_TOP, [0.0, 80.0])
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.label(format!(
+                    "{}:{line}",
+                    path.file_name().unwrap_or_default().to_string_lossy()
+                ));
+                let label = ui.label("조건식(참일 때만 멈춤)");
+                let field = ui
+                    .add(egui::TextEdit::singleline(condition).desired_width(320.0))
+                    .labelled_by(label.id);
+                if !field.has_focus() && !field.lost_focus() {
+                    field.request_focus();
+                }
+                apply = field.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+                ui.horizontal(|ui| {
+                    apply |= ui.button("확인").clicked();
+                    remove = ui.button("중단점 지우기").clicked();
+                });
+            });
+        if !(apply || remove) {
+            if !open {
+                self.breakpoint_condition = None;
+            }
+            return;
+        }
+        let Some((path, line, condition)) = self.breakpoint_condition.take() else {
+            return;
+        };
+        let list = self.breakpoints.entry(path.clone()).or_default();
+        list.retain(|b| b.line != line);
+        if apply {
+            let condition = condition.trim();
+            list.push(ferrite_dap::Breakpoint {
+                line,
+                condition: (!condition.is_empty()).then(|| condition.to_owned()),
+            });
+            list.sort_by_key(|b| b.line);
+        }
+        self.sync_breakpoints(&path);
+    }
+
+    /// 거터 클릭: 왼쪽 단추는 중단점 켜고 끄기, 오른쪽 단추는 조건 고치기.
+    fn on_gutter_click(&mut self, path: PathBuf, line: usize, secondary: bool) {
+        let line = line + 1;
+        if secondary {
+            let condition = self
+                .breakpoints
+                .get(&path)
+                .and_then(|list| list.iter().find(|b| b.line == line))
+                .and_then(|b| b.condition.clone())
+                .unwrap_or_default();
+            self.breakpoint_condition = Some((path, line, condition));
+        } else {
+            self.toggle_breakpoint(&path, line);
+        }
+    }
+
+    /// 사용자 디버그 구성 파일을 연다. 없으면 견본(모두 주석)으로 만든다.
+    fn edit_debug_configs(&mut self) {
+        let Some(root) = self.tree.as_ref().map(|t| t.root().to_path_buf()) else {
+            return;
+        };
+        let path = root.join(ferrite_core::debug_config::CUSTOM_FILE);
+        if !path.exists() {
+            let created = path
+                .parent()
+                .map_or(Ok(()), std::fs::create_dir_all)
+                .and_then(|()| {
+                    text_file::write_atomic(
+                        &path,
+                        ferrite_core::debug_config::CUSTOM_TEMPLATE.as_bytes(),
+                    )
+                });
+            if let Err(e) = created {
+                self.status = format!("디버그 구성 파일을 만들지 못했습니다: {e}");
+                return;
+            }
+        }
+        self.open_file(path);
+        self.focus_editor = true;
     }
 
     /// 실행 구성을 터미널 탭에서 돌리고 터미널 창을 앞으로 가져온다.
@@ -1678,6 +1921,60 @@ impl FerriteApp {
                     {
                         ui.close();
                         self.edit_run_configs();
+                    }
+                    ui.separator();
+                    let debugging = self.debugger.is_active();
+                    let stopped = self.debugger.is_stopped();
+                    let label = if stopped {
+                        "계속"
+                    } else {
+                        "디버그 시작…"
+                    };
+                    let item = egui::Button::new(label).shortcut_text(ctx.format_shortcut(&DEBUG));
+                    if ui
+                        .add_enabled(project && (stopped || !debugging), item)
+                        .clicked()
+                    {
+                        ui.close();
+                        self.debug_continue_or_start(&ctx);
+                    }
+                    let steps = [
+                        ("한 줄씩", STEP_OVER, crate::debug_ui::Step::Over),
+                        ("들어가기", STEP_IN, crate::debug_ui::Step::In),
+                        ("나오기", STEP_OUT, crate::debug_ui::Step::Out),
+                    ];
+                    for (label, shortcut, step) in steps {
+                        let item =
+                            egui::Button::new(label).shortcut_text(ctx.format_shortcut(&shortcut));
+                        if ui.add_enabled(stopped, item).clicked() {
+                            ui.close();
+                            self.debugger.resume(step);
+                        }
+                    }
+                    let item = egui::Button::new("디버그 멈춤")
+                        .shortcut_text(ctx.format_shortcut(&DEBUG_STOP));
+                    if ui.add_enabled(debugging, item).clicked() {
+                        ui.close();
+                        self.debugger.stop();
+                    }
+                    let item = egui::Button::new("중단점 켜기/끄기")
+                        .shortcut_text(ctx.format_shortcut(&TOGGLE_BREAKPOINT));
+                    if ui.add_enabled(self.active.is_some(), item).clicked() {
+                        ui.close();
+                        if let Some(i) = self.active {
+                            let doc = &self.docs[i];
+                            let line =
+                                doc.buffer.pos_to_line_col(doc.buffer.selection().head).0 + 1;
+                            let path = doc.path.clone();
+                            self.toggle_breakpoint(&path, line);
+                        }
+                    }
+                    if ui
+                        .add_enabled(project, egui::Button::new("디버그 구성 편집…"))
+                        .clicked()
+                    {
+                        ui.close();
+                        self.edit_debug_configs();
                     }
                 });
                 ui.menu_button("도구", |ui| {
@@ -2139,6 +2436,7 @@ impl FerriteApp {
         let mut reload = false;
         // 스크린리더가 에디터를 "현재 탭 이름"으로 읽도록 에디터를 활성 탭에 연결한다.
         let mut active_tab = None;
+        let mut gutter_click = None;
         ui.scope(|ui| {
             egui::ScrollArea::horizontal()
                 .id_salt("tabs")
@@ -2194,6 +2492,26 @@ impl FerriteApp {
                 });
                 doc.git_key = Some(key);
             }
+            // 어댑터가 걸 수 없다고 한 중단점은 빈 점으로 보인다(디버그 중일 때).
+            let marks: Vec<(usize, BreakpointMark)> = self
+                .breakpoints
+                .get(&doc.path)
+                .into_iter()
+                .flatten()
+                .enumerate()
+                .map(|(i, b)| {
+                    let verified = self
+                        .debugger
+                        .breakpoint_state(&doc.path, i)
+                        .is_none_or(|s| s.verified);
+                    let mark = match (verified, &b.condition) {
+                        (false, _) => BreakpointMark::Unverified,
+                        (true, Some(_)) => BreakpointMark::Conditional,
+                        (true, None) => BreakpointMark::Set,
+                    };
+                    (b.line.saturating_sub(1), mark)
+                })
+                .collect();
             let opts = EditorOptions {
                 tab_size: self.settings.tab_size,
                 indent: doc.indent,
@@ -2206,6 +2524,12 @@ impl FerriteApp {
                     .filter(|h| h.path == doc.path)
                     .and_then(|h| Some((h.pos, h.text.as_deref()?))),
                 line_changes: &doc.git_marks,
+                breakpoints: &marks,
+                debug_line: self
+                    .debugger
+                    .location()
+                    .filter(|(path, _)| *path == doc.path)
+                    .map(|(_, line)| line),
             };
             let id = ui.make_persistent_id(&doc.path);
             if std::mem::take(&mut self.focus_editor) {
@@ -2216,6 +2540,9 @@ impl FerriteApp {
             let focused = output.response.has_focus();
             if let Some(tab) = active_tab {
                 output.response.labelled_by(tab);
+            }
+            if let Some((line, secondary)) = output.gutter_click {
+                gutter_click = Some((doc.path.clone(), line, secondary));
             }
             frame = Some(EditorFrame {
                 path: doc.path.clone(),
@@ -2228,6 +2555,9 @@ impl FerriteApp {
         });
         if let Some(frame) = frame {
             self.after_editor(ui.ctx(), frame);
+        }
+        if let Some((path, line, secondary)) = gutter_click {
+            self.on_gutter_click(path, line, secondary);
         }
         if let Some(action) = find_action {
             self.run_find_action(action);
@@ -2345,6 +2675,12 @@ impl egui_tiles::Behavior<Pane> for Dock<'_> {
             Pane::Problems => app.problems_panel(ui),
             Pane::Search => app.find_in_files_panel(ui),
             Pane::References => app.references_panel(ui),
+            Pane::Debug => {
+                if let Some(notice) = app.debugger.panel_ui(ui) {
+                    app.on_debug_notice(notice);
+                }
+            }
+            Pane::DebugConsole => app.debugger.console_ui(ui),
         });
         egui_tiles::UiResponse::None
     }
@@ -2396,6 +2732,7 @@ impl eframe::App for FerriteApp {
         self.git
             .tick(ctx, self.docs.iter().map(|d| d.path.clone()).collect());
         self.process_fs_events();
+        self.process_debug_notices();
         self.finish_server_jobs();
         self.sync_language_servers();
         if std::mem::take(&mut self.settings_changed) {
@@ -2417,8 +2754,13 @@ impl eframe::App for FerriteApp {
         // 고르기 창은 위에 뜨지만, 고르는 키(Enter·화살표)를 창들보다 먼저 받도록 먼저 그린다.
         let ctx = ui.ctx().clone();
         match self.run.ui(&ctx) {
-            Some(crate::run_ui::RunAction::Run(config)) => self.start_run(&config, &ctx),
-            Some(crate::run_ui::RunAction::Edit) => self.edit_run_configs(),
+            Some(crate::picker::PickerAction::Pick(config)) => self.start_run(&config, &ctx),
+            Some(crate::picker::PickerAction::Edit) => self.edit_run_configs(),
+            None => {}
+        }
+        match self.debug_picker.ui(&ctx) {
+            Some(crate::picker::PickerAction::Pick(config)) => self.start_debug(&config, &ctx),
+            Some(crate::picker::PickerAction::Edit) => self.edit_debug_configs(),
             None => {}
         }
         let mut layout = std::mem::replace(
@@ -2431,6 +2773,7 @@ impl eframe::App for FerriteApp {
             self.open_file(path);
             self.focus_editor = true;
         }
+        self.breakpoint_condition_dialog(ui.ctx());
         self.pending_close_dialog(ui.ctx());
         self.name_prompt_dialog(ui.ctx());
         self.delete_dialog(ui.ctx());
@@ -4097,6 +4440,200 @@ mod tests {
         let app = harness.state();
         let doc = &app.docs[app.active.unwrap()];
         assert!(doc.path.ends_with("run.toml"), "{}", doc.path.display());
+        drop(harness);
+        remove_project(&dir);
+    }
+
+    /// 거터의 줄(0부터) 가운데를 누른다. 오른쪽 단추면 조건 창을 연다.
+    fn click_gutter(harness: &mut Harness<'_, FerriteApp>, line: usize, secondary: bool) {
+        let rect = harness
+            .get_by_role(egui::accesskit::Role::MultilineTextInput)
+            .rect();
+        // 글꼴 잠금 안에서 스타일을 읽으면 같은 잠금을 다시 잡아 멈춘다. 먼저 읽는다.
+        let font = egui::TextStyle::Monospace.resolve(&harness.ctx.global_style());
+        let row = harness.ctx.fonts_mut(|f| f.row_height(&font));
+        let pos = egui::pos2(rect.min.x + 4.0, rect.min.y + row * (line as f32 + 0.5));
+        let button = if secondary {
+            egui::PointerButton::Secondary
+        } else {
+            egui::PointerButton::Primary
+        };
+        harness.hover_at(pos);
+        for pressed in [true, false] {
+            harness.event(egui::Event::PointerButton {
+                pos,
+                button,
+                pressed,
+                modifiers: Modifiers::NONE,
+            });
+            harness.run_ok();
+        }
+    }
+
+    #[test]
+    fn 거터를_눌러_중단점을_켜고_조건을_단다() {
+        let dir = std::env::temp_dir().join(format!("ferrite-gutter-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("main.py");
+        fs::write(&file, "a = 1\nb = 2\nc = a + b\n").unwrap();
+        let mut harness = harness_builder()
+            .with_size(egui::vec2(1000.0, 700.0))
+            .build_eframe(|cc| FerriteApp::new(cc, Some(file.clone())));
+        harness.run_ok();
+        let path = harness.state().docs[0].path.clone();
+        let lines = |h: &Harness<'_, FerriteApp>| -> Vec<(usize, Option<String>)> {
+            h.state()
+                .breakpoints
+                .get(&path)
+                .into_iter()
+                .flatten()
+                .map(|b| (b.line, b.condition.clone()))
+                .collect()
+        };
+
+        // 거터를 누르면 켜지고, 커서는 그대로다. 다시 누르면 꺼진다.
+        click_gutter(&mut harness, 1, false);
+        assert_eq!(lines(&harness), [(2, None)]);
+        assert_eq!(
+            harness.state().docs[0].buffer.selection().head,
+            0,
+            "커서는 그대로"
+        );
+        click_gutter(&mut harness, 1, false);
+        assert!(lines(&harness).is_empty());
+        assert!(
+            harness.state().breakpoints.is_empty(),
+            "빈 파일 항목은 지운다"
+        );
+
+        // 오른쪽 단추로 조건을 단다.
+        click_gutter(&mut harness, 2, true);
+        harness
+            .get_by_role_and_label(egui::accesskit::Role::TextInput, "조건식(참일 때만 멈춤)")
+            .type_text("a > 0");
+        harness.key_press(Key::Enter);
+        harness.run_ok();
+        assert_eq!(lines(&harness), [(3, Some("a > 0".to_owned()))]);
+        assert!(
+            harness.query_by_label("중단점 조건").is_none(),
+            "확인하면 닫힌다"
+        );
+
+        // F9는 커서 줄을 켜고 끈다.
+        harness.key_press(Key::F9);
+        harness.run_ok();
+        assert_eq!(lines(&harness), [(1, None), (3, Some("a > 0".to_owned()))]);
+        drop(harness);
+        remove_project(&dir);
+    }
+
+    /// debugpy를 쓸 수 있는지. 없으면 건너뛰되 CI에서는 실패시킨다.
+    fn debugpy_available() -> bool {
+        let python = if cfg!(windows) { "python" } else { "python3" };
+        let mut command = std::process::Command::new(python);
+        command.args(["-c", "import debugpy"]);
+        if let Some(path) = std::env::var_os("FERRITE_DEBUGPY_PATH") {
+            command.env("PYTHONPATH", path);
+        }
+        let found = command.output().is_ok_and(|o| o.status.success());
+        if !found {
+            assert!(
+                std::env::var_os("CI").is_none(),
+                "CI에는 debugpy가 설치되어 있어야 합니다"
+            );
+            eprintln!("debugpy가 없어 건너뜁니다");
+        }
+        found
+    }
+
+    /// 디버거 상태가 `done`이 될 때까지 돌린다(최대 60초, 처음 띄울 때 느리다).
+    fn wait_debugger(
+        harness: &mut Harness<'_, FerriteApp>,
+        what: &str,
+        done: impl Fn(&Harness<'_, FerriteApp>) -> bool,
+    ) {
+        let started = std::time::Instant::now();
+        while started.elapsed() < std::time::Duration::from_secs(60) {
+            harness.run_ok();
+            if done(harness) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        panic!(
+            "{what} 시간 초과. 상태: {}\n출력:\n{}",
+            harness.state().status,
+            harness.state().debugger.console()
+        );
+    }
+
+    #[test]
+    fn 디버그로_중단점에서_멈추고_변수를_보고_이어_간다() {
+        if !debugpy_available() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("ferrite-debug-ui-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("main.py");
+        fs::write(
+            &file,
+            "def add(a, b):\n    total = a + b\n    return total\n\n\nfor x in (1, 41):\n    y = add(x, 1)\nprint(\"결과\", y)\n",
+        )
+        .unwrap();
+        let mut harness = harness_builder()
+            .with_size(egui::vec2(1200.0, 900.0))
+            .build_eframe(|cc| FerriteApp::new(cc, Some(file.clone())));
+        harness.run_ok();
+
+        // `return total` 줄에 F9로 중단점을 건다.
+        {
+            let doc = &mut harness.state_mut().docs[0];
+            let start = doc.buffer.line_start(2);
+            doc.buffer.move_to(start, false);
+        }
+        harness.key_press(Key::F9);
+        harness.run_ok();
+
+        // F5 → 고르기 창의 자동 구성(Python: 현재 파일) → Enter
+        harness.key_press(Key::F5);
+        harness.run_ok();
+        harness.get_by_label("Python: 현재 파일");
+        harness.key_press(Key::Enter);
+        wait_debugger(&mut harness, "첫 멈춤", |h| {
+            h.query_by_label("total = 2").is_some()
+        });
+        let path = harness.state().docs[0].path.clone();
+        assert_eq!(
+            harness.state().debugger.location(),
+            Some((path.as_path(), 2)),
+            "멈춘 줄을 에디터에 보인다"
+        );
+        assert!(dock::is_shown(&harness.state().layout, Pane::Debug));
+        harness.get_by_label_contains("add  main.py:3");
+
+        // 한 줄씩(F10): 함수에서 돌아와 호출한 줄에 멈춘다.
+        harness.key_press(Key::F10);
+        wait_debugger(&mut harness, "한 줄씩", |h| {
+            h.state().debugger.is_stopped()
+                && h.state()
+                    .debugger
+                    .location()
+                    .is_some_and(|(_, line)| line == 6)
+        });
+
+        // 계속(F5): 두 번째 호출에서 다시 멈춘다.
+        harness.key_press(Key::F5);
+        wait_debugger(&mut harness, "두 번째 멈춤", |h| {
+            h.query_by_label("total = 42").is_some()
+        });
+
+        // 멈춤(Shift+F5): 어댑터가 대상을 끝내고 세션이 닫힌다.
+        harness.key_press_modifiers(Modifiers::SHIFT, Key::F5);
+        wait_debugger(&mut harness, "멈춤", |h| !h.state().debugger.is_active());
+        assert!(harness.state().debugger.location().is_none());
+        assert!(harness.state().debugger.console().contains("[멈추는 중…]"));
         drop(harness);
         remove_project(&dir);
     }

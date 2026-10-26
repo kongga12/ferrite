@@ -16,23 +16,29 @@ pub enum Pane {
     Problems,
     Search,
     References,
+    Debug,
+    DebugConsole,
 }
 
 /// 열고 닫는 도구 창. 프로젝트와 에디터는 늘 있다.
-const TOOLS: [Pane; 4] = [
+const TOOLS: [Pane; 6] = [
     Pane::Terminal,
     Pane::Problems,
     Pane::Search,
     Pane::References,
+    Pane::Debug,
+    Pane::DebugConsole,
 ];
 
-const ALL: [Pane; 6] = [
+const ALL: [Pane; 8] = [
     Pane::Project,
     Pane::Editor,
     Pane::Terminal,
     Pane::Problems,
     Pane::Search,
     Pane::References,
+    Pane::Debug,
+    Pane::DebugConsole,
 ];
 
 impl Pane {
@@ -44,6 +50,8 @@ impl Pane {
             Pane::Problems => "문제",
             Pane::Search => "검색",
             Pane::References => "참조",
+            Pane::Debug => "디버그",
+            Pane::DebugConsole => "디버그 출력",
         }
     }
 
