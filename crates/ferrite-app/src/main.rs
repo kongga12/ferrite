@@ -17,6 +17,7 @@ mod lsp_ui;
 mod new_project;
 mod quick_open;
 mod servers;
+mod terminal_ui;
 mod theme;
 mod watcher;
 

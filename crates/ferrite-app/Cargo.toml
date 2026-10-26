@@ -17,6 +17,7 @@ ferrite-codegen.workspace = true
 ferrite-core.workspace = true
 ferrite-egov.workspace = true
 ferrite-lsp.workspace = true
+ferrite-term.workspace = true
 ropey.workspace = true
 lsp-types = "0.97"
 notify = "8"

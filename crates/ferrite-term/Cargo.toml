@@ -1,0 +1,10 @@
+[package]
+name = "ferrite-term"
+description = "Ferrite 통합 터미널: PTY(ConPTY·Unix pty)로 셸을 띄우고 터미널 화면 상태를 관리한다"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+alacritty_terminal = "0.26.0"
