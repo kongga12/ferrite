@@ -8,7 +8,7 @@
 | 항목 | 규칙 |
 |---|---|
 | 브랜치 | `main`은 보호 브랜치. 작업은 `feature/<phase>-<기능>`에서 하고 PR로 병합 |
-| CI 게이트 | PR·main 푸시는 Ubuntu에서 `cargo fmt --check` → `cargo clippy -- -D warnings` → `cargo test`, 그리고 커버리지를 본다. 3개 OS(+ `cargo build --release`, 실행 파일)는 `ci.yml`의 `full` 작업이 맡고, 수동 실행·주 1회 돈다. 같은 브랜치의 이전 실행은 자동 취소한다. 비공개 저장소는 Actions 분을 Windows ×2, macOS ×10으로 세기 때문이다(2026-10에 무료 2,000분의 95% 사용). |
+| CI 게이트 | PR·main 푸시는 Ubuntu에서 `cargo fmt --check` → `cargo clippy -- -D warnings` → `cargo test`, 그리고 커버리지를 본다. 3개 OS(+ `cargo build --release`, 실행 파일)는 `ci.yml`의 `full` 작업이 맡고, 수동 실행·주 1회 돈다(오래 걸려 PR마다 돌리지는 않는다). 같은 브랜치의 이전 실행은 자동 취소한다. 공개 저장소라 Actions 분 제한은 없다. 패닉 백트레이스를 로그에 남긴다(`RUST_BACKTRACE=1`). |
 | 3개 OS·실제 서버 수동 실행 | `gh workflow run ci.yml --ref <브랜치>`, `gh workflow run servers.yml --ref <브랜치>` |
 | 주석·커밋 메시지 | 한국어 |
 | 테스트 | 코어 로직(인코딩, 버퍼, 프로토콜 파싱)은 단위 테스트 필수. UI는 수동 체크리스트로 검증 |
@@ -329,6 +329,9 @@
     - 엔드포인트 목록(`@RequestMapping` URL 모음): 앱에 기호 검색 화면이 생기면 Spring Boot LS의 `@/` 기호를 재사용한다.
     - 라이브러리 클래스의 property 검증(jar의 class 파일 읽기)
     - `mappedBy` 검증, 경로 조인 별칭(`JOIN b.files f`) 필드 완성
+- [x] 3개 OS 검증(2026-10-26): CI 3개 OS 전체(실행 40257065684), 언어 서버 실제 설치(실행 40250457209) 통과
+  - 이 검증에서 macOS로 폴더 없이 시작하면 죽던 버그를 찾아 고쳤다. 첫 프레임 전에 `Context::format_shortcut`을 불렀는데, macOS에서는 이 함수가 글꼴로 ⌘ 기호를 확인한다.
+  - 파일 감시 알림 때문에 앱 테스트가 가끔 기본 프레임 상한(4)을 넘겨, 모든 앱 테스트의 상한을 한 곳(`harness_builder`)에서 32로 올렸다.
 
 ### Phase 2c — egov 개발도구 (프로젝트·설정·코드 생성)
 
@@ -417,7 +420,7 @@
     - 가짜 zip으로 만들기·가져오기·실패 정리·입력 검사를 확인하는 단위 테스트, 창 테스트(kittest)
     - 로컬: 공식 vsix에서 22종을 모두 가져와 만들고, pom에 채우지 않은 자리가 없음을 확인했다. 창에서 DeviceAPI 템플릿으로 만들고 연다.
     - Windows(Java 21, Maven 3.9): Web·Boot Web을 실제로 GitHub에서 받아(각 15.5MB) 만들고 `mvn package`(테스트 포함)를 통과했다.
-    - 3개 OS: `egov 템플릿 mvn package` 워크플로(수동 실행, Java 17)로 같은 확인을 한다. 아직 돌리지 않았다(Actions 예산).
+    - 3개 OS(Java 17): `egov 템플릿 mvn package` 워크플로로 Web·Boot Web 모두 통과했다(2026-10-26, 실행 40250455011).
 - [x] 2c-4 공통컴포넌트 추가(도구 > 공통컴포넌트 추가)
   - 공식 개발환경(Eclipse)의 공통컴포넌트 플러그인(`egovframework.dev.imp.commngt`)을 그대로 쓴다.
     - 플러그인에는 목록(`components.xml` + `components_ko.properties`)과 컴포넌트별 zip(`<패키지>.Wizard.<버전>.zip`)이 들어 있다.
@@ -442,11 +445,12 @@
     - 로컬: 4.2.1 개발환경 zip(37개 분류, 153종)과 3.10 업데이트 사이트 zip(38개 분류, 154종)에서 가져와, 모든 컴포넌트를 빈 프로젝트에 넣었다(패키지 155개, 파일 약 6천 개). 다시 넣으면 모두 같은 파일이다.
     - 로컬(Java 21, Maven 3.9): 빈 프로젝트에 4.2의 FAQ를 넣으면 의존을 더해 패키지 14개(파일 1,442개)가 들어간다. 그 프로젝트가 `mvn compile`을 통과했다(Java 173개). pom은 기본 묶음(cmm)에 든 공통컴포넌트 pom이다.
   - 미룸: DB에 바로 테이블 만들기(Phase 5 DB 연결), 모바일 공통컴포넌트(`egovframework.mdev.imp.commngt`), pom 의존성 자동 추가
+- [x] 3개 OS 검증(2026-10-26): CI 3개 OS 전체(실행 40257065684), 템플릿 `mvn package`(실행 40250455011) 통과
 
 ### Phase 3 — 프로젝트 도구
 
-- 통합 터미널: portable-pty + alacritty_terminal. 여러 탭 지원. Windows ConPTY 검증
-- 파일 퍼지 검색(nucleo), 전체 텍스트 검색(ignore + grep-searcher, .gitignore 준수)
+- 통합 터미널: alacritty_terminal(PTY 포함). 여러 탭 지원. Windows ConPTY 검증
+- 파일 퍼지 검색(nucleo), 전체 텍스트 검색(ignore + regex, .gitignore 준수, UTF-8·CP949)
 - Git: 변경 표시(거터), diff 뷰, 스테이지/커밋/푸시(git CLI), 브랜치 전환
 - 도킹 레이아웃(egui_dock), 레이아웃 저장과 복원
 

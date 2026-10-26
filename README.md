@@ -5,7 +5,7 @@ Rust로 작성한 크로스플랫폼(Windows / macOS / Linux) 경량 IDE.
 
 - 개발 워크플로우와 로드맵: [docs/WORKFLOW.md](docs/WORKFLOW.md)
 
-## 현재 상태: Phase 2 완료 (LSP 연동), Phase 2b·2c 기능 완료 (3개 OS 검증 남음), Phase 3 진행 중 (프로젝트 도구)
+## 현재 상태: Phase 2·2b·2c 완료 (LSP 연동, egov 언어 지원·개발도구, 3개 OS 검증), Phase 3 진행 중 (프로젝트 도구)
 
 - 폴더 열기, 지연 로딩 프로젝트 트리(파일 감시로 자동 갱신), 탭 에디터
 - 통합 터미널(`` Ctrl+` ``): 탭 여러 개, Windows는 ConPTY(PowerShell), 한글 입출력, 256색·트루컬러, 복사(고른 글자)·붙여넣기
