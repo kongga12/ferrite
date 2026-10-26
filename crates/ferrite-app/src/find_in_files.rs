@@ -38,7 +38,6 @@ pub struct Jump {
 
 #[derive(Default)]
 pub struct FindInFiles {
-    open: bool,
     focus: bool,
     query: TextQuery,
     /// 결과를 찾은 프로젝트 루트(경로를 짧게 보여 줄 때 쓴다).
@@ -52,9 +51,8 @@ pub struct FindInFiles {
 }
 
 impl FindInFiles {
-    /// 패널을 연다. `selected`(에디터에서 고른 한 줄 글자)가 있으면 찾을 내용으로 넣는다.
+    /// 검색어 칸에 포커스를 준다. `selected`(에디터에서 고른 한 줄 글자)가 있으면 찾을 내용으로 넣는다.
     pub fn show(&mut self, selected: Option<String>) {
-        self.open = true;
         self.focus = true;
         if let Some(text) = selected.filter(|t| !t.contains('\n')) {
             self.query.pattern = text;
@@ -89,7 +87,7 @@ impl FindInFiles {
         self.job = Some(Job { rx, cancel });
     }
 
-    fn stop(&mut self) {
+    pub fn stop(&mut self) {
         if let Some(job) = self.job.take() {
             job.cancel.store(true, Ordering::Relaxed);
         }
@@ -116,73 +114,56 @@ impl FindInFiles {
         }
     }
 
-    /// 패널을 그린다. 결과를 누르면 그 위치.
+    /// 검색 창을 그린다. 결과를 누르면 그 위치.
     pub fn ui(&mut self, ui: &mut egui::Ui, root: Option<&Path>) -> Option<Jump> {
-        if !self.open {
-            return None;
-        }
         self.poll();
         let ctx = ui.ctx().clone();
         let mut jump = None;
-        let mut close = false;
-        egui::Panel::bottom("find_in_files")
-            .resizable(true)
-            .default_size(260.0)
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    let label = ui.label("파일에서 찾기");
-                    let field = ui
-                        .add(
-                            egui::TextEdit::singleline(&mut self.query.pattern)
-                                .desired_width(280.0),
-                        )
-                        .labelled_by(label.id);
-                    if std::mem::take(&mut self.focus) {
-                        field.request_focus();
-                    }
-                    let submitted = field.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
-                    for (on, text, hover) in [
-                        (&mut self.query.case_sensitive, "Aa", "대소문자 구분"),
-                        (&mut self.query.whole_word, "단어", "단어 단위"),
-                        (&mut self.query.regex, ".*", "정규식"),
-                    ] {
-                        if ui
-                            .selectable_label(*on, text)
-                            .on_hover_text(hover)
-                            .clicked()
-                        {
-                            *on = !*on;
-                        }
-                    }
-                    let label = ui.label("파일");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.query.files)
-                            .hint_text("*.java, *.xml, !*Test.java")
-                            .desired_width(200.0),
-                    )
-                    .labelled_by(label.id);
-                    let running = self.job.is_some();
-                    if running {
-                        if ui.button("멈춤").clicked() {
-                            self.stop();
-                        }
-                    } else if (ui
-                        .add_enabled(root.is_some(), egui::Button::new("찾기"))
-                        .clicked()
-                        || submitted)
-                        && let Some(root) = root
-                    {
-                        self.start(root, &ctx);
-                    }
-                    close = ui.small_button("×").on_hover_text("닫기").clicked();
-                });
-                self.status_ui(ui, root.is_none());
-                self.results_ui(ui, &mut jump);
-            });
-        if close {
-            self.stop();
-            self.open = false;
-        }
+        ui.horizontal(|ui| {
+            let label = ui.label("파일에서 찾기");
+            let field = ui
+                .add(egui::TextEdit::singleline(&mut self.query.pattern).desired_width(280.0))
+                .labelled_by(label.id);
+            if std::mem::take(&mut self.focus) {
+                field.request_focus();
+            }
+            let submitted = field.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+            for (on, text, hover) in [
+                (&mut self.query.case_sensitive, "Aa", "대소문자 구분"),
+                (&mut self.query.whole_word, "단어", "단어 단위"),
+                (&mut self.query.regex, ".*", "정규식"),
+            ] {
+                if ui
+                    .selectable_label(*on, text)
+                    .on_hover_text(hover)
+                    .clicked()
+                {
+                    *on = !*on;
+                }
+            }
+            let label = ui.label("파일");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.query.files)
+                    .hint_text("*.java, *.xml, !*Test.java")
+                    .desired_width(200.0),
+            )
+            .labelled_by(label.id);
+            let running = self.job.is_some();
+            if running {
+                if ui.button("멈춤").clicked() {
+                    self.stop();
+                }
+            } else if (ui
+                .add_enabled(root.is_some(), egui::Button::new("찾기"))
+                .clicked()
+                || submitted)
+                && let Some(root) = root
+            {
+                self.start(root, &ctx);
+            }
+        });
+        self.status_ui(ui, root.is_none());
+        self.results_ui(ui, &mut jump);
         jump
     }
 
