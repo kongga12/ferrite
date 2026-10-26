@@ -1,4 +1,4 @@
-//! 통합 터미널 패널(Ctrl+`). 아래 패널에 셸 탭을 여러 개 둔다. 화면은 ferrite-term의 스냅샷을 칸
+//! 통합 터미널 창(Ctrl+`). 셸 탭과 실행 구성 탭을 여러 개 둔다. 화면은 ferrite-term의 스냅샷을 칸
 //! 단위로 그리고, 키·글자·IME·붙여넣기를 셸로 보낸다. 앱 단축키(Ctrl+S 등)는 앱이 먼저 받는다.
 
 use std::path::{Path, PathBuf};
@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use eframe::egui::{
     self, Color32, Event, EventFilter, FontId, ImeEvent, Key, Pos2, Rect, Sense, Stroke, Vec2,
 };
+use ferrite_core::run::RunConfig;
 use ferrite_term::{Cell, Mods, Options, Paint, Snapshot, Terminal};
 
 /// 처음 띄울 때의 크기(그린 뒤 패널 크기에 맞춘다).
@@ -16,6 +17,8 @@ const TITLE_CHARS: usize = 24;
 struct Tab {
     terminal: Terminal,
     number: usize,
+    /// 실행 구성 탭이면 그 구성 이름(탭 이름으로 쓰고, 다시 실행할 때 이 탭을 바꾼다).
+    run: Option<String>,
 }
 
 #[derive(Default)]
@@ -60,27 +63,53 @@ impl TerminalPanel {
             .map(Path::to_path_buf)
             .or_else(dirs::home_dir)
             .unwrap_or_else(|| PathBuf::from("."));
+        let options = Options {
+            working_directory,
+            ..Default::default()
+        };
+        self.spawn(options, None, ctx);
+    }
+
+    /// 실행 구성을 새 탭에서 돌린다. 같은 구성의 이전 탭은 닫는다(아직 돌고 있으면 끝난다).
+    pub fn run(&mut self, config: &RunConfig, root: &Path, ctx: &egui::Context) {
+        self.tabs
+            .retain(|t| t.run.as_deref() != Some(config.name.as_str()));
+        self.drag_from = None;
+        // 이 탭이 첫 탭이어도 기본 셸을 따로 띄우지 않는다.
+        self.started = true;
+        let options = Options {
+            working_directory: config.working_directory(root),
+            command: Some(config.command.clone()),
+            env: config.env.clone().into_iter().collect(),
+            ..Default::default()
+        };
+        self.spawn(options, Some(config.name.clone()), ctx);
+    }
+
+    fn spawn(&mut self, options: Options, run: Option<String>, ctx: &egui::Context) {
         let wake = ctx.clone();
-        match Terminal::spawn(
-            &Options {
-                working_directory,
-                columns: INITIAL.0,
-                lines: INITIAL.1,
-                shell: None,
-            },
-            move || wake.request_repaint(),
-        ) {
+        let options = Options {
+            columns: INITIAL.0,
+            lines: INITIAL.1,
+            ..options
+        };
+        match Terminal::spawn(&options, move || wake.request_repaint()) {
             Ok(terminal) => {
                 self.next_number += 1;
                 self.tabs.push(Tab {
                     terminal,
                     number: self.next_number,
+                    run,
                 });
                 self.active = self.tabs.len() - 1;
                 self.error = None;
                 self.focus = true;
             }
-            Err(e) => self.error = Some(format!("셸을 띄우지 못했습니다: {e}")),
+            Err(e) => {
+                let what = run.as_deref().unwrap_or("셸");
+                self.error = Some(format!("띄우지 못했습니다({what}): {e}"));
+                self.active = self.active.min(self.tabs.len().saturating_sub(1));
+            }
         }
     }
 
@@ -187,9 +216,11 @@ impl TerminalPanel {
         };
         paint(ui, rect, &snapshot, &geometry, focused);
         if let Some(code) = tab.terminal.exited() {
-            let note = match code {
-                Some(code) => format!("[셸이 끝났습니다(코드 {code}). 탭을 닫거나 새 탭을 여세요]"),
-                None => "[셸이 끝났습니다. 탭을 닫거나 새 탭을 여세요]".to_owned(),
+            let code = code.map(|c| format!("(코드 {c})")).unwrap_or_default();
+            let note = if tab.run.is_some() {
+                format!("[실행이 끝났습니다{code}. Ctrl+F5로 다시 실행하거나 탭을 닫으세요]")
+            } else {
+                format!("[셸이 끝났습니다{code}. 탭을 닫거나 새 탭을 여세요]")
             };
             ui.painter().text(
                 rect.left_bottom() + Vec2::new(4.0, -4.0),
@@ -224,7 +255,7 @@ impl TerminalPanel {
 }
 
 fn tab_title(tab: &Tab) -> String {
-    let title = tab.terminal.title().trim();
+    let title = tab.run.as_deref().unwrap_or(tab.terminal.title()).trim();
     if title.is_empty() {
         format!("터미널 {}", tab.number)
     } else if title.chars().count() > TITLE_CHARS {

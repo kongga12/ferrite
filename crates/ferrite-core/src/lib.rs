@@ -5,6 +5,7 @@ pub mod fs_ops;
 pub mod git;
 pub mod jsp;
 pub mod project_search;
+pub mod run;
 pub mod search;
 pub mod settings;
 pub mod syntax;

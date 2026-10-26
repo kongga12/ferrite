@@ -59,6 +59,8 @@ const SOURCE_CONTROL: KeyboardShortcut =
     KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::G);
 // 터미널은 VS Code처럼 macOS에서도 실제 Ctrl+`다.
 const TOGGLE_TERMINAL: KeyboardShortcut = KeyboardShortcut::new(Modifiers::CTRL, Key::Backtick);
+// macOS의 Cmd+F5는 VoiceOver를 켜므로 모든 OS에서 Ctrl을 쓴다.
+const RUN: KeyboardShortcut = KeyboardShortcut::new(Modifiers::CTRL, Key::F5);
 const FIND_IN_FILES: KeyboardShortcut =
     KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::F);
 /// 마우스가 한 자리에 이만큼 머물면 호버 정보를 요청한다.
@@ -446,6 +448,8 @@ pub struct FerriteApp {
     find_in_files: crate::find_in_files::FindInFiles,
     /// 통합 터미널(Ctrl+`) 패널.
     terminal: crate::terminal_ui::TerminalPanel,
+    /// 실행 구성 고르기(Ctrl+F5).
+    run: crate::run_ui::RunPicker,
     /// git 상태·소스 제어 창(Ctrl+Shift+G).
     git: crate::git_ui::GitPanel,
     /// 다음 프레임에 에디터로 키보드 포커스를 돌려준다(찾기 막대를 닫은 뒤 등).
@@ -497,6 +501,7 @@ impl FerriteApp {
             quick_open: Default::default(),
             find_in_files: Default::default(),
             terminal: Default::default(),
+            run: Default::default(),
             git: Default::default(),
             focus_editor: false,
             settings,
@@ -924,6 +929,9 @@ impl FerriteApp {
         }
         if ctx.input_mut(|i| i.consume_shortcut(&TOGGLE_TERMINAL)) {
             self.toggle_terminal();
+        }
+        if ctx.input_mut(|i| i.consume_shortcut(&RUN)) {
+            self.open_run_picker(ctx);
         }
         if ctx.input_mut(|i| i.consume_shortcut(&SOURCE_CONTROL)) {
             self.git.toggle();
@@ -1412,6 +1420,45 @@ impl FerriteApp {
         self.terminal.request_focus();
     }
 
+    fn open_run_picker(&mut self, ctx: &egui::Context) {
+        match &self.tree {
+            Some(tree) => self.run.show(tree.root(), ctx),
+            None => self.status = "먼저 프로젝트 폴더를 여세요".into(),
+        }
+    }
+
+    /// 실행 구성을 터미널 탭에서 돌리고 터미널 창을 앞으로 가져온다.
+    fn start_run(&mut self, config: &ferrite_core::run::RunConfig, ctx: &egui::Context) {
+        let Some(root) = self.tree.as_ref().map(|t| t.root().to_path_buf()) else {
+            return;
+        };
+        self.terminal.run(config, &root, ctx);
+        dock::show(&mut self.layout, Pane::Terminal);
+        self.status = format!("실행: {}", config.name);
+    }
+
+    /// 사용자 실행 구성 파일을 연다. 없으면 견본(모두 주석)으로 만든다.
+    fn edit_run_configs(&mut self) {
+        let Some(root) = self.tree.as_ref().map(|t| t.root().to_path_buf()) else {
+            return;
+        };
+        let path = root.join(ferrite_core::run::CUSTOM_FILE);
+        if !path.exists() {
+            let created = path
+                .parent()
+                .map_or(Ok(()), std::fs::create_dir_all)
+                .and_then(|()| {
+                    text_file::write_atomic(&path, ferrite_core::run::CUSTOM_TEMPLATE.as_bytes())
+                });
+            if let Err(e) = created {
+                self.status = format!("실행 구성 파일을 만들지 못했습니다: {e}");
+                return;
+            }
+        }
+        self.open_file(path);
+        self.focus_editor = true;
+    }
+
     fn show_references(&mut self, list: ReferenceList) {
         self.references = Some(list);
         dock::show(&mut self.layout, Pane::References);
@@ -1616,6 +1663,21 @@ impl FerriteApp {
                         self.find_in_files.stop();
                         self.references = None;
                         self.layout = dock::default_layout();
+                    }
+                });
+                ui.menu_button("실행", |ui| {
+                    let project = self.tree.is_some();
+                    let item = egui::Button::new("실행…").shortcut_text(ctx.format_shortcut(&RUN));
+                    if ui.add_enabled(project, item).clicked() {
+                        ui.close();
+                        self.open_run_picker(&ctx);
+                    }
+                    if ui
+                        .add_enabled(project, egui::Button::new("실행 구성 편집…"))
+                        .clicked()
+                    {
+                        ui.close();
+                        self.edit_run_configs();
                     }
                 });
                 ui.menu_button("도구", |ui| {
@@ -2352,6 +2414,13 @@ impl eframe::App for FerriteApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.menu_bar(ui);
         self.status_bar(ui);
+        // 고르기 창은 위에 뜨지만, 고르는 키(Enter·화살표)를 창들보다 먼저 받도록 먼저 그린다.
+        let ctx = ui.ctx().clone();
+        match self.run.ui(&ctx) {
+            Some(crate::run_ui::RunAction::Run(config)) => self.start_run(&config, &ctx),
+            Some(crate::run_ui::RunAction::Edit) => self.edit_run_configs(),
+            None => {}
+        }
         let mut layout = std::mem::replace(
             &mut self.layout,
             egui_tiles::Tree::empty(egui::Id::unique("dock")),
@@ -2365,7 +2434,6 @@ impl eframe::App for FerriteApp {
         self.pending_close_dialog(ui.ctx());
         self.name_prompt_dialog(ui.ctx());
         self.delete_dialog(ui.ctx());
-        let ctx = ui.ctx().clone();
         if let Some(action) = self.servers.ui(&ctx) {
             self.start_server_action(action, &ctx);
         }
@@ -3957,6 +4025,78 @@ mod tests {
         harness.run_ok();
         assert!(!exists(&harness, Pane::Problems));
         harness.get_by_label("에디터");
+        drop(harness);
+        remove_project(&dir);
+    }
+
+    #[test]
+    fn 실행_구성을_골라_터미널_탭에서_돌리고_다시_실행하면_그_탭을_바꾼다() {
+        let dir = std::env::temp_dir().join(format!("ferrite-run-ui-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join(".ferrite")).unwrap();
+        // ConPTY는 곧바로 끝나는 프로세스의 마지막 화면을 놓칠 수 있어 Windows에서는 1초 쉰다.
+        let command = if cfg!(windows) {
+            "echo run-%FERRITE_RUN%& ping -n 2 127.0.0.1 >nul"
+        } else {
+            "echo run-$FERRITE_RUN"
+        };
+        fs::write(
+            dir.join(ferrite_core::run::CUSTOM_FILE),
+            format!(
+                "[[run]]\nname = \"인사\"\ncommand = '{command}'\nenv = {{ FERRITE_RUN = \"ok\" }}\n"
+            ),
+        )
+        .unwrap();
+        fs::write(
+            dir.join("pom.xml"),
+            "<project><artifactId>tomcat7-maven-plugin</artifactId></project>",
+        )
+        .unwrap();
+        let mut harness = harness_builder()
+            .with_size(egui::vec2(1200.0, 800.0))
+            .build_eframe(|cc| FerriteApp::new(cc, Some(dir.clone())));
+        harness.run_ok();
+
+        // 사용자 구성이 먼저, 그다음 자동 감지 구성. Enter로 고른 구성을 돌린다.
+        harness.key_press_modifiers(Modifiers::CTRL, Key::F5);
+        harness.run_ok();
+        harness.get_by_label("사용자 구성");
+        harness.get_by_label("자동 감지");
+        harness.get_by_label("mvn tomcat7:run");
+        harness.key_press(Key::Enter);
+        wait_for_terminal(&mut harness, |text| {
+            text.lines().any(|line| line.trim() == "run-ok")
+        });
+        assert!(
+            harness.query_by_label("사용자 구성").is_none(),
+            "고르면 닫힌다"
+        );
+        assert!(dock::is_shown(&harness.state().layout, Pane::Terminal));
+        assert_eq!(
+            harness.state().terminal.tab_count(),
+            1,
+            "기본 셸은 따로 띄우지 않는다"
+        );
+        harness.get_by_role_and_label(egui::accesskit::Role::Terminal, "인사");
+
+        // 다시 열면 마지막 구성이 골라져 있고, 다시 돌리면 같은 탭을 바꾼다.
+        harness.key_press_modifiers(Modifiers::CTRL, Key::F5);
+        harness.run_ok();
+        harness.key_press(Key::Enter);
+        harness.run_ok();
+        assert_eq!(harness.state().terminal.tab_count(), 1);
+        wait_for_terminal(&mut harness, |text| {
+            text.lines().any(|line| line.trim() == "run-ok")
+        });
+
+        // 구성 편집은 구성 파일을 에디터로 연다.
+        harness.key_press_modifiers(Modifiers::CTRL, Key::F5);
+        harness.run_ok();
+        harness.get_by_label("구성 편집…").click();
+        harness.run_ok();
+        let app = harness.state();
+        let doc = &app.docs[app.active.unwrap()];
+        assert!(doc.path.ends_with("run.toml"), "{}", doc.path.display());
         drop(harness);
         remove_project(&dir);
     }

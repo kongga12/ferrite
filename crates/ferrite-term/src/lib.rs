@@ -96,12 +96,39 @@ impl EventListener for Listener {
     }
 }
 
+#[derive(Default)]
 pub struct Options {
     pub working_directory: PathBuf,
     pub columns: u16,
     pub lines: u16,
     /// (프로그램, 인자). 없으면 기본 셸(Windows PowerShell, Unix 사용자 셸).
     pub shell: Option<(String, Vec<String>)>,
+    /// 있으면 `shell` 대신 이 명령 줄을 플랫폼 셸로 실행한다(실행 구성).
+    pub command: Option<String>,
+    /// 더할 환경 변수.
+    pub env: HashMap<String, String>,
+}
+
+/// 명령 줄을 실행할 플랫폼 셸.
+/// - Windows: `cmd /d /s /c "줄"`. cmd는 C 런타임과 따옴표 규칙이 달라, 줄을 이스케이프하지 않고
+///   그대로 넘긴다(`/s`가 바깥 따옴표만 벗긴다). `.cmd`·`.bat`(mvn, gradle)도 PATH에서 찾는다.
+/// - 그 밖: 사용자 셸을 로그인 셸(`-l -c`)로 띄워, 프로필이 정한 PATH(Homebrew·SDKMAN 등)를 쓴다.
+///
+/// 돌려주는 bool은 Windows에서 인자를 C 런타임 규칙으로 이스케이프할지.
+fn command_shell(line: &str) -> (tty::Shell, bool) {
+    #[cfg(windows)]
+    {
+        let args = ["/d", "/s", "/c"].map(String::from);
+        let mut args = args.to_vec();
+        args.push(format!("\"{line}\""));
+        (tty::Shell::new("cmd.exe".to_owned(), args), false)
+    }
+    #[cfg(not(windows))]
+    {
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_owned());
+        let args = vec!["-l".to_owned(), "-c".to_owned(), line.to_owned()];
+        (tty::Shell::new(shell, args), true)
+    }
 }
 
 pub struct Terminal {
@@ -121,20 +148,33 @@ impl Terminal {
             columns: usize::from(options.columns.max(2)),
             lines: usize::from(options.lines.max(1)),
         };
-        let env = HashMap::from([
+        let mut env = HashMap::from([
             ("TERM".to_owned(), "xterm-256color".to_owned()),
             ("COLORTERM".to_owned(), "truecolor".to_owned()),
         ]);
+        env.extend(options.env.clone());
+        let (shell, escape_args) = match &options.command {
+            Some(line) => {
+                let (shell, escape) = command_shell(line);
+                (Some(shell), escape)
+            }
+            None => (
+                options
+                    .shell
+                    .clone()
+                    .map(|(program, args)| tty::Shell::new(program, args)),
+                true,
+            ),
+        };
+        #[cfg(not(windows))]
+        let _ = escape_args;
         let tty_options = tty::Options {
-            shell: options
-                .shell
-                .clone()
-                .map(|(program, args)| tty::Shell::new(program, args)),
+            shell,
             working_directory: Some(options.working_directory.clone()),
             drain_on_exit: true,
             env,
             #[cfg(windows)]
-            escape_args: true,
+            escape_args,
         };
         let pty = tty::new(&tty_options, size.window(), 0)?;
         let (notices_tx, notices) = channel();

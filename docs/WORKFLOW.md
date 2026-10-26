@@ -544,6 +544,33 @@
 
 **완료 조건**: 5개 어댑터로 중단점 정지와 변수 확인이 3개 OS 모두 동작한다.
 
+**진행 단계**:
+- [x] 4-1 실행 구성(`` Ctrl+F5 ``, 실행 메뉴)
+  - `ferrite-core::run`: 프로젝트 루트의 표지 파일로 구성을 만든다. 하위 폴더는 보지 않는다.
+    - Maven: `tomcat7-maven-plugin`이 있으면 `tomcat7:run`, `spring-boot-maven-plugin`이 있으면 `spring-boot:run`, `jetty-maven-plugin`이 있으면 `jetty:run`, 그리고 `package`·`test`
+      - 로컬 egov 프로젝트 pom 27개 중 16개가 tomcat7, 6개가 spring-boot 플러그인을 쓴다.
+    - Gradle: `bootRun`(Spring Boot), `run`(application 플러그인), `build`·`test`
+    - 그 밖: cargo(run·test·build), go(run·test·build), CMake(구성·빌드·ctest), Python(`main.py`·`app.py`·`manage.py runserver`·pytest), Composer(install·스크립트, `pre-`·`post-`는 뺌, Laravel `artisan serve`)
+    - 래퍼(`mvnw`, `gradlew`)가 있으면 그것을 쓴다.
+  - 사용자 구성: `.ferrite/run.toml`의 `[[run]]`(name, command, cwd, env). 모르는 키나 빈 name·command는 오류로 알린다. [구성 편집…]은 파일이 없으면 주석뿐인 견본으로 만들어 연다.
+  - 실행: 명령 줄을 플랫폼 셸이 실행한다.
+    - Windows는 `cmd /d /s /c "줄"`이다. 줄을 이스케이프하지 않고 넘긴다. cmd는 C 런타임과 따옴표 규칙이 다르고, 이렇게 해야 `mvn.cmd`·`gradle.bat`도 PATH에서 찾는다.
+    - 그 밖은 사용자 셸을 로그인 셸(`-l -c`)로 띄운다. GUI로 띄운 앱도 프로필이 정한 PATH를 쓰게 하려는 것이다.
+  - 고르기 창: 사용자 구성 → 자동 감지 순서. 다시 열면 마지막 구성이 골라져 있어 Enter로 다시 돌린다. 창에는 글자 칸이 없으므로, 열 때 키보드 포커스를 거두고 고르는 키를 다른 창보다 먼저 받는다.
+  - 터미널 창의 탭에서 돌린다. 입력도 받는다(Ctrl+C로 멈춤).
+    - 탭 이름은 구성 이름이다.
+    - 같은 구성을 다시 돌리면 이전 탭을 닫고(돌고 있으면 끝내고) 새로 띄운다.
+    - 끝나면 종료 코드를 보인다.
+  - 검증
+    - 단위 테스트: 감지(egov Maven·래퍼, 여러 종류를 함께, 빈 폴더), 사용자 구성(정상·견본·잘못된 키·빈 값)
+    - 실제 셸 테스트: 따옴표가 든 명령 줄, 환경 변수, 종료 코드(Windows cmd, 그 밖은 사용자 셸)
+    - 창 테스트(kittest): 고르기 창의 순서, Enter로 실행하면 출력이 보임, 다시 실행하면 같은 탭을 바꿈, 구성 편집이 파일을 엶
+    - 실제 앱(Windows): pom(tomcat7)과 사용자 구성이 있는 프로젝트에서 고르기 창을 열고, `mvn -v` 구성을 돌려 출력과 종료 코드 0을 확인했다.
+- [ ] 4-2 DAP 클라이언트(프로토콜·세션, 중단점·단계 실행·변수·호출 스택)
+- [ ] 4-3 디버그 화면(거터 중단점·조건부 중단점, 디버그 도구 막대, 변수·호출 스택 창)
+- [ ] 4-4 어댑터 설치와 연결(codelldb, delve, debugpy, java-debug, vscode-php-debug)
+- [ ] 3개 OS 검증
+
 ### Phase 5 — DB 도구
 
 - 연결 관리: 비밀번호는 OS 키체인(keyring)에 저장하고 설정 파일에는 평문으로 저장하지 않음
