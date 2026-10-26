@@ -617,7 +617,35 @@
       - 거터: 누르기로 켜고 끄기(커서는 그대로), 오른쪽 단추로 조건 달기, F9
       - 실제 debugpy 끝단: F9로 중단점 → F5 → 자동 구성 → 멈춤(`total = 2`, 멈춘 줄, 호출 스택 `add main.py:3`) → F10(호출한 줄로) → F5(두 번째 호출 `total = 42`) → Shift+F5(세션 닫힘)
     - 실제 앱(Windows): 거터를 눌러 건 중단점에서 멈추고, 멈춘 줄 표시·호출 스택·변수를 화면으로 확인했다.
-- [ ] 4-4 어댑터 설치와 연결(codelldb, delve, debugpy, java-debug, vscode-php-debug)
+- [x] 4-4a 어댑터 설치와 연결: debugpy·codelldb·delve·vscode-php-debug(도구 > 언어 서버의 "디버그 어댑터")
+  - 목록(`ferrite_lsp::catalog::ADAPTERS`): 언어 서버와 같은 구조, 같은 설치 폴더·설치기·설치 창을 쓴다. 이름이 겹치지 않는지 목록 테스트가 함께 본다.
+    | 어댑터 | 버전 | 설치 | 연결 |
+    |---|---|---|---|
+    | debugpy | 1.8.22 | 전용 가상환경에 pip | 표준 입출력(`python -m debugpy.adapter`) |
+    | codelldb | 1.12.3 | VSIX(OS·CPU별, SHA-256 고정) | 표준 입출력 |
+    | delve | v1.27.2 | `go install`(배포 실행 파일이 없음) | `dlv dap --listen=127.0.0.1:0`이 알린 주소로 TCP |
+    | php-debug | 1.40.2 | VSIX(공통, SHA-256 고정) | node로 표준 입출력 |
+    - 듣는 주소를 알리는 어댑터(delve)는 표준 출력에서 "listening at: 주소"를 30초까지 기다린다. 빈 포트로 띄우므로 정해 둔 포트와 부딪히지 않는다.
+    - Ferrite가 설치하지 않았으면 PATH에서 찾는다. debugpy는 PATH의 python이 있다고 있는 것으로 보지 않는다(설치 창에 "설치 안 됨").
+  - 구성 인자의 기본값: debugpy는 디버그 대상을 사용자의 Python으로 띄운다(설치한 가상환경에는 프로젝트 패키지가 없다). php-debug는 PATH의 php.
+  - 자동 구성(열린 파일)
+    - Rust: Cargo.toml의 패키지 이름으로 `target/debug/<이름>`을 `cargo build` 뒤에 띄운다(codelldb).
+    - Go: 그 폴더의 패키지(delve `mode: debug`)
+    - PHP: 그 파일(php-debug가 빈 포트로 기다리고 `${port}`를 Xdebug에 알린다)
+  - 빌드 명령(`build`): 시작 전에 플랫폼 셸로 별도 스레드에서 돌린다. 출력(UTF-8·CP949)을 디버그 출력 창에 보인다. 실패하면 시작하지 않는다. 빌드 중 멈춤은 시작만 취소한다.
+  - 찾은 것
+    - Windows(PDB)에서 Rust 함수의 마지막 식 줄에는 코드가 없어 다음 줄로 옮겨 걸린다.
+    - `println!` 줄처럼 한 줄에 걸 자리가 여럿이면, 이어 가도 다시 멈출 수 있다.
+    - 설치 창의 표(grid) 안에서 `add_space`를 쓰면 디버그 빌드가 패닉한다(창 테스트로 찾음).
+    - macOS: 가상환경의 python은 시스템 Python으로 가는 링크라 권한을 바꿀 수 없다. 설치기는 실행 권한이 빠진 경우에만 준다.
+    - macOS: 임시 폴더(/var)는 /private/var로 가는 링크다. go는 실제 경로로 모듈을 찾으므로 링크 경로를 주면 "모듈 밖 폴더"로 빌드가 실패한다(앱은 실제 경로를 쓴다).
+  - 검증
+    - 단위 테스트: 목록(https·고정 해시·이름 중복), 듣는 주소 읽기, 어댑터 고르기·기본값 채우기, 자동 구성(Rust 패키지 이름, Go 폴더, PHP `${port}` 보존)
+    - 창 테스트: 빌드 실패 시 시작하지 않고 한글 빌드 출력을 보임, 설치 창의 어댑터 구역
+    - 실제 설치·디버그(`crates/ferrite-dap/tests/adapters.rs`, 무시 표시): 예제 `add(41, 1)`의 중단점에서 a=41·b=1·total=42를 읽고 끝까지 이어 간다.
+      - 로컬(Windows): debugpy(가상환경 pip)·codelldb(VSIX) 통과. Go와 Xdebug 3을 쓸 PHP가 없어 delve·php-debug는 건너뛰었다.
+      - 3개 OS: `.github/workflows/adapters.yml`(어댑터 코드를 바꾼 PR·수동·주 1회)이 Python·Go·PHP+Xdebug를 갖춰 넷 모두 돌린다.
+- [ ] 4-4b java-debug(jdt.ls 번들, 메인 클래스·클래스패스 찾기, egov 톰캣에 붙기)
 - [ ] 3개 OS 검증
 
 ### Phase 5 — DB 도구

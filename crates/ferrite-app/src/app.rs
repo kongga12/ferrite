@@ -1500,7 +1500,7 @@ impl FerriteApp {
             Err(e) => (Vec::new(), Some(e)),
         };
         let file = self.active.map(|i| self.docs[i].path.as_path());
-        let detected = ferrite_core::debug_config::detect(file);
+        let detected = ferrite_core::debug_config::detect(file, &root);
         self.debug_picker.show(custom, detected, error, ctx);
     }
 
@@ -1518,6 +1518,7 @@ impl FerriteApp {
             &root,
             file.as_deref(),
             self.breakpoints.clone(),
+            &servers_root(),
             ctx,
         ) {
             Ok(()) => {
@@ -3472,6 +3473,11 @@ mod tests {
         harness.get_by_label("언어 서버…").click();
         harness.run();
         harness.get_by_label(&format!("업데이트 있음 (0.1 → {})", lemminx.version));
+        // 디버그 어댑터도 같은 창에서 설치한다.
+        harness.get_by_label("디버그 어댑터");
+        for adapter in ferrite_lsp::catalog::ADAPTERS {
+            harness.get_by_label(adapter.name);
+        }
 
         harness.get_by_label("삭제").click();
         assert!(
@@ -4634,6 +4640,56 @@ mod tests {
         wait_debugger(&mut harness, "멈춤", |h| !h.state().debugger.is_active());
         assert!(harness.state().debugger.location().is_none());
         assert!(harness.state().debugger.console().contains("[멈추는 중…]"));
+        drop(harness);
+        remove_project(&dir);
+    }
+
+    #[test]
+    fn 빌드가_실패하면_디버그를_시작하지_않고_출력을_보인다() {
+        let dir = std::env::temp_dir().join(format!("ferrite-debug-build-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join(".ferrite")).unwrap();
+        let file = dir.join("main.py");
+        fs::write(&file, "print(1)\n").unwrap();
+        let build = if cfg!(windows) {
+            "echo 빌드-출력& exit 3"
+        } else {
+            "echo 빌드-출력; exit 3"
+        };
+        fs::write(
+            dir.join(ferrite_core::debug_config::CUSTOM_FILE),
+            format!(
+                "[[debug]]\nname = \"빌드 실패\"\nadapter = \"debugpy\"\nbuild = '{build}'\narguments = {{ program = \"${{file}}\" }}\n"
+            ),
+        )
+        .unwrap();
+        let mut harness = harness_builder()
+            .with_size(egui::vec2(1200.0, 800.0))
+            .build_eframe(|cc| FerriteApp::new(cc, Some(file.clone())));
+        harness.run_ok();
+        harness.key_press(Key::F5);
+        harness.run_ok();
+        harness.get_by_label("사용자 구성");
+        harness.key_press(Key::Enter);
+        // debugpy를 찾을 Python이 없으면(빌드 전에 알림) 이 시험의 대상이 아니다.
+        if harness.state().status.contains("없습니다") {
+            assert!(
+                std::env::var_os("CI").is_none(),
+                "{}",
+                harness.state().status
+            );
+            return;
+        }
+        wait_debugger(&mut harness, "빌드 실패", |h| {
+            !h.state().debugger.is_active() && h.state().status.contains("빌드에 실패")
+        });
+        let console = harness.state().debugger.console().to_owned();
+        assert!(console.contains("[빌드: "), "{console}");
+        assert!(
+            console.contains("빌드-출력"),
+            "빌드 출력(한글)을 보인다: {console}"
+        );
+        assert!(console.contains("[빌드 실패"), "{console}");
         drop(harness);
         remove_project(&dir);
     }

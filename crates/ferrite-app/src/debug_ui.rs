@@ -3,13 +3,16 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::mpsc::{Receiver, channel};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use eframe::egui;
 use ferrite_core::debug_config::DebugConfig;
 use ferrite_dap::{
-    Breakpoint, BreakpointState, DebugEvent, DebugSession, Launch, Scope, StackFrame, State,
-    Variable, adapters, types,
+    Adapter, Breakpoint, BreakpointState, DebugEvent, DebugSession, Launch, Scope, StackFrame,
+    State, Variable, adapters, types,
 };
 use serde_json::Value;
 
@@ -28,6 +31,15 @@ enum Request {
     Evaluate(String),
 }
 
+/// 빌드가 끝나기를 기다리는 시작. 빌드에 성공하면 세션을 띄운다.
+struct PendingLaunch {
+    adapter: Adapter,
+    launch: Launch,
+    breakpoints: BTreeMap<PathBuf, Vec<Breakpoint>>,
+    /// 빌드 출력. 실패(0이 아닌 종료 코드)면 Err.
+    build: Receiver<Result<String, String>>,
+}
+
 /// 앱이 할 일.
 pub enum DebugNotice {
     /// 이 파일의 이 줄(0부터)을 보여 준다.
@@ -39,6 +51,7 @@ pub enum DebugNotice {
 #[derive(Default)]
 pub struct Debugger {
     session: Option<DebugSession>,
+    pending: Option<PendingLaunch>,
     /// 다시 그리게 할 때 쓴다(멈춤 기다림이 끝날 때).
     ctx: Option<egui::Context>,
     /// 멈춤을 누른 때. 그동안은 세션을 살려 두어 어댑터가 대상을 끝내게 한다.
@@ -64,8 +77,9 @@ pub struct Debugger {
 }
 
 impl Debugger {
+    /// 세션이 있거나 시작 전 빌드 중.
     pub fn is_active(&self) -> bool {
-        self.session.is_some()
+        self.session.is_some() || self.pending.is_some()
     }
 
     pub fn is_stopped(&self) -> bool {
@@ -75,40 +89,76 @@ impl Debugger {
         )
     }
 
-    /// 구성으로 세션을 시작한다. 돌고 있는 세션은 먼저 끝낸다.
+    /// 구성으로 세션을 시작한다. 빌드 명령이 있으면 먼저 별도 스레드에서 빌드하고, 성공하면 띄운다.
+    /// 돌고 있는 세션은 먼저 끝낸다. `servers`는 언어 서버·어댑터 설치 폴더.
     pub fn start(
         &mut self,
         config: &DebugConfig,
         root: &Path,
         file: Option<&Path>,
         breakpoints: BTreeMap<PathBuf, Vec<Breakpoint>>,
+        servers: &Path,
         ctx: &egui::Context,
     ) -> Result<(), String> {
-        let adapter = adapters::resolve(&config.adapter, root)?;
-        let arguments = config.resolved_arguments(root, file)?;
+        // 어댑터·인자 문제는 빌드하기 전에 알린다.
+        let adapter = adapters::resolve(&config.adapter, servers, root)?;
+        let mut arguments = config.resolved_arguments(root, file)?;
+        adapters::complete_arguments(&config.adapter, &mut arguments);
         let launch = Launch {
             adapter_id: config.adapter.clone(),
             attach: config.attach(),
             arguments,
         };
-        let wake = ctx.clone();
-        let session = DebugSession::start(&adapter, launch, breakpoints, move || {
-            wake.request_repaint()
-        })?;
         *self = Self {
-            session: Some(session),
             ctx: Some(ctx.clone()),
             name: config.name.clone(),
             adapter: config.adapter.clone(),
             console: format!("[디버그 시작: {}]\n", config.name),
             ..Default::default()
         };
+        let Some(build) = &config.build else {
+            return self.launch(&adapter, launch, breakpoints);
+        };
+        self.push_console(&format!("[빌드: {build}]\n"));
+        let (done, result) = channel();
+        let (line, dir, wake) = (build.clone(), root.to_path_buf(), ctx.clone());
+        thread::spawn(move || {
+            let _ = done.send(run_build(&line, &dir));
+            wake.request_repaint();
+        });
+        self.pending = Some(PendingLaunch {
+            adapter,
+            launch,
+            breakpoints,
+            build: result,
+        });
+        Ok(())
+    }
+
+    fn launch(
+        &mut self,
+        adapter: &Adapter,
+        launch: Launch,
+        breakpoints: BTreeMap<PathBuf, Vec<Breakpoint>>,
+    ) -> Result<(), String> {
+        let wake = self.ctx.clone();
+        let session = DebugSession::start(adapter, launch, breakpoints, move || {
+            if let Some(ctx) = &wake {
+                ctx.request_repaint();
+            }
+        })?;
+        self.session = Some(session);
         Ok(())
     }
 
     /// 대상을 끝낸다. 바로 세션을 버리면 어댑터가 대상을 끝내기 전에 죽어 대상이 남을 수 있으므로,
     /// 끝났다는 알림을 기다리고 `STOP_GRACE`가 지나면 어댑터를 끝낸다.
     pub fn stop(&mut self) {
+        // 빌드 중이면 시작만 취소한다(빌드 명령은 끝까지 돌고 결과는 버린다).
+        if self.pending.take().is_some() {
+            self.push_console("[시작을 취소했습니다]\n");
+            return;
+        }
         let Some(session) = &mut self.session else {
             return;
         };
@@ -228,11 +278,35 @@ impl Debugger {
 
     /// 세션 이벤트를 처리한다. 매 프레임 부른다.
     pub fn poll(&mut self) -> Vec<DebugNotice> {
+        let mut notices = Vec::new();
+        if let Some(result) = self.pending.as_ref().and_then(|p| p.build.try_recv().ok()) {
+            let Some(pending) = self.pending.take() else {
+                return notices;
+            };
+            match result {
+                Ok(output) => {
+                    self.push_console(&output);
+                    if let Err(e) =
+                        self.launch(&pending.adapter, pending.launch, pending.breakpoints)
+                    {
+                        self.push_console(&format!("[오류] {e}\n"));
+                        notices.push(DebugNotice::Status(format!(
+                            "디버그를 시작하지 못했습니다: {e}"
+                        )));
+                    }
+                }
+                Err(output) => {
+                    self.push_console(&output);
+                    notices.push(DebugNotice::Status(
+                        "빌드에 실패해 디버그를 시작하지 않았습니다(디버그 출력 참고)".into(),
+                    ));
+                }
+            }
+        }
         let Some(session) = &mut self.session else {
-            return Vec::new();
+            return notices;
         };
         let events = session.poll();
-        let mut notices = Vec::new();
         if self.stopping.is_some_and(|at| at.elapsed() >= STOP_GRACE) {
             self.end("[디버그를 멈췄습니다]");
             notices.push(DebugNotice::Status("디버그를 멈췄습니다".into()));
@@ -511,6 +585,47 @@ impl Debugger {
     #[cfg(test)]
     pub fn console(&self) -> &str {
         &self.console
+    }
+}
+
+/// 빌드 명령을 플랫폼 셸로 돌려 출력(UTF-8·CP949)을 모은다. 실패(0이 아닌 종료 코드)면 Err.
+fn run_build(line: &str, dir: &Path) -> Result<String, String> {
+    let mut command = shell(line);
+    command.current_dir(dir);
+    ferrite_lsp::client::hide_console(&mut command);
+    let output = command
+        .output()
+        .map_err(|e| format!("빌드 명령을 실행하지 못했습니다: {e}\n"))?;
+    let decode = |bytes: &[u8]| {
+        ferrite_core::text_file::decode(bytes)
+            .map(|c| c.text)
+            .unwrap_or_else(|_| String::from_utf8_lossy(bytes).into_owned())
+    };
+    let text = decode(&output.stdout) + &decode(&output.stderr);
+    if output.status.success() {
+        Ok(text)
+    } else {
+        Err(format!("{text}[빌드 실패: {}]\n", output.status))
+    }
+}
+
+/// 명령 줄을 실행할 플랫폼 셸(터미널의 실행 구성과 같다).
+fn shell(line: &str) -> Command {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let mut command = Command::new("cmd.exe");
+        command
+            .args(["/d", "/s", "/c"])
+            .raw_arg(format!("\"{line}\""));
+        command
+    }
+    #[cfg(not(windows))]
+    {
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_owned());
+        let mut command = Command::new(shell);
+        command.args(["-l", "-c", line]);
+        command
     }
 }
 

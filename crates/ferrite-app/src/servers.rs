@@ -7,7 +7,7 @@ use std::thread;
 use std::time::Duration;
 
 use eframe::egui;
-use ferrite_lsp::catalog::{SERVERS, Server, Source};
+use ferrite_lsp::catalog::{self, SERVERS, Server, Source};
 use ferrite_lsp::client::find_program;
 use ferrite_lsp::install::{self, Installed};
 
@@ -58,7 +58,7 @@ pub struct ServerManager {
     open: bool,
     jobs: HashMap<&'static str, Job>,
     errors: HashMap<&'static str, String>,
-    /// `SERVERS`와 같은 순서.
+    /// `catalog::all()`(언어 서버 다음에 디버그 어댑터)과 같은 순서.
     statuses: Vec<Status>,
 }
 
@@ -79,11 +79,14 @@ impl ServerManager {
     }
 
     fn refresh(&mut self) {
-        self.statuses = SERVERS
-            .iter()
+        self.statuses = catalog::all()
             .map(|s| match install::installed(&self.root, s) {
                 _ if matches!(s.source, Source::Builtin(_)) => Status::Builtin,
                 Some(installed) => Status::Managed(installed),
+                // PATH의 python이 있다고 debugpy가 있는 것은 아니다.
+                None if matches!(s.source, Source::Pip(_)) && s.program == "python" => {
+                    Status::Missing
+                }
                 None => find_program(s.program).map_or(Status::Missing, Status::OnPath),
             })
             .collect();
@@ -91,8 +94,7 @@ impl ServerManager {
 
     /// 목록보다 예전 버전이 설치된 서버.
     pub fn outdated(&self) -> Vec<&'static str> {
-        SERVERS
-            .iter()
+        catalog::all()
             .filter(|s| install::installed(&self.root, s).is_some_and(|i| i.is_outdated(s)))
             .map(|s| s.name)
             .collect()
@@ -159,7 +161,7 @@ impl ServerManager {
                 match event {
                     JobEvent::Progress(done, total) => job.progress = Some((done, total)),
                     JobEvent::Done(result) => {
-                        let server = SERVERS.iter().find(|s| s.name == name);
+                        let server = catalog::all().find(|s| s.name == name);
                         finished.extend(server.map(|server| Finished {
                             server,
                             verb: job.verb,
@@ -196,7 +198,12 @@ impl ServerManager {
                     .striped(true)
                     .spacing([12.0, 6.0])
                     .show(ui, |ui| {
-                        for (server, status) in SERVERS.iter().zip(&self.statuses) {
+                        for (i, (server, status)) in catalog::all().zip(&self.statuses).enumerate()
+                        {
+                            if i == SERVERS.len() {
+                                ui.strong("디버그 어댑터");
+                                ui.end_row();
+                            }
                             ui.strong(server.name);
                             ui.label(server.languages.join(", "));
                             self.status_cell(ui, server, status);

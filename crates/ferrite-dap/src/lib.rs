@@ -27,6 +27,8 @@ pub use types::{BreakpointState, Capabilities, Scope, Source, StackFrame, Thread
 const STDERR_TAIL_LINES: usize = 20;
 /// TCP 어댑터에 붙을 때 기다리는 시간.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// 띄운 어댑터가 듣는 주소를 알릴 때까지 기다리는 시간.
+const LISTEN_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// 어댑터에 닿는 방법.
 #[derive(Clone, Debug)]
@@ -38,8 +40,16 @@ pub enum Adapter {
         cwd: Option<PathBuf>,
         env: Vec<(String, String)>,
     },
-    /// 이미 듣고 있는 어댑터에 붙는다(delve `dlv dap`, java-debug).
+    /// 이미 듣고 있는 어댑터에 붙는다(java-debug).
     Tcp(SocketAddr),
+    /// 어댑터를 띄우고, 표준 출력에 알리는 주소("… listening at: 127.0.0.1:PORT")로 붙는다
+    /// (delve `dlv dap --listen=127.0.0.1:0`).
+    Listening {
+        program: PathBuf,
+        args: Vec<String>,
+        cwd: Option<PathBuf>,
+        env: Vec<(String, String)>,
+    },
 }
 
 /// 디버그 대상을 띄우거나 붙는 요청.
@@ -169,40 +179,66 @@ impl DebugSession {
                 cwd,
                 env,
             } => {
-                let mut cmd = Command::new(program);
-                cmd.args(args)
-                    .envs(env.iter().map(|(k, v)| (k, v)))
-                    .stdin(Stdio::piped())
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::piped());
-                if let Some(cwd) = cwd {
-                    cmd.current_dir(cwd);
-                }
-                ferrite_lsp::client::hide_console(&mut cmd);
-                let mut child = cmd
-                    .spawn()
-                    .map_err(|e| format!("{} 실행 실패: {e}", program.display()))?;
+                let mut child = spawn(program, args, cwd.as_deref(), env)?;
                 let (Some(stdin), Some(stdout), Some(stderr)) =
                     (child.stdin.take(), child.stdout.take(), child.stderr.take())
                 else {
                     let _ = child.kill();
                     return Err("디버그 어댑터의 표준 입출력을 열지 못했습니다".into());
                 };
-                // stderr를 비우지 않으면 파이프가 가득 차 어댑터가 멈춘다. 마지막 몇 줄만 남긴다.
-                let tail = stderr_tail.clone();
-                thread::spawn(move || {
-                    for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-                        let mut tail = lock(&tail);
-                        if tail.len() == STDERR_TAIL_LINES {
-                            tail.pop_front();
-                        }
-                        tail.push_back(line);
-                    }
-                });
+                keep_tail(stderr, &stderr_tail, |_| {});
                 (
                     Some(child),
                     Box::new(BufReader::new(stdout)),
                     Box::new(stdin),
+                )
+            }
+            Adapter::Listening {
+                program,
+                args,
+                cwd,
+                env,
+            } => {
+                let mut child = spawn(program, args, cwd.as_deref(), env)?;
+                let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take())
+                else {
+                    let _ = child.kill();
+                    return Err("디버그 어댑터의 출력을 열지 못했습니다".into());
+                };
+                keep_tail(stderr, &stderr_tail, |_| {});
+                let (found, address) = channel();
+                keep_tail(stdout, &stderr_tail, move |line| {
+                    if let Some(address) = listening_address(line) {
+                        let _ = found.send(address);
+                    }
+                });
+                let address = match address.recv_timeout(LISTEN_TIMEOUT) {
+                    Ok(address) => address,
+                    Err(_) => {
+                        let _ = child.kill();
+                        let tail: Vec<String> = lock(&stderr_tail).iter().cloned().collect();
+                        return Err(format!(
+                            "{}이(가) 듣는 주소를 알리지 않았습니다: {}",
+                            program.display(),
+                            tail.join(" / ")
+                        ));
+                    }
+                };
+                let stream = match TcpStream::connect_timeout(&address, CONNECT_TIMEOUT) {
+                    Ok(stream) => stream,
+                    Err(e) => {
+                        let _ = child.kill();
+                        return Err(format!("디버그 어댑터({address})에 붙지 못했습니다: {e}"));
+                    }
+                };
+                let _ = stream.set_nodelay(true);
+                let reader = stream
+                    .try_clone()
+                    .map_err(|e| format!("디버그 어댑터 연결을 나누지 못했습니다: {e}"))?;
+                (
+                    Some(child),
+                    Box::new(BufReader::new(reader)),
+                    Box::new(stream),
                 )
             }
             Adapter::Tcp(address) => {
@@ -553,6 +589,52 @@ impl DebugSession {
     }
 }
 
+fn spawn(
+    program: &Path,
+    args: &[String],
+    cwd: Option<&Path>,
+    env: &[(String, String)],
+) -> Result<Child, String> {
+    let mut cmd = Command::new(program);
+    cmd.args(args)
+        .envs(env.iter().map(|(k, v)| (k, v)))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(cwd) = cwd {
+        cmd.current_dir(cwd);
+    }
+    ferrite_lsp::client::hide_console(&mut cmd);
+    cmd.spawn()
+        .map_err(|e| format!("{} 실행 실패: {e}", program.display()))
+}
+
+/// 어댑터 출력을 줄 단위로 읽어 마지막 몇 줄을 남긴다(연결이 끊겼을 때 이유로 보인다). 비우지 않으면
+/// 파이프가 가득 차 어댑터가 멈춘다. `each`는 줄마다 불린다.
+fn keep_tail(
+    output: impl std::io::Read + Send + 'static,
+    tail: &Arc<Mutex<VecDeque<String>>>,
+    each: impl Fn(&str) + Send + 'static,
+) {
+    let tail = tail.clone();
+    thread::spawn(move || {
+        for line in BufReader::new(output).lines().map_while(Result::ok) {
+            each(&line);
+            let mut tail = lock(&tail);
+            if tail.len() == STDERR_TAIL_LINES {
+                tail.pop_front();
+            }
+            tail.push_back(line);
+        }
+    });
+}
+
+/// "DAP server listening at: 127.0.0.1:38297" 같은 줄에서 주소를 읽는다.
+fn listening_address(line: &str) -> Option<SocketAddr> {
+    let at = line.to_ascii_lowercase().find("listening at")?;
+    line[at..].split_whitespace().last()?.parse().ok()
+}
+
 /// 실패 응답의 사유. 어댑터는 `body.error.format`에 자세한 글을 담기도 한다.
 fn error_text(message: &Value) -> String {
     message
@@ -570,5 +652,23 @@ impl Drop for DebugSession {
             let _ = child.kill();
             let _ = child.wait();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn 듣는_주소를_알리는_줄을_읽는다() {
+        assert_eq!(
+            listening_address("DAP server listening at: 127.0.0.1:38297"),
+            Some("127.0.0.1:38297".parse().unwrap())
+        );
+        assert_eq!(
+            listening_address("API server Listening at: [::1]:1234"),
+            Some("[::1]:1234".parse().unwrap())
+        );
+        assert_eq!(listening_address("Type 'help' for list of commands."), None);
     }
 }

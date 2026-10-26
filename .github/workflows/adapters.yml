@@ -1,0 +1,53 @@
+name: 디버그 어댑터 실제 설치
+
+# 디버그 어댑터(debugpy·codelldb·delve·vscode-php-debug)를 실제 배포처에서 받아 Ferrite 설치기로
+# 설치하고, 언어마다 예제의 중단점에서 멈춰 변수를 읽는다(3개 OS). 한 번에 약 70MB를 받고 Go·PHP를
+# 준비하느라 오래 걸리므로, 어댑터 목록·설치·연결 코드를 바꾼 PR에서만 돈다. 그 밖에는 수동 실행
+# ("Run workflow")과 매주 한 번(고정한 배포 파일이 사라지거나 바뀌었는지 확인).
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'crates/ferrite-dap/**'
+      - 'crates/ferrite-lsp/src/catalog.rs'
+      - 'crates/ferrite-lsp/src/install.rs'
+      - '.github/workflows/adapters.yml'
+  schedule:
+    - cron: '0 19 * * 0' # 매주 월요일 04:00 KST
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  RUST_BACKTRACE: 1
+
+jobs:
+  adapters:
+    name: adapters (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # debugpy는 이 Python으로 가상환경을 만들고, 디버그 대상도 이 Python으로 띄운다.
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+      # delve는 go install로 만들고, 디버그 대상도 Go로 빌드한다.
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+          cache: false
+      # vscode-php-debug는 Xdebug 3과 말한다. node는 러너에 있다.
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: xdebug
+          coverage: xdebug
+      - name: 어댑터 받아 설치하고 중단점에서 변수 읽기
+        run: cargo test -p ferrite-dap --test adapters -- --ignored --nocapture --test-threads=1

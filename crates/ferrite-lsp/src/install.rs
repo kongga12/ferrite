@@ -494,10 +494,15 @@ fn finish(root: &Path, server: &Server, dir: &Path, bin: &str) -> Result<(), Ins
         )
         .into());
     };
+    // 압축에 실행 권한이 빠진 경우에만 준다. 가상환경의 python처럼 남의 파일을 가리키는 링크는 이미
+    // 실행할 수 있고, 그 대상의 권한은 바꿀 수 없다(macOS에서 "Operation not permitted").
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(dir.join(&bin), fs::Permissions::from_mode(0o755))?;
+        let path = dir.join(&bin);
+        if fs::metadata(&path)?.permissions().mode() & 0o100 == 0 {
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755))?;
+        }
     }
     fs::write(dir.join(RECORD), &bin)?;
     // 실행 중인 예전 버전은 Windows에서 지워지지 않는다. 다음 설치 때 다시 치운다.
@@ -624,7 +629,8 @@ mod tests {
 
     #[test]
     fn 목록은_https_고정_해시와_언어를_갖춘다() {
-        for server in SERVERS {
+        // 디버그 어댑터도 같은 설치 폴더를 쓰므로 함께 본다.
+        for server in crate::catalog::all() {
             assert!(!server.languages.is_empty(), "{}", server.name);
             if let Source::Release(assets) = server.source {
                 // 첫 파일(서버 본체)의 주소에는 고정 버전이 들어 있어야 한다.
@@ -647,11 +653,17 @@ mod tests {
                 }
             }
         }
-        let names: std::collections::HashSet<_> = SERVERS.iter().map(|s| s.name).collect();
+        let names: std::collections::HashSet<_> = crate::catalog::all().map(|s| s.name).collect();
         assert_eq!(
             names.len(),
-            SERVERS.len(),
+            crate::catalog::all().count(),
             "이름(설치 폴더)이 겹치면 안 된다"
+        );
+        assert!(
+            crate::catalog::ADAPTERS.iter().all(|a| !SERVERS
+                .iter()
+                .any(|s| s.languages.is_empty() || s.name == a.name)),
+            "어댑터는 언어 서버로 띄우지 않는다(SERVERS에 없다)"
         );
         assert_eq!(for_language("cpp").map(|s| s.name), Some("clangd"));
         assert_eq!(for_language("xml").map(|s| s.name), Some("lemminx"));
