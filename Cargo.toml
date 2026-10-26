@@ -15,6 +15,7 @@ ferrite-egov = { path = "crates/ferrite-egov" }
 ferrite-codegen = { path = "crates/ferrite-codegen" }
 ferrite-term = { path = "crates/ferrite-term" }
 ferrite-dap = { path = "crates/ferrite-dap" }
+ferrite-db = { path = "crates/ferrite-db" }
 eframe = "0.37"
 egui_kittest = { version = "0.37", features = ["eframe"] }
 encoding_rs = "0.8"

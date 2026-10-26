@@ -1,0 +1,15 @@
+[package]
+name = "ferrite-db"
+description = "Ferrite DB 도구: 연결 관리와 드라이버(SQLite·PostgreSQL·MariaDB)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+keyring = "4.2.0"
+mysql = { version = "28.0.4", default-features = false, features = ["default-rust"] }
+postgres = "0.19.14"
+rusqlite = { version = "0.41.0", features = ["bundled"] }
+serde = { version = "1.0.229", features = ["derive"] }
+toml = "1.1.8"
