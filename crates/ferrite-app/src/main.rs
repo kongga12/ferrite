@@ -18,6 +18,7 @@ mod lsp_hub;
 mod lsp_ui;
 mod new_project;
 mod quick_open;
+mod run_ui;
 mod servers;
 mod terminal_ui;
 mod theme;

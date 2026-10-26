@@ -20,6 +20,7 @@ fn spawn(shell: (String, Vec<String>)) -> Terminal {
             columns: 80,
             lines: 24,
             shell: Some(shell),
+            ..Default::default()
         },
         || {},
     )
@@ -41,6 +42,35 @@ fn wait(terminal: &mut Terminal, what: &str, done: impl Fn(&Terminal) -> bool) {
         terminal.exited(),
         terminal.snapshot().text()
     );
+}
+
+#[test]
+fn 실행_구성의_명령_줄을_플랫폼_셸로_돌리고_환경_변수를_넘긴다() {
+    // 따옴표가 든 줄을 그대로 넘기는지(Windows cmd는 C 런타임 이스케이프를 모른다) 함께 본다.
+    let line = if cfg!(windows) {
+        r#"echo "따옴표 안" %FERRITE_RUN%& ping -n 2 127.0.0.1 >nul& exit 4"#
+    } else {
+        r#"echo "따옴표 안" "$FERRITE_RUN"; exit 4"#
+    };
+    let mut terminal = Terminal::spawn(
+        &Options {
+            working_directory: std::env::temp_dir(),
+            columns: 80,
+            lines: 24,
+            command: Some(line.to_owned()),
+            env: [("FERRITE_RUN".to_owned(), "run-ok".to_owned())].into(),
+            ..Default::default()
+        },
+        || {},
+    )
+    .expect("명령을 띄우지 못함");
+    wait(&mut terminal, "명령 출력과 종료", |t| {
+        let text = t.snapshot().text();
+        t.exited() == Some(Some(4))
+            && text
+                .lines()
+                .any(|l| l.contains("따옴표 안") && l.contains("run-ok"))
+    });
 }
 
 #[test]
