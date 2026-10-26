@@ -3810,7 +3810,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("ferrite-terminal-ui-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
-        let mut harness = Harness::builder()
+        let mut harness = harness_builder()
             .with_size(egui::vec2(1200.0, 800.0))
             .build_eframe(|cc| FerriteApp::new(cc, Some(dir.clone())));
         harness.run();
