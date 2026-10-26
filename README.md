@@ -95,4 +95,4 @@ cargo test --release -p ferrite-app -- --ignored --nocapture 대용량
 
 ## 라이선스
 
-MIT OR Apache-2.0
+[MIT](LICENSE-MIT) 또는 [Apache-2.0](LICENSE-APACHE) 중 원하는 쪽을 따른다.
