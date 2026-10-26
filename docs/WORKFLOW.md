@@ -566,7 +566,22 @@
     - 실제 셸 테스트: 따옴표가 든 명령 줄, 환경 변수, 종료 코드(Windows cmd, 그 밖은 사용자 셸)
     - 창 테스트(kittest): 고르기 창의 순서, Enter로 실행하면 출력이 보임, 다시 실행하면 같은 탭을 바꿈, 구성 편집이 파일을 엶
     - 실제 앱(Windows): pom(tomcat7)과 사용자 구성이 있는 프로젝트에서 고르기 창을 열고, `mvn -v` 구성을 돌려 출력과 종료 코드 0을 확인했다.
-- [ ] 4-2 DAP 클라이언트(프로토콜·세션, 중단점·단계 실행·변수·호출 스택)
+- [x] 4-2 DAP 클라이언트(새 크레이트 `ferrite-dap`)
+  - 언어 서버 클라이언트처럼 비동기 런타임 없이 스레드와 채널만 쓴다. 메시지 틀(Content-Length)은 LSP와 같아 `ferrite-lsp`의 것을 쓴다.
+  - 어댑터에 닿는 방법: 표준 입출력 프로세스(debugpy·codelldb·vscode-php-debug) 또는 TCP(delve `dlv dap`·java-debug)
+  - 시작 순서는 `poll`이 진행한다: initialize → launch/attach → `initialized` 이벤트 → 파일별 setBreakpoints → (필터가 있으면) setExceptionBreakpoints → configurationDone
+    - launch 응답을 configurationDone 뒤에 주는 어댑터(debugpy)가 있어, launch 응답을 기다리지 않고 진행한다.
+    - 시작한 뒤 바꾼 중단점은 바로 보낸다.
+  - 중단점: 줄(1부터)과 조건식. 어댑터가 확인한 결과(확인됨·옮긴 줄·거부 사유)를 돌려준다.
+  - 요청: threads·stackTrace·scopes·variables·evaluate(결과는 요청 번호로), 제어: continue·next·stepIn·stepOut·pause·disconnect
+    - 실행을 이어 가는 명령은 보내는 즉시 실행 중으로 본다. `continued` 이벤트를 보내지 않는 어댑터가 있다.
+  - 이벤트: 시작, 멈춤(사유·스레드), 이어 감, 출력(stdout·stderr·console), 종료 코드, 세션 끝, 연결 끊김(어댑터 stderr 마지막 줄)
+  - 어댑터가 거꾸로 보내는 요청(runInTerminal 등)은 지원한다고 알리지 않았으므로 거절 응답을 보낸다. 세션을 버리면 어댑터 프로세스도 끝낸다.
+  - 검증
+    - 가짜 어댑터(TCP, 각본대로 응답): 시작 순서, 조건부 중단점과 확인·거부 결과, 거꾸로 온 요청 거절, 멈춤 → 호출 스택 → 범위 → 변수, 이어 가기, 한글 출력, 종료 코드, 연결 끊김, 시작 실패(`body.error.format`), 시작 뒤 중단점 변경, 어댑터를 띄우지 못할 때
+    - 실제 debugpy 1.8.22: `return total` 줄의 조건부 중단점(`a == 41`)에서 두 번째 호출에만 멈추고, 변수 a=41·b=1·total=42를 읽은 뒤 이어 가서 출력 "결과 42"와 종료 코드 0을 받는다.
+      - CI는 3개 OS 모두 debugpy를 설치해 돌린다. 로컬에 없으면 건너뛰고, `pip install --target`으로 따로 둔 것은 `FERRITE_DEBUGPY_PATH`로 알린다.
+    - 찾은 것: `print`는 출력을 여러 조각("결과", " 42")으로 보낸다. 출력 창은 조각을 이어 붙여 보여야 한다.
 - [ ] 4-3 디버그 화면(거터 중단점·조건부 중단점, 디버그 도구 막대, 변수·호출 스택 창)
 - [ ] 4-4 어댑터 설치와 연결(codelldb, delve, debugpy, java-debug, vscode-php-debug)
 - [ ] 3개 OS 검증
