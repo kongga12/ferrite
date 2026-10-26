@@ -642,7 +642,7 @@
     - 창 테스트: 빌드 실패 시 시작하지 않고 한글 빌드 출력을 보임, 설치 창의 어댑터 구역
     - 실제 설치·디버그(`crates/ferrite-dap/tests/adapters.rs`, 무시 표시): 예제 `add(41, 1)`의 중단점에서 a=41·b=1·total=42를 읽고 끝까지 이어 간다.
       - 로컬(Windows): debugpy(가상환경 pip)·codelldb(VSIX) 통과. Go와 Xdebug 3을 쓸 PHP가 없어 delve·php-debug는 건너뛰었다.
-      - 3개 OS: `.github/workflows/adapters.yml`(수동·주 1회)이 Python·Go·PHP+Xdebug를 갖춰 넷 모두 돌린다.
+      - 3개 OS: `.github/workflows/adapters.yml`(어댑터 코드를 바꾼 PR·수동·주 1회)이 Python·Go·PHP+Xdebug를 갖춰 넷 모두 돌린다.
 - [ ] 4-4b java-debug(jdt.ls 번들, 메인 클래스·클래스패스 찾기, egov 톰캣에 붙기)
 - [ ] 3개 OS 검증
 
