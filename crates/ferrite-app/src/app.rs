@@ -2272,6 +2272,12 @@ mod tests {
 
     use super::*;
 
+    /// 앱 하네스. 파일 감시 알림이 다른 스레드에서 와 다시 그리는 프레임이 늘 수 있어(CI에서 기본 상한
+    /// 4프레임을 넘김) 여유를 둔다.
+    fn harness_builder() -> egui_kittest::HarnessBuilder<FerriteApp> {
+        Harness::builder().with_max_steps(32)
+    }
+
     fn request_window_close(harness: &mut Harness<'_, FerriteApp>) {
         harness
             .input_mut()
@@ -2289,7 +2295,7 @@ mod tests {
         let file = dir.join("a.txt");
         fs::write(&file, "hello").unwrap();
 
-        let mut harness = Harness::builder()
+        let mut harness = harness_builder()
             .with_size(egui::vec2(1000.0, 700.0))
             .build_eframe(|cc| FerriteApp::new(cc, Some(dir.clone())));
 
@@ -2335,7 +2341,7 @@ mod tests {
         let file = dir.join("a.txt");
         fs::write(&file, "foo bar foo").unwrap();
 
-        let mut harness = Harness::builder()
+        let mut harness = harness_builder()
             .with_size(egui::vec2(1000.0, 700.0))
             .build_eframe(|cc| FerriteApp::new(cc, Some(file.clone())));
         let selection = |h: &Harness<'_, FerriteApp>| h.state().docs[0].buffer.selection().range();
@@ -2401,7 +2407,7 @@ mod tests {
         let file = dir.join("a.txt");
         fs::write(&file, "v1").unwrap();
 
-        let mut harness = Harness::builder()
+        let mut harness = harness_builder()
             .with_size(egui::vec2(1000.0, 700.0))
             .build_eframe(|cc| FerriteApp::new(cc, Some(file.clone())));
         harness.run(); // 감시 시작
@@ -2452,7 +2458,7 @@ mod tests {
         let file = dir.join("a.txt");
         fs::write(&file, "x").unwrap();
 
-        let mut harness = Harness::builder()
+        let mut harness = harness_builder()
             .with_size(egui::vec2(1000.0, 700.0))
             .build_eframe(|cc| FerriteApp::new(cc, Some(file.clone())));
         harness.run();
@@ -2498,10 +2504,8 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
 
-        // 파일을 만들면 감시 알림이 다른 스레드에서 와서 다시 그리는 프레임이 늘어난다(CI에서 4프레임을 넘김).
-        let mut harness = Harness::builder()
+        let mut harness = harness_builder()
             .with_size(egui::vec2(1000.0, 700.0))
-            .with_max_steps(32)
             .build_eframe(|cc| FerriteApp::new(cc, Some(dir.clone())));
         harness.run();
 
@@ -2574,7 +2578,7 @@ mod tests {
         }
         let (dir, file) = cargo_project("diag", "fn main() {\n    let 값 = ;\n}\n");
 
-        let mut harness = Harness::builder()
+        let mut harness = harness_builder()
             .with_size(egui::vec2(1200.0, 800.0))
             .build_eframe(|cc| FerriteApp::new(cc, Some(file.clone())));
         // 첫 실행은 rust-analyzer가 표준 라이브러리를 읽느라 오래 걸릴 수 있다
@@ -2687,7 +2691,7 @@ mod tests {
         }
         let text = "struct Point {\n    x: i32,\n}\n\nimpl Point {\n    fn length(&self) -> i32 {\n        self.x\n    }\n}\n\nfn main() {\n    let p = Point { x: 1 };\n    p.length();\n    p.le\n}\n";
         let (dir, file) = cargo_project("nav", text);
-        let mut harness = Harness::builder()
+        let mut harness = harness_builder()
             .with_size(egui::vec2(1200.0, 800.0))
             .build_eframe(|cc| FerriteApp::new(cc, Some(file.clone())));
         assert!(
@@ -2803,7 +2807,7 @@ mod tests {
         }
         let text = "fn length() -> i32 {\n    1\n}\n\nfn main() {\n    let  n   =  length();\n    let _ = n;\n}\n";
         let (dir, file) = cargo_project("edits", text);
-        let mut harness = Harness::builder()
+        let mut harness = harness_builder()
             .with_size(egui::vec2(1200.0, 800.0))
             .build_eframe(|cc| FerriteApp::new(cc, Some(file.clone())));
         assert!(
@@ -2917,7 +2921,7 @@ mod tests {
         fs::write(old.join(ferrite_lsp::install::RECORD), "lemminx").unwrap();
         let lemminx = ferrite_lsp::catalog::for_language("xml").unwrap();
 
-        let mut harness = Harness::builder()
+        let mut harness = harness_builder()
             .with_size(egui::vec2(1000.0, 700.0))
             .build_eframe(|cc| FerriteApp::new(cc, Some(dir.clone())));
         isolate_servers(&mut harness, &root);
@@ -2959,7 +2963,7 @@ mod tests {
         let config = dir.join("config.toml");
         fs::write(&config, "a = 1\n").unwrap();
 
-        let mut harness = Harness::builder()
+        let mut harness = harness_builder()
             .with_size(egui::vec2(1000.0, 700.0))
             .build_eframe(|cc| FerriteApp::new(cc, Some(mapper.clone())));
         isolate_servers(&mut harness, &dir.join("servers"));
@@ -3010,7 +3014,7 @@ mod tests {
         let mapper = dir.join("mapper.xml");
         fs::write(&mapper, "<mapper/>\n").unwrap();
 
-        let mut harness = Harness::builder()
+        let mut harness = harness_builder()
             .with_size(egui::vec2(1000.0, 700.0))
             .build_eframe(|cc| FerriteApp::new(cc, Some(dir.clone())));
         isolate_servers(&mut harness, &root);
@@ -3047,7 +3051,7 @@ mod tests {
         let file = dir.join("Hello.java");
         fs::write(&file, "class Hello {}\n").unwrap();
 
-        let mut harness = Harness::builder()
+        let mut harness = harness_builder()
             .with_size(egui::vec2(1000.0, 700.0))
             .build_eframe(|cc| FerriteApp::new(cc, Some(file.clone())));
         isolate_servers(&mut harness, &dir.join("servers"));
@@ -3144,7 +3148,7 @@ mod tests {
         let props = resources.join("application.properties");
         fs::write(&props, "server.port=8080\nferrite.unknown.key=1\n").unwrap();
 
-        let mut harness = Harness::builder()
+        let mut harness = harness_builder()
             .with_size(egui::vec2(1200.0, 800.0))
             .build_eframe(|cc| FerriteApp::new(cc, Some(project.clone())));
         isolate_servers(&mut harness, &root);
@@ -3246,7 +3250,7 @@ mod tests {
             "<beans><bean class=\"org.springframework.web.servlet.view.UrlBasedViewResolver\" p:prefix=\"/WEB-INF/jsp/egovframework/example/\" p:suffix=\".jsp\"/></beans>",
         );
 
-        let mut harness = Harness::builder()
+        let mut harness = harness_builder()
             .with_size(egui::vec2(1400.0, 1300.0))
             .build_eframe(|cc| FerriteApp::new(cc, Some(dir.clone())));
         harness.get_by_label("도구").click();
@@ -3325,7 +3329,7 @@ mod tests {
             "Globals.DriverClassName=org.h2.Driver\nGlobals.Url=jdbc:h2:mem:x\nGlobals.UserName=sa\nGlobals.Password=\n",
         );
 
-        let mut harness = Harness::builder()
+        let mut harness = harness_builder()
             .with_size(egui::vec2(1400.0, 1300.0))
             .build_eframe(|cc| FerriteApp::new(cc, Some(dir.clone())));
         harness.get_by_label("도구").click();
@@ -3395,7 +3399,7 @@ mod tests {
         use egui::accesskit::Role;
         let dir = std::env::temp_dir().join(format!("ferrite-new-project-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
-        let mut harness = Harness::builder()
+        let mut harness = harness_builder()
             .with_size(egui::vec2(1200.0, 900.0))
             .build_eframe(|cc| FerriteApp::new(cc, None));
         open_new_project(&mut harness, dir.join("cache"));
@@ -3470,7 +3474,7 @@ mod tests {
             .unwrap();
         scaffold::import(template, &[PathBuf::from(vsix)], &cache).unwrap();
 
-        let mut harness = Harness::builder()
+        let mut harness = harness_builder()
             .with_size(egui::vec2(1200.0, 900.0))
             .build_eframe(|cc| FerriteApp::new(cc, None));
         open_new_project(&mut harness, cache);
@@ -3587,7 +3591,7 @@ mod tests {
         let cache = dir.join("templates");
         ferrite_codegen::commngt::import(&jar, &cache).unwrap();
 
-        let mut harness = Harness::builder()
+        let mut harness = harness_builder()
             .with_size(egui::vec2(1200.0, 1000.0))
             .build_eframe(|cc| FerriteApp::new(cc, Some(project.clone())));
         harness.state_mut().commngt = crate::commngt_ui::CommngtWindow::new(cache);
@@ -3677,7 +3681,7 @@ mod tests {
     fn 파일로_이동은_퍼지_검색해_연다() {
         use egui::accesskit::Role;
         let dir = search_project("quick-open");
-        let mut harness = Harness::builder()
+        let mut harness = harness_builder()
             .with_size(egui::vec2(1200.0, 800.0))
             .build_eframe(|cc| FerriteApp::new(cc, Some(dir.clone())));
         harness.run();
@@ -3722,7 +3726,7 @@ mod tests {
     fn 파일에서_찾기는_결과를_눌러_그_줄로_간다() {
         use egui::accesskit::Role;
         let dir = search_project("find-in-files");
-        let mut harness = Harness::builder()
+        let mut harness = harness_builder()
             .with_size(egui::vec2(1200.0, 800.0))
             .build_eframe(|cc| FerriteApp::new(cc, Some(dir.clone())));
         harness.run();
