@@ -53,6 +53,9 @@ const RENAME_SYMBOL: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, K
 // 코드 액션: Ctrl+.와 Alt+Enter 두 가지 습관을 모두 받는다.
 const CODE_ACTION: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Period);
 const CODE_ACTION_ALT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::ALT, Key::Enter);
+const QUICK_OPEN: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::P);
+const FIND_IN_FILES: KeyboardShortcut =
+    KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::F);
 /// 마우스가 한 자리에 이만큼 머물면 호버 정보를 요청한다.
 const HOVER_DELAY: std::time::Duration = std::time::Duration::from_millis(400);
 
@@ -418,6 +421,10 @@ pub struct FerriteApp {
     allow_close: bool,
     status: String,
     find: Option<FindBar>,
+    /// 파일로 이동(Ctrl+P).
+    quick_open: crate::quick_open::QuickOpen,
+    /// 파일에서 찾기(Ctrl+Shift+F) 패널.
+    find_in_files: crate::find_in_files::FindInFiles,
     /// 다음 프레임에 에디터로 키보드 포커스를 돌려준다(찾기 막대를 닫은 뒤 등).
     focus_editor: bool,
     settings: Settings,
@@ -447,9 +454,11 @@ impl FerriteApp {
             Some(path) => (None, format!("열 수 없는 경로입니다: {}", path.display())),
             None => (
                 None,
+                // Context::format_shortcut은 macOS에서 ⌘ 기호를 그릴 수 있는지 글꼴로 확인하는데, 첫 프레임 전에는
+                // 글꼴이 없어 패닉한다. 그래서 기호 대신 이름(Cmd·Ctrl)으로 직접 만든다.
                 format!(
                     "폴더를 열어 시작하세요 ({})",
-                    cc.egui_ctx.format_shortcut(&OPEN_FOLDER)
+                    OPEN_FOLDER.format(&egui::ModifierNames::NAMES, cfg!(target_os = "macos"))
                 ),
             ),
         };
@@ -462,6 +471,8 @@ impl FerriteApp {
             allow_close: false,
             status: settings_error.unwrap_or(status),
             find: None,
+            quick_open: Default::default(),
+            find_in_files: Default::default(),
             focus_editor: false,
             settings,
             settings_changed: false,
@@ -876,6 +887,13 @@ impl FerriteApp {
             && let Some(i) = self.active
         {
             self.request_close_tab(i);
+        }
+        if ctx.input_mut(|i| i.consume_shortcut(&QUICK_OPEN)) {
+            self.open_quick_open(ctx);
+        }
+        // Ctrl+F가 Ctrl+Shift+F에도 맞으므로 먼저 확인한다.
+        if ctx.input_mut(|i| i.consume_shortcut(&FIND_IN_FILES)) {
+            self.open_find_in_files();
         }
         for (shortcut, replace) in [(FIND, false), (REPLACE, true)] {
             if ctx.input_mut(|i| i.consume_shortcut(&shortcut)) {
@@ -1345,6 +1363,34 @@ impl FerriteApp {
         }
     }
 
+    fn open_quick_open(&mut self, ctx: &egui::Context) {
+        match self.tree.as_ref().map(|t| t.root().to_path_buf()) {
+            Some(root) => self.quick_open.show(&root, ctx),
+            None => self.status = "먼저 프로젝트 폴더를 여세요".into(),
+        }
+    }
+
+    fn open_find_in_files(&mut self) {
+        let selected = self
+            .active
+            .map(|i| self.docs[i].buffer.selected_text())
+            .filter(|s| !s.is_empty());
+        self.find_in_files.show(selected);
+    }
+
+    fn find_in_files_panel(&mut self, ui: &mut egui::Ui) {
+        let root = self.tree.as_ref().map(|t| t.root().to_path_buf());
+        if let Some(jump) = self.find_in_files.ui(ui, root.as_deref()) {
+            let at = lsp_types::Position::new(jump.line as u32, jump.column as u32);
+            // 검색과 버퍼가 같은 방식(UTF-8·CP949, CRLF → LF)으로 읽으므로 바이트 위치가 맞는다.
+            self.navigate_to(
+                &jump.path,
+                lsp_types::Range::new(at, at),
+                PositionEncoding::Utf8,
+            );
+        }
+    }
+
     fn open_find(&mut self, replace: bool) {
         match &mut self.find {
             Some(find) => find.focus(replace),
@@ -1475,6 +1521,20 @@ impl FerriteApp {
                             ui.close();
                             self.open_find(replace);
                         }
+                    }
+                    ui.separator();
+                    let project = self.tree.is_some();
+                    let item = egui::Button::new("파일로 이동…")
+                        .shortcut_text(ctx.format_shortcut(&QUICK_OPEN));
+                    if ui.add_enabled(project, item).clicked() {
+                        ui.close();
+                        self.open_quick_open(&ctx);
+                    }
+                    let item = egui::Button::new("파일에서 찾기…")
+                        .shortcut_text(ctx.format_shortcut(&FIND_IN_FILES));
+                    if ui.add_enabled(project, item).clicked() {
+                        ui.close();
+                        self.open_find_in_files();
                     }
                 });
                 ui.menu_button("코드", |ui| {
@@ -2167,8 +2227,13 @@ impl eframe::App for FerriteApp {
         self.status_bar(ui);
         self.problems_panel(ui);
         self.references_panel(ui);
+        self.find_in_files_panel(ui);
         self.project_panel(ui);
         self.editor(ui);
+        if let Some(path) = self.quick_open.ui(ui.ctx()) {
+            self.open_file(path);
+            self.focus_editor = true;
+        }
         self.pending_close_dialog(ui.ctx());
         self.name_prompt_dialog(ui.ctx());
         self.delete_dialog(ui.ctx());
@@ -2207,6 +2272,12 @@ mod tests {
 
     use super::*;
 
+    /// 앱 하네스. 파일 감시 알림이 다른 스레드에서 와 다시 그리는 프레임이 늘 수 있어(CI에서 기본 상한
+    /// 4프레임을 넘김) 여유를 둔다.
+    fn harness_builder() -> egui_kittest::HarnessBuilder<FerriteApp> {
+        Harness::builder().with_max_steps(32)
+    }
+
     fn request_window_close(harness: &mut Harness<'_, FerriteApp>) {
         harness
             .input_mut()
@@ -2224,7 +2295,7 @@ mod tests {
         let file = dir.join("a.txt");
         fs::write(&file, "hello").unwrap();
 
-        let mut harness = Harness::builder()
+        let mut harness = harness_builder()
             .with_size(egui::vec2(1000.0, 700.0))
             .build_eframe(|cc| FerriteApp::new(cc, Some(dir.clone())));
 
@@ -2270,7 +2341,7 @@ mod tests {
         let file = dir.join("a.txt");
         fs::write(&file, "foo bar foo").unwrap();
 
-        let mut harness = Harness::builder()
+        let mut harness = harness_builder()
             .with_size(egui::vec2(1000.0, 700.0))
             .build_eframe(|cc| FerriteApp::new(cc, Some(file.clone())));
         let selection = |h: &Harness<'_, FerriteApp>| h.state().docs[0].buffer.selection().range();
@@ -2336,7 +2407,7 @@ mod tests {
         let file = dir.join("a.txt");
         fs::write(&file, "v1").unwrap();
 
-        let mut harness = Harness::builder()
+        let mut harness = harness_builder()
             .with_size(egui::vec2(1000.0, 700.0))
             .build_eframe(|cc| FerriteApp::new(cc, Some(file.clone())));
         harness.run(); // 감시 시작
@@ -2387,7 +2458,7 @@ mod tests {
         let file = dir.join("a.txt");
         fs::write(&file, "x").unwrap();
 
-        let mut harness = Harness::builder()
+        let mut harness = harness_builder()
             .with_size(egui::vec2(1000.0, 700.0))
             .build_eframe(|cc| FerriteApp::new(cc, Some(file.clone())));
         harness.run();
@@ -2433,7 +2504,7 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
 
-        let mut harness = Harness::builder()
+        let mut harness = harness_builder()
             .with_size(egui::vec2(1000.0, 700.0))
             .build_eframe(|cc| FerriteApp::new(cc, Some(dir.clone())));
         harness.run();
@@ -2507,7 +2578,7 @@ mod tests {
         }
         let (dir, file) = cargo_project("diag", "fn main() {\n    let 값 = ;\n}\n");
 
-        let mut harness = Harness::builder()
+        let mut harness = harness_builder()
             .with_size(egui::vec2(1200.0, 800.0))
             .build_eframe(|cc| FerriteApp::new(cc, Some(file.clone())));
         // 첫 실행은 rust-analyzer가 표준 라이브러리를 읽느라 오래 걸릴 수 있다
@@ -2620,7 +2691,7 @@ mod tests {
         }
         let text = "struct Point {\n    x: i32,\n}\n\nimpl Point {\n    fn length(&self) -> i32 {\n        self.x\n    }\n}\n\nfn main() {\n    let p = Point { x: 1 };\n    p.length();\n    p.le\n}\n";
         let (dir, file) = cargo_project("nav", text);
-        let mut harness = Harness::builder()
+        let mut harness = harness_builder()
             .with_size(egui::vec2(1200.0, 800.0))
             .build_eframe(|cc| FerriteApp::new(cc, Some(file.clone())));
         assert!(
@@ -2736,7 +2807,7 @@ mod tests {
         }
         let text = "fn length() -> i32 {\n    1\n}\n\nfn main() {\n    let  n   =  length();\n    let _ = n;\n}\n";
         let (dir, file) = cargo_project("edits", text);
-        let mut harness = Harness::builder()
+        let mut harness = harness_builder()
             .with_size(egui::vec2(1200.0, 800.0))
             .build_eframe(|cc| FerriteApp::new(cc, Some(file.clone())));
         assert!(
@@ -2850,7 +2921,7 @@ mod tests {
         fs::write(old.join(ferrite_lsp::install::RECORD), "lemminx").unwrap();
         let lemminx = ferrite_lsp::catalog::for_language("xml").unwrap();
 
-        let mut harness = Harness::builder()
+        let mut harness = harness_builder()
             .with_size(egui::vec2(1000.0, 700.0))
             .build_eframe(|cc| FerriteApp::new(cc, Some(dir.clone())));
         isolate_servers(&mut harness, &root);
@@ -2892,7 +2963,7 @@ mod tests {
         let config = dir.join("config.toml");
         fs::write(&config, "a = 1\n").unwrap();
 
-        let mut harness = Harness::builder()
+        let mut harness = harness_builder()
             .with_size(egui::vec2(1000.0, 700.0))
             .build_eframe(|cc| FerriteApp::new(cc, Some(mapper.clone())));
         isolate_servers(&mut harness, &dir.join("servers"));
@@ -2943,7 +3014,7 @@ mod tests {
         let mapper = dir.join("mapper.xml");
         fs::write(&mapper, "<mapper/>\n").unwrap();
 
-        let mut harness = Harness::builder()
+        let mut harness = harness_builder()
             .with_size(egui::vec2(1000.0, 700.0))
             .build_eframe(|cc| FerriteApp::new(cc, Some(dir.clone())));
         isolate_servers(&mut harness, &root);
@@ -2980,7 +3051,7 @@ mod tests {
         let file = dir.join("Hello.java");
         fs::write(&file, "class Hello {}\n").unwrap();
 
-        let mut harness = Harness::builder()
+        let mut harness = harness_builder()
             .with_size(egui::vec2(1000.0, 700.0))
             .build_eframe(|cc| FerriteApp::new(cc, Some(file.clone())));
         isolate_servers(&mut harness, &dir.join("servers"));
@@ -3077,7 +3148,7 @@ mod tests {
         let props = resources.join("application.properties");
         fs::write(&props, "server.port=8080\nferrite.unknown.key=1\n").unwrap();
 
-        let mut harness = Harness::builder()
+        let mut harness = harness_builder()
             .with_size(egui::vec2(1200.0, 800.0))
             .build_eframe(|cc| FerriteApp::new(cc, Some(project.clone())));
         isolate_servers(&mut harness, &root);
@@ -3179,7 +3250,7 @@ mod tests {
             "<beans><bean class=\"org.springframework.web.servlet.view.UrlBasedViewResolver\" p:prefix=\"/WEB-INF/jsp/egovframework/example/\" p:suffix=\".jsp\"/></beans>",
         );
 
-        let mut harness = Harness::builder()
+        let mut harness = harness_builder()
             .with_size(egui::vec2(1400.0, 1300.0))
             .build_eframe(|cc| FerriteApp::new(cc, Some(dir.clone())));
         harness.get_by_label("도구").click();
@@ -3258,7 +3329,7 @@ mod tests {
             "Globals.DriverClassName=org.h2.Driver\nGlobals.Url=jdbc:h2:mem:x\nGlobals.UserName=sa\nGlobals.Password=\n",
         );
 
-        let mut harness = Harness::builder()
+        let mut harness = harness_builder()
             .with_size(egui::vec2(1400.0, 1300.0))
             .build_eframe(|cc| FerriteApp::new(cc, Some(dir.clone())));
         harness.get_by_label("도구").click();
@@ -3328,7 +3399,7 @@ mod tests {
         use egui::accesskit::Role;
         let dir = std::env::temp_dir().join(format!("ferrite-new-project-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
-        let mut harness = Harness::builder()
+        let mut harness = harness_builder()
             .with_size(egui::vec2(1200.0, 900.0))
             .build_eframe(|cc| FerriteApp::new(cc, None));
         open_new_project(&mut harness, dir.join("cache"));
@@ -3403,7 +3474,7 @@ mod tests {
             .unwrap();
         scaffold::import(template, &[PathBuf::from(vsix)], &cache).unwrap();
 
-        let mut harness = Harness::builder()
+        let mut harness = harness_builder()
             .with_size(egui::vec2(1200.0, 900.0))
             .build_eframe(|cc| FerriteApp::new(cc, None));
         open_new_project(&mut harness, cache);
@@ -3520,7 +3591,7 @@ mod tests {
         let cache = dir.join("templates");
         ferrite_codegen::commngt::import(&jar, &cache).unwrap();
 
-        let mut harness = Harness::builder()
+        let mut harness = harness_builder()
             .with_size(egui::vec2(1200.0, 1000.0))
             .build_eframe(|cc| FerriteApp::new(cc, Some(project.clone())));
         harness.state_mut().commngt = crate::commngt_ui::CommngtWindow::new(cache);
@@ -3567,6 +3638,129 @@ mod tests {
             "<project><groupId>org.egovframe.rte</groupId></project>",
             "pom.xml은 덮어쓰지 않는다"
         );
+        drop(harness);
+        remove_project(&dir);
+    }
+
+    /// 검색 시험용 프로젝트: Java 두 개, CP949 JSP 하나, 무시되는 빌드 결과물.
+    fn search_project(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("ferrite-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let write = |path: &str, bytes: &[u8]| {
+            let file = dir.join(path);
+            fs::create_dir_all(file.parent().unwrap()).unwrap();
+            fs::write(file, bytes).unwrap();
+        };
+        write(
+            "src/main/java/egov/web/SampleController.java",
+            "class SampleController {\n    // 사용자 조회\n    void list() {}\n}\n".as_bytes(),
+        );
+        write(
+            "src/main/java/egov/service/SampleService.java",
+            b"interface SampleService {}\n",
+        );
+        let (jsp, _, _) = encoding_rs::EUC_KR.encode("<p>사용자 목록</p>\r\n");
+        write("src/main/webapp/list.jsp", &jsp);
+        write("target/classes/SampleController.class", b"\0\0");
+        dir
+    }
+
+    /// 별도 스레드 작업이 끝나 `text`가 보일 때까지 돌린다(스피너가 계속 다시 그리므로 run_ok).
+    fn wait_for_label(harness: &mut Harness<'_, FerriteApp>, text: &str) {
+        for _ in 0..200 {
+            harness.run_ok();
+            if harness.query_by_label_contains(text).is_some() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        panic!("{text}가 나오지 않음");
+    }
+
+    #[test]
+    fn 파일로_이동은_퍼지_검색해_연다() {
+        use egui::accesskit::Role;
+        let dir = search_project("quick-open");
+        let mut harness = harness_builder()
+            .with_size(egui::vec2(1200.0, 800.0))
+            .build_eframe(|cc| FerriteApp::new(cc, Some(dir.clone())));
+        harness.run();
+        harness.key_press_modifiers(Modifiers::COMMAND, Key::P);
+        wait_for_label(&mut harness, "파일 3개");
+        harness
+            .get_by_role_and_label(Role::TextInput, "파일 이름")
+            .type_text("samplecon");
+        harness.run();
+        harness.get_by_label_contains("SampleController.java  src/main/java/egov/web");
+        assert!(
+            harness
+                .query_by_label_contains("SampleController.class")
+                .is_none(),
+            "target은 뺀다"
+        );
+        harness.key_press(Key::Enter);
+        harness.run();
+        let app = harness.state();
+        assert!(
+            app.docs
+                .iter()
+                .any(|d| d.path.ends_with("SampleController.java"))
+        );
+        assert!(
+            harness.query_by_label("파일로 이동").is_none(),
+            "열면 닫힌다"
+        );
+
+        // Esc로 닫는다.
+        harness.key_press_modifiers(Modifiers::COMMAND, Key::P);
+        harness.run_ok();
+        harness.get_by_label("파일로 이동");
+        harness.key_press(Key::Escape);
+        harness.run_ok();
+        assert!(harness.query_by_label("파일로 이동").is_none());
+        drop(harness);
+        remove_project(&dir);
+    }
+
+    #[test]
+    fn 파일에서_찾기는_결과를_눌러_그_줄로_간다() {
+        use egui::accesskit::Role;
+        let dir = search_project("find-in-files");
+        let mut harness = harness_builder()
+            .with_size(egui::vec2(1200.0, 800.0))
+            .build_eframe(|cc| FerriteApp::new(cc, Some(dir.clone())));
+        harness.run();
+        harness.key_press_modifiers(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::F);
+        harness.run();
+        assert!(harness.state().find.is_none(), "Ctrl+F 찾기 바가 아니다");
+        harness
+            .get_by_role_and_label(Role::TextInput, "파일에서 찾기")
+            .type_text("사용자");
+        harness.run();
+        harness.key_press(Key::Enter);
+        wait_for_label(&mut harness, "파일 2개에서 2개 찾음");
+        harness.get_by_label_contains("<p>사용자 목록</p>");
+        harness.get_by_label_contains("2: // 사용자 조회").click();
+        harness.run();
+        let app = harness.state();
+        let i = app.active.unwrap();
+        assert!(app.docs[i].path.ends_with("SampleController.java"));
+        let rope = app.docs[i].buffer.rope();
+        let head = app.docs[i].buffer.selection().head;
+        assert_eq!(rope.char_to_line(head), 1);
+        assert_eq!(head - rope.line_to_char(1), 7, "일치한 글자 앞");
+
+        // 파일 패턴으로 좁힌다.
+        harness
+            .get_by_role_and_label(Role::TextInput, "파일")
+            .focus();
+        harness.run();
+        harness
+            .get_by_role_and_label(Role::TextInput, "파일")
+            .type_text("*.jsp");
+        harness.run();
+        harness.get_by_label("찾기").click();
+        wait_for_label(&mut harness, "파일 1개에서 1개 찾음");
         drop(harness);
         remove_project(&dir);
     }

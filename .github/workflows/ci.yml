@@ -16,6 +16,10 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# 로컬에서 재현되지 않는 OS별 실패를 로그만으로 찾을 수 있게 패닉 위치를 남긴다.
+env:
+  RUST_BACKTRACE: 1
+
 jobs:
   linux:
     name: ubuntu-latest

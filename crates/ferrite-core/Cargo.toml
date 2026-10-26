@@ -8,6 +8,8 @@ publish.workspace = true
 
 [dependencies]
 encoding_rs.workspace = true
+ignore = "0.4.33"
+nucleo-matcher = "0.3.1"
 regex = "1.13.1"
 ropey.workspace = true
 serde = { version = "1.0.229", features = ["derive"] }
