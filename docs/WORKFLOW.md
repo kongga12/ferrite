@@ -711,7 +711,10 @@
     - MariaDB: `FERRITE_TEST_MARIADB`가 있을 때만. CI의 Linux 작업이 MariaDB 11.4 서비스 컨테이너를 띄워 알려 준다(로컬에는 MariaDB가 없다).
     - 창 테스트: SQLite 연결 추가·시험, PostgreSQL의 빠진 값 알림, 비밀번호는 목록이 아니라 키체인(메모리 저장소)에 있음
     - 실제 앱: 메뉴에서 DB 연결 창을 열고 새 PostgreSQL 연결 양식을 화면으로 확인했다. 사용자 키체인에 항목이 생기지 않게 저장은 하지 않았다.
-  - 찾은 것: Windows에서 `pg_ctl start`의 출력을 파이프로 받으면, 띄운 서버가 파이프를 물려받아 닫지 않아 끝나지 않는다. 출력을 버리고 서버 로그는 파일로 남긴다.
+  - 찾은 것
+    - Windows에서 `pg_ctl start`의 출력을 파이프로 받으면, 띄운 서버가 파이프를 물려받아 닫지 않아 끝나지 않는다. 출력을 버리고 서버 로그는 파일로 남긴다.
+    - Ubuntu 러너는 기본 소켓 폴더(`/var/run/postgresql`)에 쓸 권한이 없다. 임시 클러스터의 소켓은 임시 폴더에 둔다(`-k`).
+    - macOS 러너에는 PostgreSQL이 없다. CI가 Homebrew로 설치한다(`postgresql@17`).
 - [ ] 5-2 SQL 콘솔과 결과 그리드(가상 스크롤·페이지·취소·CSV), 트랜잭션·편집
 - [ ] 5-3 JDBC 사이드카(Oracle 11g·Tibero·CUBRID)
 - [ ] 5-4 스키마 브라우저, 매퍼 SQL의 테이블·컬럼 완성·검증

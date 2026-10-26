@@ -75,12 +75,18 @@ fn start_cluster(bin: &Path) -> (Cluster, ConnectionConfig) {
         String::from_utf8_lossy(&initdb.stderr)
     );
     let port = free_port();
+    // Unix 소켓은 기본 폴더(/var/run/postgresql)에 쓸 권한이 없을 수 있어(Ubuntu 러너) 임시 폴더에 둔다.
+    // Windows는 소켓을 쓰지 않는다.
+    let mut options = format!("-p {port} -c listen_addresses=127.0.0.1");
+    if !cfg!(windows) {
+        options.push_str(&format!(" -k {}", dir.display()));
+    }
     let pg_ctl = bin.join(format!("pg_ctl{exe}"));
     let started = Command::new(&pg_ctl)
         .arg("-D")
         .arg(&data)
         .arg("-o")
-        .arg(format!("-p {port} -c listen_addresses=127.0.0.1"))
+        .arg(options)
         .arg("-l")
         .arg(dir.join("server.log"))
         .args(["-w", "start"])
