@@ -54,6 +54,8 @@ const RENAME_SYMBOL: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, K
 const CODE_ACTION: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Period);
 const CODE_ACTION_ALT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::ALT, Key::Enter);
 const QUICK_OPEN: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::P);
+const SOURCE_CONTROL: KeyboardShortcut =
+    KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::G);
 // 터미널은 VS Code처럼 macOS에서도 실제 Ctrl+`다.
 const TOGGLE_TERMINAL: KeyboardShortcut = KeyboardShortcut::new(Modifiers::CTRL, Key::Backtick);
 const FIND_IN_FILES: KeyboardShortcut =
@@ -245,6 +247,10 @@ struct Document {
     external_change: bool,
     /// 언어 서버 동기화 상태와 진단.
     lsp: DocSync,
+    /// git 인덱스 대비 줄 변경(거터 표시).
+    git_marks: Vec<(usize, ferrite_core::git::LineChange)>,
+    /// git_marks를 계산한 (버퍼 버전, 기준 내용 세대). 바뀌면 다시 계산한다.
+    git_key: Option<(u64, u64)>,
 }
 
 impl Document {
@@ -266,6 +272,8 @@ impl Document {
             disk_hash: 0,
             external_change: false,
             lsp: DocSync::default(),
+            git_marks: Vec::new(),
+            git_key: None,
         };
         doc.replace_content(&content, &bytes, default_indent);
         Ok(doc)
@@ -429,6 +437,8 @@ pub struct FerriteApp {
     find_in_files: crate::find_in_files::FindInFiles,
     /// 통합 터미널(Ctrl+`) 패널.
     terminal: crate::terminal_ui::TerminalPanel,
+    /// git 상태·소스 제어 창(Ctrl+Shift+G).
+    git: crate::git_ui::GitPanel,
     /// 다음 프레임에 에디터로 키보드 포커스를 돌려준다(찾기 막대를 닫은 뒤 등).
     focus_editor: bool,
     settings: Settings,
@@ -478,6 +488,7 @@ impl FerriteApp {
             quick_open: Default::default(),
             find_in_files: Default::default(),
             terminal: Default::default(),
+            git: Default::default(),
             focus_editor: false,
             settings,
             settings_changed: false,
@@ -497,6 +508,8 @@ impl FerriteApp {
             hover: None,
             references: None,
         };
+        let root = app.tree.as_ref().map(|t| t.root().to_path_buf());
+        app.git.set_root(root.as_deref());
         let outdated = app.servers.outdated();
         // 설정 오류 안내가 더 급하므로 그때는 덮어쓰지 않는다.
         if !outdated.is_empty() && !settings_failed {
@@ -809,6 +822,7 @@ impl FerriteApp {
     fn open_folder(&mut self, dir: &Path) {
         let dir = real_path(dir);
         self.status = format!("프로젝트: {}", dir.display());
+        self.git.set_root(Some(&dir));
         self.tree = Some(FileTree::new(dir));
     }
 
@@ -823,6 +837,8 @@ impl FerriteApp {
             Ok(doc) => {
                 self.docs.push(doc);
                 self.active = Some(self.docs.len() - 1);
+                // 거터 변경 표시의 기준(인덱스 내용)을 바로 읽는다.
+                self.git.request_refresh();
             }
             Err(e) => self.status = format!("열기 실패: {}: {e}", path.display()),
         }
@@ -837,6 +853,7 @@ impl FerriteApp {
                     self.hub.saved(&doc.path, lang, &doc.buffer, &mut doc.lsp);
                 }
                 self.status = format!("저장됨: {}", doc.path.display());
+                self.git.request_refresh();
                 if settings_path().is_some_and(|p| real_path(&p) == doc.path) {
                     self.settings_changed = true;
                 }
@@ -898,6 +915,9 @@ impl FerriteApp {
         }
         if ctx.input_mut(|i| i.consume_shortcut(&TOGGLE_TERMINAL)) {
             self.toggle_terminal(ctx);
+        }
+        if ctx.input_mut(|i| i.consume_shortcut(&SOURCE_CONTROL)) {
+            self.git.toggle();
         }
         // Ctrl+F가 Ctrl+Shift+F에도 맞으므로 먼저 확인한다.
         if ctx.input_mut(|i| i.consume_shortcut(&FIND_IN_FILES)) {
@@ -1582,6 +1602,12 @@ impl FerriteApp {
                         ui.close();
                         self.toggle_terminal(&ctx);
                     }
+                    let item = egui::Button::new("소스 제어")
+                        .shortcut_text(ctx.format_shortcut(&SOURCE_CONTROL));
+                    if ui.add(item).clicked() {
+                        ui.close();
+                        self.git.toggle();
+                    }
                     if ui.button("언어 서버…").clicked() {
                         ui.close();
                         self.servers.show();
@@ -1816,6 +1842,7 @@ impl FerriteApp {
                     let (line, col) = doc.buffer.pos_to_line_col(doc.buffer.selection().head);
                     ui.label(format!("줄 {}, 열 {}", line + 1, col + 1));
                 }
+                self.git.status_bar(ui);
                 // 남은 폭에 상태 메시지를 둔다. 길면 말줄임으로 잘라 오른쪽 항목과 겹치지 않게 한다.
                 ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                     ui.add(egui::Label::new(&self.status).truncate());
@@ -2095,6 +2122,14 @@ impl FerriteApp {
                 find_action = find.ui(ui, &doc.buffer);
                 ui.separator();
             }
+            let generation = self.git.generation();
+            let key = (doc.buffer.version(), generation);
+            if doc.git_key != Some(key) {
+                doc.git_marks = self.git.base(&doc.path).map_or_else(Vec::new, |base| {
+                    ferrite_core::git::line_changes(base, &doc.buffer.text())
+                });
+                doc.git_key = Some(key);
+            }
             let opts = EditorOptions {
                 tab_size: self.settings.tab_size,
                 indent: doc.indent,
@@ -2106,6 +2141,7 @@ impl FerriteApp {
                     .as_ref()
                     .filter(|h| h.path == doc.path)
                     .and_then(|h| Some((h.pos, h.text.as_deref()?))),
+                line_changes: &doc.git_marks,
             };
             let id = ui.make_persistent_id(&doc.path);
             if std::mem::take(&mut self.focus_editor) {
@@ -2225,6 +2261,8 @@ impl FerriteApp {
 
 impl eframe::App for FerriteApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.git
+            .tick(ctx, self.docs.iter().map(|d| d.path.clone()).collect());
         self.process_fs_events();
         self.finish_server_jobs();
         self.sync_language_servers();
@@ -2266,6 +2304,7 @@ impl eframe::App for FerriteApp {
             self.open_folder(&dir);
         }
         self.commngt.ui(&ctx);
+        self.git.ui(&ctx);
         if let Some(path) = self.config_gen.ui(&ctx) {
             self.status = format!("설정 파일을 만들었습니다: {}", path.display());
             self.open_file(path);
@@ -3842,6 +3881,99 @@ mod tests {
                 .query_by_role(egui::accesskit::Role::Terminal)
                 .is_none()
         );
+        drop(harness);
+        remove_project(&dir);
+    }
+
+    fn git(dir: &Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    }
+
+    #[test]
+    fn 소스_제어에서_거터를_보고_스테이지해_커밋한다() {
+        use egui::accesskit::Role;
+        let dir = std::env::temp_dir().join(format!("ferrite-git-ui-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        git(&dir, &["init", "-q", "-b", "main"]);
+        git(&dir, &["config", "user.name", "Ferrite Test"]);
+        git(&dir, &["config", "user.email", "test@example.invalid"]);
+        git(&dir, &["config", "commit.gpgsign", "false"]);
+        fs::write(dir.join("a.txt"), "one\ntwo\n").unwrap();
+        git(&dir, &["add", "a.txt"]);
+        git(&dir, &["commit", "-q", "-m", "first"]);
+
+        let mut harness = harness_builder()
+            .with_size(egui::vec2(1200.0, 900.0))
+            .build_eframe(|cc| FerriteApp::new(cc, Some(dir.clone())));
+        harness.run_ok();
+        harness.state_mut().open_file(dir.join("a.txt"));
+        wait_for_label(&mut harness, "Git: main");
+        let file = harness.state().docs[0].path.clone();
+        for _ in 0..200 {
+            harness.run_ok();
+            if harness.state().git.base(&file).is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        assert_eq!(harness.state().git.base(&file), Some("one\ntwo\n"));
+
+        // 저장하지 않은 편집도 거터에 바로 보인다(첫 줄 수정).
+        harness.get_by_role(Role::MultilineTextInput).focus();
+        harness.run_ok();
+        harness.get_by_role(Role::MultilineTextInput).type_text("X");
+        harness.run_ok();
+        assert_eq!(
+            harness.state().docs[0].git_marks,
+            [(0, ferrite_core::git::LineChange::Modified)]
+        );
+        harness.key_press_modifiers(Modifiers::COMMAND, Key::S);
+        harness.run_ok();
+
+        harness.key_press_modifiers(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::G);
+        wait_for_label(&mut harness, "변경 사항 1");
+        harness.get_by_label_contains("M a.txt").click();
+        harness.run_ok();
+        harness.get_by_label_contains("+Xone");
+        harness.get_by_label("+").click();
+        wait_for_label(&mut harness, "스테이지됨 1");
+        harness
+            .get_by_role_and_label(Role::MultilineTextInput, "커밋 메시지")
+            .focus();
+        harness.run_ok();
+        harness
+            .get_by_role_and_label(Role::MultilineTextInput, "커밋 메시지")
+            .type_text("두 번째 커밋");
+        harness.run_ok();
+        harness.get_by_label("커밋").click();
+        wait_for_label(&mut harness, "커밋했습니다");
+        wait_for_label(&mut harness, "변경 사항 0");
+        let log = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&dir)
+            .args(["log", "--format=%s"])
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&log.stdout),
+            "두 번째 커밋\nfirst\n"
+        );
+        // 커밋하면 인덱스가 바뀌어 거터 표시가 사라진다.
+        for _ in 0..100 {
+            harness.run_ok();
+            if harness.state().docs[0].git_marks.is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        assert!(harness.state().docs[0].git_marks.is_empty());
         drop(harness);
         remove_project(&dir);
     }

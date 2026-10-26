@@ -12,6 +12,7 @@ mod file_tree;
 mod find_bar;
 mod find_in_files;
 mod fonts;
+mod git_ui;
 mod lsp_hub;
 mod lsp_ui;
 mod new_project;
