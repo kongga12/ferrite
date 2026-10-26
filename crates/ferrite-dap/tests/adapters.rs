@@ -17,7 +17,14 @@ fn temp_dir(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("ferrite-adapter-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    dir
+    // macOS의 임시 폴더(/var)는 /private/var로 가는 링크다. go는 실제 경로로 모듈을 찾으므로(링크 경로면
+    // "모듈 밖 폴더") 실제 경로를 쓴다. 앱은 프로젝트·문서 경로를 이미 실제 경로로 맞춘다.
+    // (Windows의 canonicalize는 `\\?\` 경로를 주므로 macOS에서만 바꾼다.)
+    if cfg!(target_os = "macos") {
+        std::fs::canonicalize(&dir).unwrap()
+    } else {
+        dir
+    }
 }
 
 /// 도구가 있는지. 없으면 로컬은 건너뛰고(false) CI는 실패한다.
