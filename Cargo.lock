@@ -1365,6 +1365,7 @@ dependencies = [
  "encoding_rs",
  "ferrite-codegen",
  "ferrite-core",
+ "ferrite-dap",
  "ferrite-egov",
  "ferrite-lsp",
  "ferrite-term",

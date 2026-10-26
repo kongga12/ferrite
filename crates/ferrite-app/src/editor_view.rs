@@ -19,6 +19,8 @@ const MAX_RENDERED_CHARS: usize = 10_000;
 const GUTTER_PAD: f32 = 8.0;
 /// 거터 오른쪽 git 변경 막대의 폭.
 const CHANGE_BAR: f32 = 3.0;
+/// 중단점 점이 들어가는 거터 왼쪽 칸의 폭(줄 높이의 배수).
+const MARK_COLUMN: f32 = 1.1;
 const CURSOR_WIDTH: f32 = 2.0;
 
 /// 줄마다 (줄 안 바이트 범위, 색) 목록.
@@ -27,6 +29,16 @@ pub type LineStyles = Vec<Vec<(Range<usize>, Color32)>>;
 /// 구문 강조 제공자. 보이는 줄 범위에 대해서만 호출된다.
 pub trait Styler {
     fn styles(&mut self, buffer: &mut Buffer, lines: Range<usize>, dark: bool) -> LineStyles;
+}
+
+/// 거터에 그리는 중단점.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BreakpointMark {
+    Set,
+    /// 조건식이 있다.
+    Conditional,
+    /// 어댑터가 걸 수 없다고 했다(실행 중일 때).
+    Unverified,
 }
 
 /// 문서마다 유지하는 화면 상태.
@@ -58,6 +70,10 @@ pub struct EditorOptions<'a> {
     pub hover: Option<(usize, &'a str)>,
     /// git 인덱스 대비 줄 변경(줄 순). 거터 오른쪽에 색 막대로 보인다.
     pub line_changes: &'a [(usize, LineChange)],
+    /// 중단점(0부터 센 줄 순). 거터 왼쪽에 점으로 보인다.
+    pub breakpoints: &'a [(usize, BreakpointMark)],
+    /// 디버거가 멈춘 줄(0부터). 줄 배경과 거터 화살표로 보인다.
+    pub debug_line: Option<usize>,
 }
 
 /// 앱이 언어 서버 기능을 붙이는 데 쓰는 정보.
@@ -69,12 +85,17 @@ pub struct EditorOutput {
     pub hover_pos: Option<usize>,
     /// Ctrl(macOS는 Cmd)+클릭한 문자 위치(정의로 이동).
     pub ctrl_click: Option<usize>,
+    /// 거터를 누른 줄(0부터)과, 오른쪽 단추였는지(중단점 조건 편집).
+    pub gutter_click: Option<(usize, bool)>,
 }
 
 struct Geometry {
     /// 내용 영역의 화면 좌표 원점.
     origin: Pos2,
+    /// 중단점 칸을 포함한 거터 전체 폭.
     gutter: f32,
+    /// 거터 왼쪽 중단점 칸의 폭.
+    mark: f32,
     row_height: f32,
     char_width: f32,
     font_id: FontId,
@@ -88,6 +109,11 @@ impl Geometry {
 
     fn line_y(&self, line: usize) -> f32 {
         self.origin.y + line as f32 * self.row_height
+    }
+
+    fn line_at(&self, pointer: Pos2, buffer: &Buffer) -> usize {
+        let y = (pointer.y - self.origin.y).max(0.0);
+        ((y / self.row_height) as usize).min(buffer.line_count() - 1)
     }
 }
 
@@ -107,7 +133,8 @@ pub fn show(
         .id_salt(id)
         .auto_shrink(false)
         .show_viewport(ui, |ui, viewport| {
-            let gutter = gutter_width(buffer.line_count(), char_width);
+            let mark = row_height * MARK_COLUMN;
+            let gutter = mark + gutter_width(buffer.line_count(), char_width);
             // 마지막 줄 아래로 반 화면을 더 스크롤할 수 있게 한다.
             let content = Vec2::new(
                 gutter + state.max_width + char_width * 4.0,
@@ -125,6 +152,7 @@ pub fn show(
             let geom = Geometry {
                 origin: rect.min,
                 gutter,
+                mark,
                 row_height,
                 char_width,
                 font_id: font_id.clone(),
@@ -159,6 +187,11 @@ pub fn show(
                 .then(|| response.interact_pointer_pos())
                 .flatten()
                 .map(|p| hit_test(ui, buffer, &geom, p));
+            let gutter_click = (response.clicked() || response.secondary_clicked())
+                .then(|| response.interact_pointer_pos())
+                .flatten()
+                .filter(|p| p.x < geom.text_x())
+                .map(|p| (geom.line_at(p, buffer), response.secondary_clicked()));
             let mut hover_pos = None;
             if response.hovered()
                 && let Some(pointer) = response.hover_pos()
@@ -216,9 +249,21 @@ pub fn show(
                 cursor_rect: cursor,
                 hover_pos,
                 ctrl_click,
+                gutter_click,
             }
         })
         .inner
+}
+
+const BREAKPOINT_RED: Color32 = Color32::from_rgb(220, 60, 60);
+
+/// 디버거가 멈춘 줄의 배경(노랑, 글자가 읽히게 옅게).
+fn debug_line_color(dark: bool) -> Color32 {
+    if dark {
+        Color32::from_rgba_unmultiplied(200, 160, 0, 60)
+    } else {
+        Color32::from_rgba_unmultiplied(255, 210, 0, 90)
+    }
 }
 
 fn gutter_width(line_count: usize, char_width: f32) -> f32 {
@@ -329,6 +374,13 @@ fn handle_pointer(
     let Some(pointer) = response.interact_pointer_pos() else {
         return;
     };
+    // 거터에서 누른 것은 중단점용이다. 커서를 옮기거나 단어를 고르지 않는다.
+    let pressed_in_gutter = ui
+        .input(|i| i.pointer.press_origin())
+        .is_some_and(|p| p.x < geom.text_x());
+    if pressed_in_gutter || (response.double_clicked() && pointer.x < geom.text_x()) {
+        return;
+    }
     let pos = hit_test(ui, buffer, geom, pointer);
     if response.double_clicked() {
         buffer.select_word_at(pos);
@@ -341,8 +393,7 @@ fn handle_pointer(
 }
 
 fn hit_test(ui: &egui::Ui, buffer: &Buffer, geom: &Geometry, pointer: Pos2) -> usize {
-    let y = (pointer.y - geom.origin.y).max(0.0);
-    let line = ((y / geom.row_height) as usize).min(buffer.line_count() - 1);
+    let line = geom.line_at(pointer, buffer);
     let galley = layout_line(ui, &rendered_text(buffer, line), &[], None, geom);
     let x = (pointer.x - geom.text_x()).max(0.0);
     let col = galley
@@ -565,7 +616,9 @@ fn paint(
             Pos2::new(screen_view.min.x, y),
             Vec2::new(screen_view.width(), geom.row_height),
         );
-        if line == cursor_line && selection.is_empty() {
+        if opts.debug_line == Some(line) {
+            painter.rect_filled(row, 0.0, debug_line_color(visuals.dark_mode));
+        } else if line == cursor_line && selection.is_empty() {
             painter.rect_filled(row, 0.0, visuals.faint_bg_color);
         }
 
@@ -672,6 +725,51 @@ fn paint(
                 ),
             };
             painter.rect_filled(rect, 0.0, color);
+        }
+        let center = Pos2::new(
+            gutter.min.x + geom.mark / 2.0,
+            geom.line_y(line) + geom.row_height / 2.0,
+        );
+        let radius = geom.row_height * 0.3;
+        if let Ok(i) = opts
+            .breakpoints
+            .binary_search_by_key(&line, |(marked, _)| *marked)
+        {
+            match opts.breakpoints[i].1 {
+                BreakpointMark::Set => {
+                    painter.circle_filled(center, radius, BREAKPOINT_RED);
+                }
+                BreakpointMark::Conditional => {
+                    painter.circle_filled(center, radius, BREAKPOINT_RED);
+                    // 조건이 있다는 표시: 가운데 흰 가로줄 두 개(=)
+                    for dy in [-radius * 0.3, radius * 0.3] {
+                        painter.hline(
+                            (center.x - radius * 0.5)..=(center.x + radius * 0.5),
+                            center.y + dy,
+                            Stroke::new(1.5, Color32::WHITE),
+                        );
+                    }
+                }
+                BreakpointMark::Unverified => {
+                    painter.circle_stroke(
+                        center,
+                        radius,
+                        Stroke::new(1.5, visuals.weak_text_color()),
+                    );
+                }
+            }
+        }
+        if opts.debug_line == Some(line) {
+            let r = radius * 1.1;
+            painter.add(egui::Shape::convex_polygon(
+                vec![
+                    center + Vec2::new(-r * 0.8, -r),
+                    center + Vec2::new(r, 0.0),
+                    center + Vec2::new(-r * 0.8, r),
+                ],
+                Color32::from_rgb(240, 190, 30),
+                Stroke::new(1.0, Color32::from_rgb(150, 110, 0)),
+            ));
         }
         let color = if line == cursor_line {
             visuals.strong_text_color()
