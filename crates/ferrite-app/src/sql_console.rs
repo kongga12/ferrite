@@ -819,11 +819,8 @@ impl SqlConsole {
                 None => {
                     let kind = live.as_ref().map(|l| l.config.kind);
                     ui.weak("· 읽기 전용").on_hover_text(match kind {
-                        Some(Kind::Tibero) => {
-                            "Tibero 결과는 아직 그리드에서 고칠 수 없습니다(SQL로 고치세요)"
-                        }
                         // SQL에서 표를 찾으므로 별칭·식 열은 못 고친다(`origin`).
-                        Some(Kind::Oracle | Kind::Cubrid) => {
+                        Some(Kind::Oracle | Kind::Tibero | Kind::Cubrid) => {
                             "한 표에서 그 표의 기본 키 열을 모두 넣어 조회하면 고칠 수 있습니다. \
                              별칭을 붙인 열, 조인·묶음 조회는 고칠 수 없습니다"
                         }

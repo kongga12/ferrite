@@ -104,10 +104,12 @@ impl Editable {
             (Kind::Postgres, None) => format!("${n}"),
             // Oracle 드라이버는 날짜를 `2024-01-02 00:00:00.0`처럼 보인다. 세션의 날짜 형식(NLS)과
             // 상관없이 그 글자(또는 날짜만, 소수 초 없이)를 받게 형식을 적는다.
-            (Kind::Oracle, Some("DATE")) => {
+            (Kind::Oracle | Kind::Tibero, Some("DATE")) => {
                 "CAST(TO_TIMESTAMP(?, 'YYYY-MM-DD HH24:MI:SS.FF') AS DATE)".into()
             }
-            (Kind::Oracle, Some(ty)) if ty.starts_with("TIMESTAMP") && !ty.contains("ZONE") => {
+            (Kind::Oracle | Kind::Tibero, Some(ty))
+                if ty.starts_with("TIMESTAMP") && !ty.contains("ZONE") =>
+            {
                 "TO_TIMESTAMP(?, 'YYYY-MM-DD HH24:MI:SS.FF')".into()
             }
             _ => "?".into(),
