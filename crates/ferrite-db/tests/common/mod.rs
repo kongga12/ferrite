@@ -275,14 +275,25 @@ pub fn edit_scenario(config: &ConnectionConfig, password: Option<String>) {
         "CREATE TABLE ferrite_e (k1 INT NOT NULL, k2 VARCHAR(10) NOT NULL, v VARCHAR(20), n INT, \
          PRIMARY KEY (k1, k2))",
     );
-    s.exec("INSERT INTO ferrite_e VALUES (1, 'a', '처음', 10), (1, 'b', '둘째', 20), (2, 'a', '셋째', 30)");
+    // Oracle 11g는 여러 행 VALUES가 없다.
+    for row in [
+        "1, 'a', '처음', 10",
+        "1, 'b', '둘째', 20",
+        "2, 'a', '셋째', 30",
+    ] {
+        s.exec(&format!("INSERT INTO ferrite_e VALUES ({row})"));
+    }
     s.exec("CREATE TABLE ferrite_n (v VARCHAR(20))");
 
     // 기본 키 열이 다 있으면 고칠 수 있고, 식 열은 못 고친다.
     let (editable, rows) =
         s.query_editable("SELECT k2, v, n, n + 1 AS m, k1 FROM ferrite_e ORDER BY k1, k2");
     let editable = editable.expect("기본 키 열이 다 있으면 고칠 수 있다");
-    assert!(editable.table.ends_with("ferrite_e"), "{}", editable.table);
+    assert!(
+        editable.table.to_lowercase().ends_with("ferrite_e"),
+        "{}",
+        editable.table
+    );
     assert_eq!(editable.key().len(), 2);
     assert!(editable.can_edit(1) && editable.can_edit(2) && !editable.can_edit(3));
     let mut update = |column: usize, value: Cell, row: usize| {

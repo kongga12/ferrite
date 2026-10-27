@@ -14,7 +14,7 @@ use std::sync::mpsc::{Receiver, TryRecvError, channel};
 use eframe::egui;
 use ferrite_db::export::export_csv;
 use ferrite_db::result::{ROW_LIMIT, ResultBuffer};
-use ferrite_db::{Cell, Connection, ConnectionConfig, Editable, Event, split};
+use ferrite_db::{Cell, Connection, ConnectionConfig, Editable, Event, Kind, split};
 
 use crate::db_ui::DbWindow;
 
@@ -799,11 +799,17 @@ impl SqlConsole {
                     ui.weak(format!("· {} · 칸을 두 번 눌러 고칩니다", editable.table));
                 }
                 None => {
-                    let jdbc = live.as_ref().is_some_and(|l| l.config.kind.is_jdbc());
-                    ui.weak("· 읽기 전용").on_hover_text(if jdbc {
-                        "Oracle·Tibero·CUBRID 결과는 아직 그리드에서 고칠 수 없습니다(SQL로 고치세요)"
-                    } else {
-                        "한 표에서 그 표의 기본 키 열을 모두 넣어 조회하면 고칠 수 있습니다"
+                    let kind = live.as_ref().map(|l| l.config.kind);
+                    ui.weak("· 읽기 전용").on_hover_text(match kind {
+                        Some(Kind::Tibero) => {
+                            "Tibero 결과는 아직 그리드에서 고칠 수 없습니다(SQL로 고치세요)"
+                        }
+                        // SQL에서 표를 찾으므로 별칭·식 열은 못 고친다(`origin`).
+                        Some(Kind::Oracle | Kind::Cubrid) => {
+                            "한 표에서 그 표의 기본 키 열을 모두 넣어 조회하면 고칠 수 있습니다. \
+                             별칭을 붙인 열, 조인·묶음 조회는 고칠 수 없습니다"
+                        }
+                        _ => "한 표에서 그 표의 기본 키 열을 모두 넣어 조회하면 고칠 수 있습니다",
                     });
                 }
             }

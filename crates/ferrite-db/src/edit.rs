@@ -21,7 +21,7 @@ pub struct Editable {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Target {
     pub(crate) name: String,
-    /// PostgreSQL: 열 형식. 파라미터를 글자로 보내 이 형식으로 바꾼다.
+    /// 열 형식. PostgreSQL은 파라미터를 글자로 보내 이 형식으로 바꾸고, Oracle은 날짜 형식만 쓴다.
     pub(crate) cast: Option<String>,
 }
 
@@ -99,9 +99,17 @@ impl Editable {
     }
 
     fn placeholder(&self, n: usize, target: &Target) -> String {
-        match (self.kind, &target.cast) {
+        match (self.kind, target.cast.as_deref()) {
             (Kind::Postgres, Some(cast)) => format!("CAST(${n} AS {cast})"),
             (Kind::Postgres, None) => format!("${n}"),
+            // Oracle 드라이버는 날짜를 `2024-01-02 00:00:00.0`처럼 보인다. 세션의 날짜 형식(NLS)과
+            // 상관없이 그 글자(또는 날짜만, 소수 초 없이)를 받게 형식을 적는다.
+            (Kind::Oracle, Some("DATE")) => {
+                "CAST(TO_TIMESTAMP(?, 'YYYY-MM-DD HH24:MI:SS.FF') AS DATE)".into()
+            }
+            (Kind::Oracle, Some(ty)) if ty.starts_with("TIMESTAMP") && !ty.contains("ZONE") => {
+                "TO_TIMESTAMP(?, 'YYYY-MM-DD HH24:MI:SS.FF')".into()
+            }
             _ => "?".into(),
         }
     }
@@ -199,6 +207,34 @@ mod tests {
         assert_eq!(
             maria.update(1, Cell::Null, &row).unwrap().0,
             "UPDATE `egov`.`t``x` SET `v` = ? WHERE `id` = ?"
+        );
+        let oracle = Editable::new(
+            Kind::Oracle,
+            Some("HR"),
+            "EMP",
+            vec![
+                target("ID", Some("NUMBER")),
+                target("HIRED", Some("DATE")),
+                target("AT", Some("TIMESTAMP(6)")),
+            ],
+            &["ID".into()],
+        )
+        .unwrap();
+        assert_eq!(oracle.table, "HR.EMP");
+        let row = vec![Cell::Text("1".into()), Cell::Null, Cell::Null];
+        assert_eq!(
+            oracle
+                .update(1, Cell::Text("2024-01-02 00:00:00.0".into()), &row)
+                .unwrap()
+                .0,
+            r#"UPDATE "HR"."EMP" SET "HIRED" = CAST(TO_TIMESTAMP(?, 'YYYY-MM-DD HH24:MI:SS.FF') AS DATE) WHERE "ID" = ?"#
+        );
+        assert!(
+            oracle
+                .update(2, Cell::Null, &row)
+                .unwrap()
+                .0
+                .contains(r#""AT" = TO_TIMESTAMP(?, 'YYYY-MM-DD HH24:MI:SS.FF')"#)
         );
     }
 
