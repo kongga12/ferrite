@@ -59,6 +59,66 @@ pub struct Column {
 
 pub type Row = Vec<Cell>;
 
+/// 표나 뷰 하나(스키마 브라우저).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Table {
+    /// 연결의 기본 자리(사용자 스키마, 현재 DB, PostgreSQL `public`)가 아닐 때만 있다.
+    pub schema: Option<String>,
+    pub name: String,
+    pub view: bool,
+    pub columns: Vec<TableColumn>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct TableColumn {
+    pub name: String,
+    /// DB가 보이는 형식 이름(`character varying(20)`, `VARCHAR2`, `int(11)` 등).
+    pub ty: String,
+}
+
+impl Table {
+    /// 보이는 이름(`스키마.표`).
+    pub fn label(&self) -> String {
+        match &self.schema {
+            Some(schema) => format!("{schema}.{}", self.name),
+            None => self.name.clone(),
+        }
+    }
+
+    /// SQL에 쓸 이름(필요하면 따옴표).
+    pub fn sql_name(&self, kind: Kind) -> String {
+        let name = edit::identifier(kind, &self.name);
+        match &self.schema {
+            Some(schema) => format!("{}.{name}", edit::identifier(kind, schema)),
+            None => name,
+        }
+    }
+}
+
+/// (스키마, 표, 뷰인지, 열, 형식) 줄들을 표마다 묶는다. 줄은 표마다 이어져 와야 한다.
+pub(crate) fn group_tables(
+    rows: impl IntoIterator<Item = (Option<String>, String, bool, String, String)>,
+) -> Vec<Table> {
+    let mut tables: Vec<Table> = Vec::new();
+    for (schema, name, view, column, ty) in rows {
+        let same = tables
+            .last()
+            .is_some_and(|t| t.schema == schema && t.name == name);
+        if !same {
+            tables.push(Table {
+                schema,
+                name,
+                view,
+                columns: Vec::new(),
+            });
+        }
+        if let Some(table) = tables.last_mut() {
+            table.columns.push(TableColumn { name: column, ty });
+        }
+    }
+    tables
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Event {
     Connected {
@@ -85,9 +145,12 @@ pub enum Event {
     Transaction {
         autocommit: bool,
     },
+    /// `load_schema`의 결과: 표와 뷰(이름순).
+    Schema(Vec<Table>),
 }
 
 enum Command {
+    Schema,
     Execute(String),
     /// 파라미터를 묶어 실행한다(결과 집합이 아닌 문장).
     ExecuteParams(String, Vec<Cell>),
@@ -142,6 +205,8 @@ pub(crate) trait Driver {
     fn commit(&mut self) -> Result<(), String>;
     fn rollback(&mut self) -> Result<(), String>;
     fn set_autocommit(&mut self, on: bool) -> Result<(), String>;
+    /// 연결의 기본 자리(사용자 스키마, 현재 DB 등)의 표와 뷰, 그 열.
+    fn schema(&mut self) -> Result<Vec<Table>, String>;
 }
 
 /// 다른 스레드에서 실행 중인 문장을 멈춘다.
@@ -225,6 +290,12 @@ impl Connection {
             .send(Command::ExecuteParams(sql.to_owned(), params));
     }
 
+    /// 표와 뷰, 그 열을 읽는다. 결과는 `Schema`나 `Error`로 온다. 읽던 결과가 있으면 닫으므로
+    /// 스키마 브라우저는 따로 연 연결에서 부른다.
+    pub fn load_schema(&self) {
+        let _ = self.commands.send(Command::Schema);
+    }
+
     /// 다음 결과 페이지를 받는다.
     pub fn fetch(&self) {
         let _ = self.commands.send(Command::Fetch);
@@ -282,6 +353,10 @@ fn serve(driver: &mut dyn Driver, io: &mut Io) {
             },
         };
         match command {
+            Command::Schema => match driver.schema() {
+                Ok(tables) => io.send(Event::Schema(tables)),
+                Err(e) => io.send(Event::Error(e)),
+            },
             Command::Execute(sql) => {
                 let started = Instant::now();
                 let result = driver.execute(&sql, io);

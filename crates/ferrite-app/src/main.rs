@@ -21,6 +21,7 @@ mod lsp_ui;
 mod new_project;
 mod picker;
 mod quick_open;
+mod schema_ui;
 mod servers;
 mod sql_console;
 mod terminal_ui;

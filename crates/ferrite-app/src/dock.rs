@@ -19,10 +19,11 @@ pub enum Pane {
     Debug,
     DebugConsole,
     Sql,
+    Schema,
 }
 
 /// 열고 닫는 도구 창. 프로젝트와 에디터는 늘 있다.
-const TOOLS: [Pane; 7] = [
+const TOOLS: [Pane; 8] = [
     Pane::Terminal,
     Pane::Problems,
     Pane::Search,
@@ -30,9 +31,10 @@ const TOOLS: [Pane; 7] = [
     Pane::Debug,
     Pane::DebugConsole,
     Pane::Sql,
+    Pane::Schema,
 ];
 
-const ALL: [Pane; 9] = [
+const ALL: [Pane; 10] = [
     Pane::Project,
     Pane::Editor,
     Pane::Terminal,
@@ -42,6 +44,7 @@ const ALL: [Pane; 9] = [
     Pane::Debug,
     Pane::DebugConsole,
     Pane::Sql,
+    Pane::Schema,
 ];
 
 impl Pane {
@@ -56,6 +59,7 @@ impl Pane {
             Pane::Debug => "디버그",
             Pane::DebugConsole => "디버그 출력",
             Pane::Sql => "SQL",
+            Pane::Schema => "스키마",
         }
     }
 

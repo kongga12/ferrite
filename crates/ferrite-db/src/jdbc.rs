@@ -15,7 +15,8 @@ use serde_json::{Value, json};
 use crate::edit::{Editable, Target};
 use crate::origin::{self, Fold};
 use crate::{
-    Canceller, Cell, Column, ConnectionConfig, Driver, Event, Io, Kind, PAGE_ROWS, Row, lock,
+    Canceller, Cell, Column, ConnectionConfig, Driver, Event, Io, Kind, PAGE_ROWS, Row, Table,
+    TableColumn, lock,
 };
 
 const SOURCE: &str = include_str!("../sidecar/FerriteJdbc.java");
@@ -437,6 +438,36 @@ impl Driver for Jdbc {
 
     fn set_autocommit(&mut self, on: bool) -> Result<(), String> {
         self.call("autocommit", json!({ "on": on })).map(drop)
+    }
+
+    fn schema(&mut self) -> Result<Vec<Table>, String> {
+        let response = self.call("schema", json!({}))?;
+        let text = |value: &Value| value.as_str().unwrap_or_default().to_owned();
+        Ok(response["tables"]
+            .as_array()
+            .map(|tables| {
+                tables
+                    .iter()
+                    .map(|table| Table {
+                        schema: None,
+                        name: text(&table["name"]),
+                        view: table["view"].as_bool().unwrap_or(false),
+                        columns: table["columns"]
+                            .as_array()
+                            .map(|columns| {
+                                columns
+                                    .iter()
+                                    .map(|c| TableColumn {
+                                        name: text(&c["name"]),
+                                        ty: text(&c["type"]),
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default())
     }
 }
 

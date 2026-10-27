@@ -266,6 +266,47 @@ pub fn scenario_with(
     s.exec("DROP TABLE ferrite_t");
 }
 
+/// 스키마 브라우저: 연결의 기본 자리에 있는 표·뷰와 열을 읽는다.
+pub fn schema_scenario(config: &ConnectionConfig, password: Option<String>) {
+    let (mut s, _) = Session::open(config, password);
+    s.conn().execute("DROP VIEW ferrite_sv");
+    s.wait(|e| matches!(e, Event::Done { .. } | Event::Error(_)));
+    s.drop_table("ferrite_s");
+    s.exec("CREATE TABLE ferrite_s (id INT PRIMARY KEY, name VARCHAR(30))");
+    s.exec("CREATE VIEW ferrite_sv AS SELECT id FROM ferrite_s");
+    s.conn().load_schema();
+    let tables = match s.wait(|e| matches!(e, Event::Schema(_) | Event::Error(_))) {
+        Event::Schema(tables) => tables,
+        other => panic!("스키마: {other:?}"),
+    };
+    let find = |name: &str| {
+        tables
+            .iter()
+            .find(|t| t.schema.is_none() && t.name.eq_ignore_ascii_case(name))
+            .unwrap_or_else(|| panic!("{name}가 없다: {tables:?}"))
+    };
+    let names = |table: &ferrite_db::Table| -> Vec<String> {
+        table
+            .columns
+            .iter()
+            .map(|c| c.name.to_lowercase())
+            .collect()
+    };
+    let table = find("ferrite_s");
+    assert!(!table.view);
+    assert_eq!(names(table), ["id", "name"]);
+    assert!(
+        table.columns[1].ty.to_lowercase().contains("char"),
+        "{:?}",
+        table.columns
+    );
+    let view = find("ferrite_sv");
+    assert!(view.view);
+    assert_eq!(names(view), ["id"]);
+    s.exec("DROP VIEW ferrite_sv");
+    s.exec("DROP TABLE ferrite_s");
+}
+
 /// 결과 그리드 고치기: 기본 키로 찾는 UPDATE를 파라미터로 실행한다.
 pub fn edit_scenario(config: &ConnectionConfig, password: Option<String>) {
     let (mut s, _) = Session::open(config, password);

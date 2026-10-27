@@ -159,6 +159,7 @@ fn oracle로_시나리오를_돈다() {
     );
     jdbc_scenario(&config, password.clone(), Dialect::Oracle);
     common::edit_scenario(&config, password.clone());
+    common::schema_scenario(&config, password.clone());
 
     // 날짜는 보이는 글자(`2024-01-02 00:00:00.0`)나 날짜만 적어 고친다(세션 날짜 형식과 상관없이).
     let (mut s, _) = open(&config, password.clone());
@@ -211,7 +212,8 @@ fn cubrid로_시나리오를_돈다() {
         Dialect::Standard,
     );
     jdbc_scenario(&config, password.clone(), Dialect::Standard);
-    common::edit_scenario(&config, password);
+    common::edit_scenario(&config, password.clone());
+    common::schema_scenario(&config, password);
 }
 
 #[test]
