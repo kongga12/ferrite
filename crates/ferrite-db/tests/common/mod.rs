@@ -16,6 +16,13 @@ pub struct Session {
 
 impl Session {
     pub fn open(config: &ConnectionConfig, password: Option<String>) -> (Self, String) {
+        Self::try_open(config, password).unwrap_or_else(|e| panic!("연결 실패: {e}"))
+    }
+
+    pub fn try_open(
+        config: &ConnectionConfig,
+        password: Option<String>,
+    ) -> Result<(Self, String), String> {
         let mut session = Self {
             conn: Connection::open(config, password, || {}),
             seen: Vec::new(),
@@ -23,8 +30,9 @@ impl Session {
         };
         let event = session.wait(|e| matches!(e, Event::Connected { .. } | Event::Disconnected(_)));
         match event {
-            Event::Connected { version } => (session, version),
-            other => panic!("연결 실패: {other:?}"),
+            Event::Connected { version } => Ok((session, version)),
+            Event::Disconnected(e) => Err(e),
+            other => Err(format!("{other:?}")),
         }
     }
 
@@ -141,6 +149,47 @@ impl Session {
     }
 }
 
+/// DB마다 다른 SQL. Oracle 계열(Oracle 11g·Tibero)은 `FROM` 없는 SELECT와 여러 행 VALUES가 없다.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Dialect {
+    Standard,
+    Oracle,
+}
+
+impl Dialect {
+    /// `SELECT 1` 뒤에 붙일 것.
+    pub fn from(self) -> &'static str {
+        match self {
+            Dialect::Standard => "",
+            Dialect::Oracle => " FROM dual",
+        }
+    }
+
+    /// `ferrite_t(id, name)`에 1..=n행을 넣는 문장 하나.
+    fn fill(self, n: usize) -> String {
+        match self {
+            Dialect::Standard => {
+                let values: Vec<String> = (1..=n).map(|i| format!("({i}, '이름{i}')")).collect();
+                format!(
+                    "INSERT INTO ferrite_t (id, name) VALUES {}",
+                    values.join(",")
+                )
+            }
+            Dialect::Oracle => format!(
+                "INSERT INTO ferrite_t (id, name) SELECT level, '이름' || level FROM dual CONNECT BY level <= {n}"
+            ),
+        }
+    }
+}
+
+impl Session {
+    /// 표가 있으면 지운다(`DROP TABLE IF EXISTS`가 없는 DB도 있어 오류는 버린다).
+    pub fn drop_table(&mut self, table: &str) {
+        self.conn.execute(&format!("DROP TABLE {table}"));
+        self.wait(|e| matches!(e, Event::Done { .. } | Event::Error(_)));
+    }
+}
+
 /// `long_sql`은 몇 초 넘게 도는 문장(멈춤 확인용).
 pub fn scenario(
     config: &ConnectionConfig,
@@ -148,23 +197,28 @@ pub fn scenario(
     version_prefix: &str,
     long_sql: &str,
 ) {
-    let (mut s, version) = Session::open(config, password);
-    assert!(version.starts_with(version_prefix), "{version}");
+    let (s, version) = Session::open(config, password);
+    scenario_with(s, &version, version_prefix, long_sql, Dialect::Standard);
+}
 
-    s.exec("DROP TABLE IF EXISTS ferrite_t");
+pub fn scenario_with(
+    mut s: Session,
+    version: &str,
+    version_prefix: &str,
+    long_sql: &str,
+    dialect: Dialect,
+) {
+    assert!(version.starts_with(version_prefix), "{version}");
+    let one = |n: u8| format!("SELECT {n}{}", dialect.from());
+
+    s.drop_table("ferrite_t");
     s.exec("CREATE TABLE ferrite_t (id INT PRIMARY KEY, name VARCHAR(50))");
-    let values: Vec<String> = (1..=1234).map(|i| format!("({i}, '이름{i}')")).collect();
-    assert_eq!(
-        s.exec(&format!(
-            "INSERT INTO ferrite_t (id, name) VALUES {}",
-            values.join(",")
-        )),
-        Some(1234)
-    );
+    assert_eq!(s.exec(&dialect.fill(1234)), Some(1234));
 
     // 500·500·234행 세 페이지로 받는다.
     let (columns, rows, pages) = s.query("SELECT id, name FROM ferrite_t ORDER BY id");
-    let names: Vec<&str> = columns.iter().map(|c| c.name.as_str()).collect();
+    // Oracle은 따옴표 없는 이름을 대문자로 둔다.
+    let names: Vec<String> = columns.iter().map(|c| c.name.to_lowercase()).collect();
     assert_eq!(names, ["id", "name"]);
     assert_eq!((rows.len(), pages), (1234, 1234usize.div_ceil(PAGE_ROWS)));
     assert_eq!(
@@ -198,7 +252,7 @@ pub fn scenario(
         s.wait(|e| matches!(e, Event::Error(_) | Event::Done { .. })),
         Event::Error(_)
     ));
-    assert_eq!(s.scalar("SELECT 1"), "1");
+    assert_eq!(s.scalar(&one(1)), "1");
 
     // 실행 중인 문장을 멈춘다(오류로 끝나거나, SLEEP처럼 바로 끝난다).
     let started = Instant::now();
@@ -207,7 +261,7 @@ pub fn scenario(
     s.conn().cancel();
     s.wait(|e| matches!(e, Event::Error(_) | Event::Done { .. }));
     assert!(started.elapsed() < Duration::from_secs(10), "멈추지 않았다");
-    assert_eq!(s.scalar("SELECT 2"), "2", "멈춘 뒤에도 쓴다");
+    assert_eq!(s.scalar(&one(2)), "2", "멈춘 뒤에도 쓴다");
 
     s.exec("DROP TABLE ferrite_t");
 }
@@ -215,8 +269,8 @@ pub fn scenario(
 /// 결과 그리드 고치기: 기본 키로 찾는 UPDATE를 파라미터로 실행한다.
 pub fn edit_scenario(config: &ConnectionConfig, password: Option<String>) {
     let (mut s, _) = Session::open(config, password);
-    s.exec("DROP TABLE IF EXISTS ferrite_e");
-    s.exec("DROP TABLE IF EXISTS ferrite_n");
+    s.drop_table("ferrite_e");
+    s.drop_table("ferrite_n");
     s.exec(
         "CREATE TABLE ferrite_e (k1 INT NOT NULL, k2 VARCHAR(10) NOT NULL, v VARCHAR(20), n INT, \
          PRIMARY KEY (k1, k2))",

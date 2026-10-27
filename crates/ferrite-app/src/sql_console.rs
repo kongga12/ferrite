@@ -203,7 +203,10 @@ impl SqlConsole {
             .collect();
         if explain {
             statements.truncate(1);
-            statements = statements.iter().map(|s| kind.explain(s)).collect();
+            statements = statements
+                .iter()
+                .flat_map(|s| kind.explain(s).unwrap_or_default())
+                .collect();
         }
         if statements.is_empty() {
             self.note(true, "실행할 문장이 없습니다");
@@ -667,8 +670,17 @@ impl SqlConsole {
             {
                 self.run(ctx, editor, false);
             }
+            let can_explain = self
+                .live
+                .as_ref()
+                .is_none_or(|l| l.config.kind.explain("").is_some());
             if ui
-                .add_enabled(can_run, egui::Button::new("실행 계획"))
+                .add_enabled(can_run && can_explain, egui::Button::new("실행 계획"))
+                .on_disabled_hover_text(if can_explain {
+                    "연결한 뒤 실행할 수 있습니다"
+                } else {
+                    "이 DB는 아직 실행 계획을 보지 못합니다"
+                })
                 .clicked()
             {
                 self.run(ctx, editor, true);
@@ -787,9 +799,12 @@ impl SqlConsole {
                     ui.weak(format!("· {} · 칸을 두 번 눌러 고칩니다", editable.table));
                 }
                 None => {
-                    ui.weak("· 읽기 전용").on_hover_text(
-                        "한 표에서 그 표의 기본 키 열을 모두 넣어 조회하면 고칠 수 있습니다",
-                    );
+                    let jdbc = live.as_ref().is_some_and(|l| l.config.kind.is_jdbc());
+                    ui.weak("· 읽기 전용").on_hover_text(if jdbc {
+                        "Oracle·Tibero·CUBRID 결과는 아직 그리드에서 고칠 수 없습니다(SQL로 고치세요)"
+                    } else {
+                        "한 표에서 그 표의 기본 키 열을 모두 넣어 조회하면 고칠 수 있습니다"
+                    });
                 }
             }
             if buffer.dropped() > 0 {

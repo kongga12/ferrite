@@ -205,6 +205,22 @@ fn secret_store() -> std::sync::Arc<dyn ferrite_db::secret::SecretStore> {
     }
 }
 
+/// JDBC 사이드카(컴파일한 클래스)와 [받기]로 받은 드라이버를 두는 곳. 테스트는 사용자 폴더에 쓰지 않는다.
+fn jdbc_dir() -> Option<PathBuf> {
+    if cfg!(test) {
+        return None;
+    }
+    Some(dirs::data_local_dir()?.join("ferrite").join("jdbc"))
+}
+
+/// 드라이버 jar를 찾는 로컬 Maven 저장소. 테스트는 사용자 저장소를 보지 않는다.
+fn maven_repository() -> Option<PathBuf> {
+    if cfg!(test) {
+        return None;
+    }
+    Some(dirs::home_dir()?.join(".m2").join("repository"))
+}
+
 /// 창 배치 파일. 테스트는 사용자 배치를 읽거나 덮어쓰지 않는다.
 fn layout_path() -> Option<PathBuf> {
     if cfg!(test) {
@@ -515,6 +531,9 @@ impl FerriteApp {
     /// `start`는 명령줄로 받은 시작 경로. 폴더면 프로젝트로, 파일이면 상위 폴더를 프로젝트로 열고 파일을 연다.
     pub fn new(cc: &eframe::CreationContext<'_>, start: Option<PathBuf>) -> Self {
         crate::fonts::install_korean_font(&cc.egui_ctx);
+        if let Some(dir) = jdbc_dir() {
+            ferrite_db::jdbc::set_home(dir);
+        }
         let (settings, settings_error) = load_settings();
         apply_settings(&cc.egui_ctx, &settings);
         let start = start.map(|p| real_path(&p));
@@ -573,7 +592,8 @@ impl FerriteApp {
             config_gen: Default::default(),
             new_project: crate::new_project::NewProjectWindow::new(templates_root()),
             commngt: crate::commngt_ui::CommngtWindow::new(templates_dir()),
-            db: crate::db_ui::DbWindow::new(connections_path(), secret_store()),
+            db: crate::db_ui::DbWindow::new(connections_path(), secret_store())
+                .with_driver_dirs(maven_repository(), jdbc_dir().map(|d| d.join("drivers"))),
             sql: Default::default(),
             layout: dock::load(layout_path().as_deref()),
             pending: std::collections::HashMap::new(),
@@ -2155,7 +2175,8 @@ impl FerriteApp {
                     ui.separator();
                     if ui.button("DB 연결…").clicked() {
                         ui.close();
-                        self.db.show();
+                        let root = self.tree.as_ref().map(|t| t.root().to_path_buf());
+                        self.db.show(root.as_deref());
                     }
                     if ui.button("SQL 콘솔").clicked() {
                         ui.close();
@@ -4924,6 +4945,57 @@ mod tests {
             .unwrap();
         assert_eq!(pg.port, 5432);
         assert_eq!(app.db.password(&pg.id).unwrap().as_deref(), Some("비밀!"));
+
+        // Oracle 연결: 드라이버 jar가 없으면 알리고, 프로젝트의 WEB-INF/lib에서 찾은 jar를 넣는다.
+        // 시험은 받을 곳이 없어 [받기]가 꺼져 있다.
+        harness
+            .get_by_role_and_label(Role::Button, "Oracle")
+            .click();
+        harness.run_ok();
+        type_into(&mut harness, "이름", "오라클");
+        type_into(&mut harness, "서비스 이름", "XE");
+        type_into(&mut harness, "사용자", "egov");
+        harness.get_by_label("저장").click();
+        harness.run_ok();
+        harness.get_by_label_contains("드라이버 jar를 고르세요");
+        assert!(
+            harness
+                .get_by_label_contains("받기(")
+                .accesskit_node()
+                .is_disabled()
+        );
+        harness.get_by_label("취소").click();
+        harness.run_ok();
+        let lib = dir.join("src/main/webapp/WEB-INF/lib");
+        fs::create_dir_all(&lib).unwrap();
+        fs::write(lib.join("ojdbc6.jar"), b"").unwrap();
+        harness.get_by_label("도구").click();
+        harness.run_ok();
+        harness.get_by_label("DB 연결…").click();
+        harness.run_ok();
+        harness
+            .get_by_role_and_label(Role::Button, "Oracle")
+            .click();
+        harness.run_ok();
+        type_into(&mut harness, "이름", "오라클");
+        type_into(&mut harness, "서비스 이름", "XE");
+        type_into(&mut harness, "사용자", "egov");
+        harness.get_by_label("ojdbc6.jar");
+        harness.get_by_label("추가").click();
+        harness.run_ok();
+        harness.get_by_label("빼기");
+        harness.get_by_label("저장").click();
+        harness.run_ok();
+        let oracle = harness
+            .state()
+            .db
+            .connections()
+            .iter()
+            .find(|c| c.name == "오라클")
+            .cloned()
+            .unwrap();
+        assert_eq!(oracle.drivers, [lib.join("ojdbc6.jar")]);
+        assert_eq!(oracle.jdbc_url(), "jdbc:oracle:thin:@//localhost:1521/XE");
         drop(harness);
         remove_project(&dir);
     }

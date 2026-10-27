@@ -7,6 +7,7 @@
 pub mod config;
 pub mod edit;
 pub mod export;
+pub mod jdbc;
 mod mysql;
 mod postgres;
 pub mod result;
@@ -183,6 +184,10 @@ impl Connection {
                     .map(|(d, c)| (Box::new(d) as Box<dyn Driver>, c)),
                 Kind::MariaDb => mysql::connect(&config, password.as_deref())
                     .map(|(d, c)| (Box::new(d) as Box<dyn Driver>, c)),
+                Kind::Oracle | Kind::Tibero | Kind::Cubrid => {
+                    jdbc::connect(&config, password.as_deref())
+                        .map(|(d, c)| (Box::new(d) as Box<dyn Driver>, c))
+                }
             };
             let mut driver = match connected {
                 Ok((driver, canceller)) => {

@@ -1667,6 +1667,7 @@ dependencies = [
  "postgres",
  "rusqlite",
  "serde",
+ "serde_json",
  "toml",
 ]
 

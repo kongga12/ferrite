@@ -107,11 +107,11 @@ impl Editable {
     }
 }
 
-/// 식별자를 따옴표로 감싼다(MariaDB는 역따옴표).
+/// 식별자를 따옴표로 감싼다(MariaDB는 역따옴표, 나머지는 큰따옴표).
 pub(crate) fn quote(kind: Kind, name: &str) -> String {
     match kind {
         Kind::MariaDb => format!("`{}`", name.replace('`', "``")),
-        Kind::Sqlite | Kind::Postgres => format!("\"{}\"", name.replace('"', "\"\"")),
+        _ => format!("\"{}\"", name.replace('"', "\"\"")),
     }
 }
 

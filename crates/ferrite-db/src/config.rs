@@ -15,16 +15,29 @@ pub enum Kind {
     Postgres,
     #[serde(rename = "mariadb")]
     MariaDb,
+    Oracle,
+    Tibero,
+    Cubrid,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 3] = [Kind::Postgres, Kind::MariaDb, Kind::Sqlite];
+    pub const ALL: [Kind; 6] = [
+        Kind::Postgres,
+        Kind::MariaDb,
+        Kind::Oracle,
+        Kind::Tibero,
+        Kind::Cubrid,
+        Kind::Sqlite,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
             Kind::Sqlite => "SQLite",
             Kind::Postgres => "PostgreSQL",
             Kind::MariaDb => "MariaDB·MySQL",
+            Kind::Oracle => "Oracle",
+            Kind::Tibero => "Tibero",
+            Kind::Cubrid => "CUBRID",
         }
     }
 
@@ -33,6 +46,9 @@ impl Kind {
             Kind::Sqlite => 0,
             Kind::Postgres => 5432,
             Kind::MariaDb => 3306,
+            Kind::Oracle => 1521,
+            Kind::Tibero => 8629,
+            Kind::Cubrid => 33000,
         }
     }
 
@@ -41,17 +57,36 @@ impl Kind {
         self != Kind::Sqlite
     }
 
+    /// JDBC 사이드카로 여는 종류(드라이버 jar가 필요하다).
+    pub fn is_jdbc(self) -> bool {
+        matches!(self, Kind::Oracle | Kind::Tibero | Kind::Cubrid)
+    }
+
+    /// 연결 창의 "데이터베이스" 칸 이름.
+    pub fn database_label(self) -> &'static str {
+        match self {
+            Kind::Oracle => "서비스 이름",
+            _ => "데이터베이스",
+        }
+    }
+
     /// 따옴표 안의 역슬래시가 이스케이프인지(MariaDB·MySQL 기본 설정).
     pub fn backslash_escapes(self) -> bool {
         self == Kind::MariaDb
     }
 
-    /// 실행 계획을 보는 문장.
-    pub fn explain(self, sql: &str) -> String {
-        match self {
-            Kind::Sqlite => format!("EXPLAIN QUERY PLAN {sql}"),
-            Kind::Postgres | Kind::MariaDb => format!("EXPLAIN {sql}"),
-        }
+    /// 실행 계획을 보는 문장들(차례로 실행한다). 아직 못 보는 종류는 `None`.
+    pub fn explain(self, sql: &str) -> Option<Vec<String>> {
+        Some(match self {
+            Kind::Sqlite => vec![format!("EXPLAIN QUERY PLAN {sql}")],
+            Kind::Postgres | Kind::MariaDb => vec![format!("EXPLAIN {sql}")],
+            Kind::Oracle => vec![
+                format!("EXPLAIN PLAN FOR {sql}"),
+                "SELECT plan_table_output FROM TABLE(DBMS_XPLAN.DISPLAY())".into(),
+            ],
+            // Tibero는 시험할 서버가 없고, CUBRID는 계획을 문장이 아닌 드라이버 API로만 준다.
+            Kind::Tibero | Kind::Cubrid => return None,
+        })
     }
 }
 
@@ -73,6 +108,12 @@ pub struct ConnectionConfig {
     /// SQLite 파일.
     #[serde(default)]
     pub path: Option<PathBuf>,
+    /// JDBC URL. 적으면 호스트·포트·데이터베이스 대신 쓴다(Oracle SID 등).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub url: String,
+    /// JDBC 드라이버 jar(Oracle은 orai18n.jar도 함께 둘 수 있다).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub drivers: Vec<PathBuf>,
 }
 
 impl ConnectionConfig {
@@ -90,6 +131,8 @@ impl ConnectionConfig {
             database: String::new(),
             user: String::new(),
             path: None,
+            url: String::new(),
+            drivers: Vec::new(),
         }
     }
 
@@ -100,10 +143,28 @@ impl ConnectionConfig {
                 .path
                 .as_ref()
                 .map_or_else(String::new, |p| p.display().to_string()),
+            _ if !self.url.trim().is_empty() => format!("{} · {}", self.user, self.url.trim()),
             _ => format!(
                 "{}@{}:{}/{}",
                 self.user, self.host, self.port, self.database
             ),
+        }
+    }
+
+    /// JDBC 종류의 URL. 적은 URL이 없으면 호스트·포트·데이터베이스로 만든다.
+    pub fn jdbc_url(&self) -> String {
+        let url = self.url.trim();
+        if !url.is_empty() {
+            return url.to_owned();
+        }
+        let (host, port, db) = (self.host.trim(), self.port, self.database.trim());
+        match self.kind {
+            // 서비스 이름. SID로만 여는 DB는 URL(`jdbc:oracle:thin:@호스트:포트:SID`)을 적는다.
+            Kind::Oracle => format!("jdbc:oracle:thin:@//{host}:{port}/{db}"),
+            Kind::Tibero => format!("jdbc:tibero:thin:@{host}:{port}:{db}"),
+            // 사용자·비밀번호 자리는 비우고 따로 넘긴다.
+            Kind::Cubrid => format!("jdbc:cubrid:{host}:{port}:{db}:::"),
+            Kind::Sqlite | Kind::Postgres | Kind::MariaDb => String::new(),
         }
     }
 
@@ -113,18 +174,32 @@ impl ConnectionConfig {
         if self.name.trim().is_empty() {
             problems.push("이름을 적으세요");
         }
-        if self.kind.is_server() {
+        let url = self.url.trim();
+        if self.kind.is_jdbc() && !url.is_empty() {
+            if !url.starts_with("jdbc:") {
+                problems.push("JDBC URL은 jdbc:로 시작해야 합니다");
+            }
+        } else if self.kind.is_server() {
             if self.host.trim().is_empty() {
                 problems.push("호스트를 적으세요");
             }
             if self.port == 0 {
                 problems.push("포트를 적으세요");
             }
-            if self.user.trim().is_empty() {
-                problems.push("사용자를 적으세요");
+            if self.kind.is_jdbc() && self.database.trim().is_empty() {
+                problems.push(match self.kind {
+                    Kind::Oracle => "서비스 이름(또는 JDBC URL)을 적으세요",
+                    _ => "데이터베이스를 적으세요",
+                });
             }
         } else if self.path.is_none() {
             problems.push("SQLite 파일을 고르세요");
+        }
+        if self.kind.is_server() && self.user.trim().is_empty() {
+            problems.push("사용자를 적으세요");
+        }
+        if self.kind.is_jdbc() && self.drivers.is_empty() {
+            problems.push("드라이버 jar를 고르세요");
         }
         problems
     }
@@ -212,5 +287,49 @@ mod tests {
         let lite = ConnectionConfig::new(Kind::Sqlite);
         assert!(lite.problems().contains(&"SQLite 파일을 고르세요"));
         assert!(load(Path::new("Cargo.toml")).is_err(), "다른 TOML은 오류");
+    }
+
+    #[test]
+    fn jdbc_url을_만들고_빠진_드라이버를_알린다() {
+        let mut oracle = ConnectionConfig::new(Kind::Oracle);
+        oracle.name = "운영".into();
+        oracle.user = "egov".into();
+        oracle.port = 1521;
+        assert_eq!(
+            oracle.problems(),
+            [
+                "서비스 이름(또는 JDBC URL)을 적으세요",
+                "드라이버 jar를 고르세요"
+            ]
+        );
+        oracle.database = "XE".into();
+        oracle.drivers = vec![PathBuf::from("ojdbc6.jar")];
+        assert!(oracle.problems().is_empty());
+        assert_eq!(oracle.jdbc_url(), "jdbc:oracle:thin:@//localhost:1521/XE");
+        // URL을 적으면 호스트·포트·이름 대신 쓴다(SID).
+        oracle.url = " jdbc:oracle:thin:@db:1521:ORCL ".into();
+        oracle.host.clear();
+        oracle.database.clear();
+        assert!(oracle.problems().is_empty());
+        assert_eq!(oracle.jdbc_url(), "jdbc:oracle:thin:@db:1521:ORCL");
+        assert_eq!(oracle.summary(), "egov · jdbc:oracle:thin:@db:1521:ORCL");
+        oracle.url = "oracle:thin:@db".into();
+        assert_eq!(oracle.problems(), ["JDBC URL은 jdbc:로 시작해야 합니다"]);
+
+        let mut cubrid = ConnectionConfig::new(Kind::Cubrid);
+        cubrid.database = "demodb".into();
+        assert_eq!(cubrid.jdbc_url(), "jdbc:cubrid:localhost:33000:demodb:::");
+        let mut tibero = ConnectionConfig::new(Kind::Tibero);
+        tibero.database = "tibero".into();
+        assert_eq!(tibero.jdbc_url(), "jdbc:tibero:thin:@localhost:8629:tibero");
+
+        // 드라이버 목록은 저장하고, 비어 있으면 파일에 쓰지 않는다.
+        let dir = std::env::temp_dir().join(format!("ferrite-db-jdbc-{}", std::process::id()));
+        let path = dir.join("connections.toml");
+        save(&path, &[oracle.clone(), cubrid.clone()]).unwrap();
+        assert_eq!(load(&path).unwrap(), [oracle, cubrid]);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(text.matches("drivers").count(), 1, "{text}");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

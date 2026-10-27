@@ -1,14 +1,17 @@
 //! DB 연결 창(도구 > DB 연결). 연결을 추가·고치기·지우기·시험한다. 연결 목록은 설정 폴더의
-//! `connections.toml`에, 비밀번호는 OS 키체인에 둔다(파일에 쓰지 않는다).
+//! `connections.toml`에, 비밀번호는 OS 키체인에 둔다(파일에 쓰지 않는다). JDBC 종류(Oracle·Tibero·
+//! CUBRID)는 드라이버 jar를 고르거나, 로컬 Maven 저장소·프로젝트에서 찾거나, [받기]로 받는다.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use eframe::egui;
 use ferrite_db::config::{self, ConnectionConfig, Kind};
+use ferrite_db::jdbc::{self, DOWNLOADS};
 use ferrite_db::secret::SecretStore;
 use ferrite_db::{Connection, Event};
+use ferrite_lsp::install;
 
 /// 고치는 중인 연결.
 struct Editor {
@@ -20,11 +23,20 @@ struct Editor {
     has_saved_password: bool,
     is_new: bool,
     error: Option<String>,
+    /// 로컬 Maven 저장소·프로젝트에서 찾은 드라이버 jar(JDBC 종류).
+    found: Vec<PathBuf>,
 }
 
 enum Test {
     Running(Connection),
     Passed(String),
+    Failed(String),
+}
+
+/// [받기] 진행. 작업 스레드가 바꾼다.
+enum Download {
+    Running { received: u64, total: u64 },
+    Done(Vec<PathBuf>),
     Failed(String),
 }
 
@@ -39,6 +51,13 @@ pub struct DbWindow {
     /// 연결 고유 값 → 시험 결과.
     tests: HashMap<String, Test>,
     confirm_delete: Option<String>,
+    /// 드라이버 jar를 찾는 로컬 Maven 저장소.
+    m2: Option<PathBuf>,
+    /// [받기]로 받은 드라이버를 두는 곳. 없으면(시험) 받지 않는다.
+    drivers_dir: Option<PathBuf>,
+    /// 열린 프로젝트(`WEB-INF/lib` 등에서 드라이버 jar를 찾는다).
+    project: Option<PathBuf>,
+    download: Option<(Kind, Arc<Mutex<Download>>)>,
 }
 
 impl DbWindow {
@@ -57,11 +76,24 @@ impl DbWindow {
             editor: None,
             tests: HashMap::new(),
             confirm_delete: None,
+            m2: None,
+            drivers_dir: None,
+            project: None,
+            download: None,
         }
     }
 
-    pub fn show(&mut self) {
+    /// 드라이버 jar를 찾을 로컬 Maven 저장소와 [받기]로 받은 jar를 둘 곳.
+    pub fn with_driver_dirs(mut self, m2: Option<PathBuf>, drivers_dir: Option<PathBuf>) -> Self {
+        self.m2 = m2;
+        self.drivers_dir = drivers_dir;
+        self
+    }
+
+    /// 창을 연다. `project`의 lib 폴더에서도 드라이버 jar를 찾는다.
+    pub fn show(&mut self, project: Option<&Path>) {
         self.open = true;
+        self.project = project.map(Path::to_path_buf);
     }
 
     pub fn connections(&self) -> &[ConnectionConfig] {
@@ -83,6 +115,7 @@ impl DbWindow {
 
     fn edit(&mut self, config: ConnectionConfig, is_new: bool) {
         let has_saved_password = !is_new && matches!(self.secrets.get(&config.id), Ok(Some(_)));
+        let found = jdbc::candidates(config.kind, self.m2.as_deref(), self.project.as_deref());
         self.editor = Some(Editor {
             config,
             password: String::new(),
@@ -90,7 +123,74 @@ impl DbWindow {
             has_saved_password,
             is_new,
             error: None,
+            found,
         });
+    }
+
+    /// [받기]: 고정한 판의 드라이버를 받아(받아 둔 것은 그대로 쓴다) 고치는 연결에 넣는다.
+    fn start_download(&mut self, kind: Kind, ctx: &egui::Context) {
+        let Some(dir) = self.drivers_dir.clone() else {
+            return;
+        };
+        let total = DOWNLOADS
+            .iter()
+            .filter(|d| d.kind == kind)
+            .map(|d| d.size)
+            .sum();
+        let state = Arc::new(Mutex::new(Download::Running { received: 0, total }));
+        let (shared, wake) = (state.clone(), ctx.clone());
+        let set = move |next: Download| {
+            *shared.lock().unwrap_or_else(PoisonError::into_inner) = next;
+            wake.request_repaint();
+        };
+        std::thread::spawn(move || {
+            let (mut done, mut files) = (0, Vec::new());
+            for download in DOWNLOADS.iter().filter(|d| d.kind == kind) {
+                let dest = dir.join(download.file);
+                // 받은 파일은 크기·해시를 맞춘 뒤에만 이 이름이 된다.
+                if !dest.is_file() {
+                    let result = install::download(
+                        download.url,
+                        download.size,
+                        download.sha256,
+                        &dest,
+                        &mut |received, _| {
+                            set(Download::Running {
+                                received: done + received,
+                                total,
+                            });
+                        },
+                    );
+                    if let Err(e) = result {
+                        set(Download::Failed(format!("{}: {e}", download.file)));
+                        return;
+                    }
+                }
+                done += download.size;
+                files.push(dest);
+            }
+            set(Download::Done(files));
+        });
+        self.download = Some((kind, state));
+    }
+
+    /// 받기가 끝났으면 고치는 연결(같은 종류)에 jar를 넣는다.
+    fn poll_download(&mut self) {
+        let Some((kind, state)) = &self.download else {
+            return;
+        };
+        let files = match &*state.lock().unwrap_or_else(PoisonError::into_inner) {
+            Download::Done(files) => files.clone(),
+            _ => return,
+        };
+        if let Some(editor) = self.editor.as_mut().filter(|e| e.config.kind == *kind) {
+            for file in files {
+                if !editor.config.drivers.contains(&file) {
+                    editor.config.drivers.push(file);
+                }
+            }
+        }
+        self.download = None;
     }
 
     /// 연결을 시험한다. 고치는 중이면 적은 값과 비밀번호로 한다.
@@ -182,6 +282,7 @@ impl DbWindow {
             return None;
         }
         self.poll_tests();
+        self.poll_download();
         let mut open = self.open;
         let mut action = None;
         egui::Window::new("DB 연결")
@@ -226,7 +327,7 @@ impl DbWindow {
                     });
                     ui.separator();
                 }
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     ui.label("새 연결");
                     for kind in Kind::ALL {
                         if ui.button(kind.label()).clicked() {
@@ -236,7 +337,17 @@ impl DbWindow {
                 });
                 if let Some(editor) = &mut self.editor {
                     ui.separator();
-                    if let Some(chosen) = editor_ui(ui, editor, self.tests.get(&editor.config.id)) {
+                    let download = Downloads {
+                        enabled: self.drivers_dir.is_some(),
+                        state: self
+                            .download
+                            .as_ref()
+                            .filter(|(kind, _)| *kind == editor.config.kind)
+                            .map(|(_, state)| state.as_ref()),
+                    };
+                    if let Some(chosen) =
+                        editor_ui(ui, editor, self.tests.get(&editor.config.id), download)
+                    {
                         action = Some(chosen);
                     }
                 }
@@ -261,13 +372,23 @@ impl DbWindow {
                 self.delete(&id);
             }
             Some(Action::Console(config)) => return Some(config),
+            Some(Action::Download(kind)) => self.start_download(kind, ctx),
             None => {}
         }
         None
     }
 }
 
+/// 연결 고치기에 보일 [받기] 상태.
+struct Downloads<'a> {
+    /// 받을 곳이 있다(시험은 받지 않는다).
+    enabled: bool,
+    /// 이 종류를 받는 중이거나 실패했다.
+    state: Option<&'a Mutex<Download>>,
+}
+
 enum Action {
+    Download(Kind),
     Console(ConnectionConfig),
     Test(ConnectionConfig),
     TestEditor,
@@ -300,7 +421,12 @@ fn test_label(ui: &mut egui::Ui, test: Option<&Test>) {
 }
 
 /// 연결 고치기. 고른 일을 돌려준다.
-fn editor_ui(ui: &mut egui::Ui, editor: &mut Editor, test: Option<&Test>) -> Option<Action> {
+fn editor_ui(
+    ui: &mut egui::Ui,
+    editor: &mut Editor,
+    test: Option<&Test>,
+    download: Downloads,
+) -> Option<Action> {
     let mut action = None;
     ui.strong(if editor.is_new {
         "새 연결"
@@ -308,6 +434,11 @@ fn editor_ui(ui: &mut egui::Ui, editor: &mut Editor, test: Option<&Test>) -> Opt
         "연결 고치기"
     });
     let config = &mut editor.config;
+    let built_url = {
+        let mut built = config.clone();
+        built.url.clear();
+        built.jdbc_url()
+    };
     egui::Grid::new("db_editor")
         .num_columns(2)
         .spacing([12.0, 6.0])
@@ -328,7 +459,7 @@ fn editor_ui(ui: &mut egui::Ui, editor: &mut Editor, test: Option<&Test>) -> Opt
                 ui.add(egui::DragValue::new(&mut config.port).range(1..=65535))
                     .labelled_by(label.id);
                 ui.end_row();
-                field(ui, "데이터베이스", &mut config.database);
+                field(ui, config.kind.database_label(), &mut config.database);
                 field(ui, "사용자", &mut config.user);
                 let label = ui.label("비밀번호");
                 ui.horizontal(|ui| {
@@ -349,6 +480,22 @@ fn editor_ui(ui: &mut egui::Ui, editor: &mut Editor, test: Option<&Test>) -> Opt
                     }
                 });
                 ui.end_row();
+                if config.kind.is_jdbc() {
+                    let label = ui.label("JDBC URL");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut config.url)
+                            .hint_text(format!("비우면 {built_url}"))
+                            .desired_width(320.0),
+                    )
+                    .labelled_by(label.id)
+                    .on_hover_text("적으면 호스트·포트·데이터베이스 대신 씁니다(Oracle SID 등)");
+                    ui.end_row();
+                    ui.label("드라이버 jar");
+                    if let Some(chosen) = drivers_ui(ui, config, &editor.found, &download) {
+                        action = Some(chosen);
+                    }
+                    ui.end_row();
+                }
             } else {
                 let label = ui.label("파일");
                 ui.horizontal(|ui| {
@@ -389,6 +536,109 @@ fn editor_ui(ui: &mut egui::Ui, editor: &mut Editor, test: Option<&Test>) -> Opt
             action = Some(Action::CancelEdit);
         }
         test_label(ui, test);
+    });
+    action
+}
+
+fn file_name(path: &Path) -> String {
+    path.file_name().map_or_else(
+        || path.display().to_string(),
+        |n| n.to_string_lossy().into_owned(),
+    )
+}
+
+/// JDBC 드라이버 jar: 고른 것(빼기), [jar 고르기…], [받기], 찾은 것(추가).
+fn drivers_ui(
+    ui: &mut egui::Ui,
+    config: &mut ConnectionConfig,
+    found: &[PathBuf],
+    download: &Downloads,
+) -> Option<Action> {
+    let mut action = None;
+    ui.vertical(|ui| {
+        let mut remove = None;
+        for (index, jar) in config.drivers.iter().enumerate() {
+            ui.horizontal(|ui| {
+                ui.label(file_name(jar))
+                    .on_hover_text(jar.display().to_string());
+                if ui.small_button("빼기").clicked() {
+                    remove = Some(index);
+                }
+            });
+        }
+        if let Some(index) = remove {
+            config.drivers.remove(index);
+        }
+        let add = |config: &mut ConnectionConfig, jar: PathBuf| {
+            if !config.drivers.contains(&jar) {
+                config.drivers.push(jar);
+            }
+        };
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("jar 고르기…").clicked()
+                && let Some(files) = rfd::FileDialog::new()
+                    .set_title("JDBC 드라이버 jar")
+                    .add_filter("jar", &["jar"])
+                    .pick_files()
+            {
+                for file in files {
+                    add(config, file);
+                }
+            }
+            let pinned: Vec<_> = DOWNLOADS.iter().filter(|d| d.kind == config.kind).collect();
+            let state = download
+                .state
+                .map(|s| s.lock().unwrap_or_else(PoisonError::into_inner));
+            let running = matches!(state.as_deref(), Some(Download::Running { .. }));
+            if !pinned.is_empty() {
+                let size: u64 = pinned.iter().map(|d| d.size).sum();
+                let names: Vec<&str> = pinned.iter().map(|d| d.file).collect();
+                let host = pinned[0].url.split('/').nth(2).unwrap_or_default();
+                if ui
+                    .add_enabled(
+                        download.enabled && !running,
+                        egui::Button::new(format!("받기({:.1}MB)", size as f64 / 1_000_000.0)),
+                    )
+                    .on_hover_text(format!(
+                        "{host}에서 {}를 받습니다(크기·SHA-256 확인)",
+                        names.join(", ")
+                    ))
+                    .clicked()
+                {
+                    action = Some(Action::Download(config.kind));
+                }
+            }
+            match state.as_deref() {
+                Some(Download::Running { received, total }) => {
+                    ui.spinner();
+                    ui.label(format!(
+                        "받는 중 {:.1}/{:.1}MB",
+                        *received as f64 / 1_000_000.0,
+                        *total as f64 / 1_000_000.0
+                    ));
+                }
+                Some(Download::Failed(e)) => {
+                    ui.colored_label(ui.visuals().error_fg_color, format!("받지 못했습니다: {e}"));
+                }
+                _ => {}
+            }
+        });
+        let rest: Vec<&PathBuf> = found
+            .iter()
+            .filter(|jar| !config.drivers.contains(jar))
+            .collect();
+        if !rest.is_empty() {
+            ui.weak("찾은 jar(로컬 Maven 저장소·프로젝트)");
+            for jar in rest {
+                ui.horizontal(|ui| {
+                    if ui.small_button("추가").clicked() {
+                        add(config, jar.clone());
+                    }
+                    ui.label(file_name(jar))
+                        .on_hover_text(jar.display().to_string());
+                });
+            }
+        }
     });
     action
 }

@@ -678,8 +678,8 @@
 - 연결 관리: 비밀번호는 OS 키체인(keyring)에 저장하고 설정 파일에는 평문으로 저장하지 않음
 - 드라이버: PostgreSQL(postgres), MariaDB(mysql), SQLite(rusqlite). 처음 계획한 sqlx는 비동기 전용이라, 비동기 런타임 없이 스레드와 채널로 짠 다른 도구(LSP·DAP·터미널)와 맞추려고 동기 드라이버를 쓴다.
 - JDBC 사이드카(Java): Oracle 11g, Tibero, CUBRID
-  - stdio JSON-RPC로 통신한다.
-  - 쿼리는 반드시 PreparedStatement 파라미터 바인딩으로 실행한다.
+  - 표준 입출력으로 한 줄에 JSON 요청·응답 하나씩 주고받는다.
+  - 값은 반드시 PreparedStatement 파라미터 바인딩으로 넣는다.
 - 스키마 브라우저, SQL 콘솔(실행 계획 포함), 결과 그리드(가상 스크롤, CSV 내보내기)
 - Phase 2b와 연결: 매퍼 XML SQL의 테이블·컬럼 완성과 존재 여부 검증
 - 쿼리 취소, 대용량 결과 페이징, 트랜잭션 모드(수동/자동 커밋) 표시
@@ -747,7 +747,34 @@
     - 창 테스트(SQLite): 두 번 눌러 이름 고치기(Enter), NULL 칸을 값으로([저장]), 트랜잭션 안에서 NULL로 고친 뒤 롤백하면 다시 실행했을 때 앞 값, 기본 키가 빠진 조회는 읽기 전용
     - 실제 앱(Windows): 2,000행 SQLite 표에서 칸을 두 번 눌러 고치고, 파일에 바뀐 값이 들어간 것을 확인했다. 임시 연결 목록은 확인 뒤 지웠다.
   - 찾은 것: kittest는 기본으로 한 프레임에 0.25초를 흘려 두 번 누르기가 egui의 더블 클릭 간격(0.3초)을 넘는다. 콘솔 창 시험은 한 프레임을 1/60초로 둔다. 또 0.3초 안에 다른 곳을 누른 뒤의 두 번 누르기는 egui가 세 번 누르기로 센다.
-- [ ] 5-3 JDBC 사이드카(Oracle 11g·Tibero·CUBRID)
+- [x] 5-3 JDBC 사이드카(Oracle 11g·Tibero·CUBRID)
+  - 사이드카: `crates/ferrite-db/sidecar/FerriteJdbc.java` 한 파일(Java 8 문법, 의존 없음). 연결마다 `java` 프로세스 하나를 띄워 표준 입출력으로 한 줄에 JSON 하나씩 주고받는다(요청 `{"method", "params"}`, 응답 `{"result"}`·`{"error"}`). 멈춤(`cancel`)만 응답 없이 읽는 스레드에서 바로 `Statement.cancel()`한다. 드라이버가 표준 출력에 쓰는 기록은 표준 오류로 돌리고, 사이드카가 끝나면 표준 오류의 마지막 줄을 오류에 붙인다.
+  - 컴파일: 처음 쓸 때 사용자 JDK의 javac(JAVA_HOME, PATH)로 `--release 8`로 컴파일해 사용자 데이터 폴더의 `ferrite/jdbc/<소스 해시>/`에 둔다(javac 8이면 그대로). 소스가 바뀌면 다른 폴더라 다시 컴파일한다. JRE만 있으면 "JDK가 필요합니다".
+  - 드라이버 jar: Ferrite는 싣지 않는다. 연결 창에서 (1) [jar 고르기…], (2) 로컬 Maven 저장소(`~/.m2/repository`)와 열린 프로젝트의 `WEB-INF/lib`·`lib`에서 이름으로 찾은 jar를 [추가], (3) [받기]로 받는다. 클래스는 종류마다 정해 싣는다(`oracle.jdbc.OracleDriver`, `com.tmax.tibero.jdbc.TbDriver`, `cubrid.jdbc.driver.CUBRIDDriver`).
+    | 받기 | 저장소 | 라이선스 |
+    |---|---|---|
+    | ojdbc6 11.2.0.4, orai18n 11.2.0.4(한글 문자셋 DB) | Maven Central | Oracle Free Use Terms |
+    | cubrid-jdbc 11.2.0.0035 | maven.cubrid.org | BSD-3-Clause |
+    - 크기·SHA-256을 고정한다. 저장소의 SHA-1·크기와 맞는 jar에서 SHA-256을 구했다. Tibero는 공개 저장소가 없어 직접 고른다.
+  - 연결: 호스트·포트·데이터베이스로 URL을 만든다(Oracle `jdbc:oracle:thin:@//호스트:포트/서비스`, Tibero `jdbc:tibero:thin:@호스트:포트:DB`, CUBRID `jdbc:cubrid:호스트:포트:DB:::`). [JDBC URL]을 적으면 그것을 쓴다(Oracle SID 등).
+  - 실행: `Statement.execute`. 결과 집합이면 500행씩 보내고 커서를 쥔 채 기다린다(다른 드라이버와 같다). 값은 드라이버가 보이는 글자 그대로(`getString`), 이진 값(RAW·BLOB 등)은 바이트, CLOB은 글자. 끝의 `;`는 뗀다(Oracle ORA-00911). 값 바인딩이 필요한 문장은 PreparedStatement 파라미터로만 실행한다.
+  - 실행 계획: Oracle은 `EXPLAIN PLAN FOR` 뒤 `DBMS_XPLAN.DISPLAY()`를 본다. Tibero(시험할 서버가 없다)·CUBRID(계획을 문장이 아니라 드라이버 API로만 준다)는 [실행 계획]을 끈다.
+  - 결과 그리드는 읽기 전용이다. Oracle 드라이버는 결과 열의 표를 알려 주지 않고, CUBRID는 별칭을 열 이름으로 알려 줘 엉뚱한 열·행을 고칠 수 있다. 그리드 편집은 5-3b에서 SQL을 읽어 표·열을 찾는 방식으로 한다.
+  - 찾은 것
+    - Oracle 드라이버는 문장을 멈출 때 TCP 긴급 데이터(OOB)를 보내는데 Docker(그리고 흔한 NAT·방화벽)를 거치면 닿지 않아 멈추지 않는다. `oracle.net.disableOob=true`로 연결 안의 멈춤 신호를 쓰게 하니 1.2초 만에 ORA-01013으로 멈췄다.
+    - Oracle 드라이버는 트랜잭션 중에 연결을 닫으면 커밋한다. 사이드카는 닫기 전에 롤백한다(다른 DB처럼 커밋하지 않은 변경은 버린다).
+    - 문장이 도는 중에 Ferrite가 끝나면 사이드카의 입력이 끝난다. 사이드카는 실행 중인 문장을 멈추고, 10초 안에 끝나지 않으면 스스로 끝난다(서버가 끊긴 연결을 롤백한다). 처음에는 멈춤이 듣지 않은 문장 때문에 사이드카가 남았다.
+    - ojdbc6(JDBC 4.0)과 CUBRID 드라이버는 `Connection.getSchema()`가 없거나 지원하지 않는다. 사이드카는 쓰지 않는다.
+  - 검증
+    - 단위: URL 만들기·빠진 값(드라이버 jar, 서비스 이름, `jdbc:`), 드라이버 목록 저장, jar 이름으로 찾기(소스·문서 jar 빼기), JSON 칸·파라미터, 받을 드라이버 고정 값
+    - 공통 시나리오(Oracle XE 11g, CUBRID 11.2, 로컬 Docker): 1,234행을 세 페이지로, 읽다 말고 다음 문장, 자동 커밋 끄고 롤백·커밋, 오류 뒤 계속 쓰기, 실행 중 멈춤(데카르트 곱 조회)
+    - JDBC 시나리오: 따옴표·세미콜론·한글 값과 NULL을 파라미터로 넣기, 결과는 읽기 전용, 이진 값은 바이트, 트랜잭션 중에 닫으면 롤백(새 연결의 UPDATE가 앞 연결의 잠금이 풀리길 기다렸다가 2행을 바꾼다). Oracle은 실행 계획과 CLOB도 본다.
+    - 드라이버 싣기: 세 종류 jar로 닫힌 포트에 연결해 드라이버의 연결 오류가 나오는지(Tibero는 로컬 프로젝트의 tibero6 jar, 저장소에 넣지 않는다), jar가 없을 때, 다른 DB의 jar일 때
+    - 창 테스트: Oracle 연결에서 jar가 없으면 알리고, 프로젝트 `WEB-INF/lib`에서 찾은 jar를 [추가]해 저장한다. 시험은 받을 곳이 없어 [받기]가 꺼져 있다.
+    - CI(Linux): Oracle XE 11g·CUBRID 11.2 서비스 컨테이너, 러너의 JDK, `mvn dependency:get`으로 받은 드라이버
+    - 실제 앱(Windows): CUBRID 연결 시험(처음 쓸 때 사이드카 컴파일), SQL 콘솔에서 2,000행 표를 조회해 한글·NULL·날짜와 "1000행+ · 읽기 전용", 꺼진 [실행 계획]을 화면으로 확인했다. 임시 연결 목록과 사이드카 폴더는 확인 뒤 지웠다.
+    - 확인하지 않은 것: Tibero 서버 시나리오(공개 이미지가 없다. 드라이버 싣기와 연결 오류까지만), 실제 앱에서 [받기] 누르기(고정 값은 저장소의 SHA-1·크기와 맞춰 확인했다)
+- [ ] 5-3b JDBC 결과 그리드 편집(SQL을 읽어 한 표에서 온 열과 기본 키를 찾는다)
 - [ ] 5-4 스키마 브라우저, 매퍼 SQL의 테이블·컬럼 완성·검증
 - [ ] 3개 OS 검증
 
