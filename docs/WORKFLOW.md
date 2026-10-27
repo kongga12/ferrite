@@ -758,7 +758,7 @@
     - 크기·SHA-256을 고정한다. 저장소의 SHA-1·크기와 맞는 jar에서 SHA-256을 구했다. Tibero는 공개 저장소가 없어 직접 고른다.
   - 연결: 호스트·포트·데이터베이스로 URL을 만든다(Oracle `jdbc:oracle:thin:@//호스트:포트/서비스`, Tibero `jdbc:tibero:thin:@호스트:포트:DB`, CUBRID `jdbc:cubrid:호스트:포트:DB:::`). [JDBC URL]을 적으면 그것을 쓴다(Oracle SID 등).
   - 실행: `Statement.execute`. 결과 집합이면 500행씩 보내고 커서를 쥔 채 기다린다(다른 드라이버와 같다). 값은 드라이버가 보이는 글자 그대로(`getString`), 이진 값(RAW·BLOB 등)은 바이트, CLOB은 글자. 끝의 `;`는 뗀다(Oracle ORA-00911). 값 바인딩이 필요한 문장은 PreparedStatement 파라미터로만 실행한다.
-  - 실행 계획: Oracle은 `EXPLAIN PLAN FOR` 뒤 `DBMS_XPLAN.DISPLAY()`를 본다. Tibero(시험할 서버가 없다)·CUBRID(계획을 문장이 아니라 드라이버 API로만 준다)는 [실행 계획]을 끈다.
+  - 실행 계획: Oracle은 `EXPLAIN PLAN FOR` 뒤 `DBMS_XPLAN.DISPLAY()`를 본다. CUBRID(계획을 문장이 아니라 드라이버 API로만 준다)는 [실행 계획]을 끈다. Tibero는 5-3c에서 켰다.
   - 이 단계의 결과 그리드는 읽기 전용이었다. Oracle 드라이버는 결과 열의 표를 알려 주지 않고, CUBRID는 별칭을 열 이름으로 알려 줘 엉뚱한 열·행을 고칠 수 있다. 그리드 편집은 5-3b에서 SQL을 읽어 표·열을 찾는 방식으로 했다.
   - 찾은 것
     - Oracle 드라이버는 문장을 멈출 때 TCP 긴급 데이터(OOB)를 보내는데 Docker(그리고 흔한 NAT·방화벽)를 거치면 닿지 않아 멈추지 않는다. `oracle.net.disableOob=true`로 연결 안의 멈춤 신호를 쓰게 하니 1.2초 만에 ORA-01013으로 멈췄다.
@@ -773,7 +773,7 @@
     - 창 테스트: Oracle 연결에서 jar가 없으면 알리고, 프로젝트 `WEB-INF/lib`에서 찾은 jar를 [추가]해 저장한다. 시험은 받을 곳이 없어 [받기]가 꺼져 있다.
     - CI(Linux): Oracle XE 11g·CUBRID 11.2 서비스 컨테이너, 러너의 JDK, `mvn dependency:get`으로 받은 드라이버
     - 실제 앱(Windows): CUBRID 연결 시험(처음 쓸 때 사이드카 컴파일), SQL 콘솔에서 2,000행 표를 조회해 한글·NULL·날짜와 "1000행+ · 읽기 전용", 꺼진 [실행 계획]을 화면으로 확인했다. 임시 연결 목록과 사이드카 폴더는 확인 뒤 지웠다.
-    - 확인하지 않은 것: Tibero 서버 시나리오(공개 이미지가 없다. 드라이버 싣기와 연결 오류까지만), 실제 앱에서 [받기] 누르기(고정 값은 저장소의 SHA-1·크기와 맞춰 확인했다)
+    - 확인하지 않은 것: Tibero 서버 시나리오(5-3c에서 개발 서버로 했다), 실제 앱에서 [받기] 누르기(고정 값은 저장소의 SHA-1·크기와 맞춰 확인했다)
 - [x] 5-3b JDBC 결과 그리드 편집(SQL을 읽어 한 표에서 온 열과 기본 키를 찾는다)
   - 드라이버가 결과 열의 출처를 알려 주지 않으므로(Oracle은 표 없음, CUBRID는 `v AS n`을 n 열로 알림) SQL에서 찾는다(`ferrite-db/src/origin.rs`). 모르는 모양이면 읽기 전용이다(엉뚱한 열·행을 고치는 것보다 낫다).
     - 받는 모양: `SELECT [ALL] 항목들 FROM [스키마.]표 [[AS] 별칭] [WHERE …] [ORDER BY …] [FOR UPDATE] [OFFSET/FETCH/LIMIT]`. WHERE 안의 부분 조회는 괜찮다.
@@ -781,12 +781,20 @@
     - 고칠 수 있는 항목: `열`, `별칭.열`, `*`, `별칭.*`만. 별칭을 붙인 열(`name AS id`)과 식은 못 고친다. 항목 이름은 드라이버가 준 결과 열 이름과 같아야 한다(다르면 SQL을 잘못 읽은 것으로 본다).
   - 표의 열·기본 키: 사이드카가 `DatabaseMetaData.getColumns`·`getPrimaryKeys`로 알려 준다(결과를 읽는 중에도 묻는다). 스키마를 적지 않았으면 사용자 스키마의 표만 찾는다(동의어나 다른 스키마의 같은 이름 표를 고치지 않게). 없거나 둘이면 읽기 전용. 따옴표 없는 이름은 DB가 두는 대소문자로 바꿔 맞춘다(Oracle 대문자, CUBRID 소문자). CUBRID 11.2는 스키마 칸이 비고 표 이름이 `소유자.표`로 와서 나눈다.
   - Oracle 날짜: 드라이버는 DATE를 `2024-01-02 00:00:00.0`처럼 보인다. 세션 날짜 형식(NLS)에 기대지 않게 `CAST(TO_TIMESTAMP(?, 'YYYY-MM-DD HH24:MI:SS.FF') AS DATE)`(TIMESTAMP는 `TO_TIMESTAMP(…)`)로 넣는다. 날짜만 적어도 된다. CUBRID는 보인 글자를 그대로 넣어도 바뀐다.
-  - Tibero는 시험할 서버가 없어 아직 읽기 전용이다.
+  - Tibero는 5-3c에서 켰다.
   - 검증
     - 단위: 한 표 조회와 항목(별칭.열, 따옴표 식별자, 별, 주석·글자 안 FROM), 받지 않는 모양 14가지, 별칭 열·다른 별칭·이름이 다른 열은 고칠 수 없음, 대소문자 규칙, Oracle 날짜 UPDATE 문장
     - Oracle XE 11g·CUBRID 11.2(로컬 Docker): 5-2b 공통 편집 시나리오(복합 기본 키, 식 열, 따옴표·세미콜론 값, 글자로 적은 수, NULL, 같은 값 1행, 지워진 행 0행, 트랜잭션 안 틀린 값 뒤 롤백, 기본 키 없음·빠짐·두 표는 읽기 전용), `SELECT *`, 기본 키 이름을 별칭으로 붙인 열은 못 고치고 조건은 진짜 기본 키 값, Oracle DATE·TIMESTAMP를 보인 글자·날짜만으로 고치기
     - 실제 앱(Windows): CUBRID 2,000행 표에서 "dba.demo_emp · 칸을 두 번 눌러 고칩니다"를 보고 2행 이름을 두 번 눌러 고쳐, DB에서 그 행만 바뀐 것을 확인했다. 임시 연결 목록과 사이드카 폴더는 지웠다.
   - 찾은 것: 처음에는 ORDER BY 목록의 쉼표를 표를 더하는 쉼표로 읽어 `ORDER BY k1, k2` 조회를 읽기 전용으로 봤다(실서버 시나리오에서 찾음). 표를 더하는 쉼표는 표 이름 바로 뒤에서만 막는다.
+- [x] 5-3c Tibero 실서버 시험: 멈춤, 그리드 편집, 실행 계획
+  - 개발용 Tibero 6 서버(사용자가 준 접속 정보, 저장소 밖 `ref/.env`)와 로컬 프로젝트의 tibero6 드라이버(6.0, 저장소에 넣지 않는다)로 시험했다. CI에는 Tibero 이미지가 없어 돌지 않는다.
+  - 멈춤: Tibero 6은 `Statement.cancel()`·`setQueryTimeout` 모두 문장 종류와 상관없이 약 60초 뒤에야 멈춘다(JDBC-12040). `ALTER SYSTEM CANCEL SESSION`은 없다(구문 오류). 그래서 사이드카는 cancel 뒤 3초 안에 멈추지 않으면 다른 연결에서 이 연결의 세션(`V$MYSTAT`의 SID와 `V$SESSION`의 SERIAL#, 숫자만)을 `ALTER SYSTEM KILL SESSION`으로 끊고, 다시 연결해 자동 커밋 상태를 되살린 뒤 "세션을 끊고 다시 연결했습니다(커밋하지 않은 변경은 롤백됐습니다)"로 알린다. `V$` 뷰나 ALTER SYSTEM 권한이 없으면 끊지 않는다(약 60초 걸린다).
+    - 찾은 것: 처음에는 끊기 판단 직후 문장이 먼저 끝나 이미 쉬는 연결을 끊었고, 다음 문장이 실패했다. 끊기 판단과 문장 끝내기를 한 잠금으로 묶고, 끊는 중이면 끝날 때까지 기다린 뒤 다시 연결한다.
+  - 그리드 편집: Oracle과 같이 SQL에서 표를 찾는다(`getTableName`은 비어 있다). DATE는 `2024-01-02 00:00:00`으로 보이고 `TO_TIMESTAMP(?, 'YYYY-MM-DD HH24:MI:SS.FF')`로 되돌린다.
+  - 실행 계획: `DBMS_XPLAN`이 없어 `PLAN_TABLE`을 쓴다(STATEMENT_ID `ferrite`를 지우고, `EXPLAIN PLAN SET STATEMENT_ID`, 깊이대로 들여 OPERATION·OBJECT_NAME·COST). 자동 커밋을 끈 동안에는 이 DELETE·EXPLAIN이 사용자의 트랜잭션 안에서 돈다(롤백하면 계획 행도 사라지고, 커밋하면 남는다).
+  - 연결 속성 `program_name=Ferrite`로 DB 관리자가 `V$SESSION`에서 Ferrite 연결을 알아본다.
+  - 검증(Tibero 6 개발 서버, 두 번 연속 통과): 공통 시나리오(페이지, 읽다 말고 다음 문장, 롤백·커밋, 오류 뒤 계속, 멈춤 3초대), JDBC 시나리오(파라미터, 별칭 열, 이진 값, 닫을 때 롤백), 5-2b 공통 편집 시나리오, 스키마 시나리오, DATE·TIMESTAMP 고치기, 실행 계획
 - [x] 5-4 스키마 브라우저(도구 > 스키마 브라우저)
   - 연결의 기본 자리에 있는 표·뷰와 열(이름, DB가 보이는 형식)을 한 번에 읽는다(`Connection::load_schema` → `Event::Schema`). 콘솔 연결의 결과를 닫지 않게 따로 연결해 읽고 닫는다.
     | 종류 | 읽는 곳 | 범위 |

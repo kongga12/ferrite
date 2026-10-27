@@ -199,6 +199,63 @@ fn oracle로_시나리오를_돈다() {
 }
 
 #[test]
+fn tibero로_시나리오를_돈다() {
+    let Some((config, password)) = server(Kind::Tibero, "FERRITE_TEST_TIBERO") else {
+        return;
+    };
+    let (s, version) = open(&config, password.clone());
+    // Tibero 6은 멈춤 요청 뒤에도 문장을 돌려, 사이드카가 세션을 끊고 다시 연결한다(DBA 계정).
+    common::scenario_with(
+        s,
+        &version,
+        "Tibero",
+        "SELECT COUNT(*) FROM all_objects a, all_objects b, all_objects c",
+        Dialect::Oracle,
+    );
+    jdbc_scenario(&config, password.clone(), Dialect::Oracle);
+    common::edit_scenario(&config, password.clone());
+    common::schema_scenario(&config, password.clone());
+
+    // 날짜는 보이는 글자(`2024-01-02 00:00:00`)나 날짜만 적어 고친다.
+    let (mut s, _) = open(&config, password);
+    s.drop_table("ferrite_d");
+    s.exec("CREATE TABLE ferrite_d (id INT PRIMARY KEY, d DATE, t TIMESTAMP)");
+    s.exec(
+        "INSERT INTO ferrite_d VALUES (1, DATE '2024-01-02', TIMESTAMP '2024-01-02 03:04:05.6')",
+    );
+    let (editable, rows) = s.query_editable("SELECT * FROM ferrite_d");
+    let editable = editable.expect("Tibero 한 표 조회는 고칠 수 있다");
+    for (column, value) in [
+        (1, rows[0][1].to_string()),
+        (1, "2024-05-06".into()),
+        (2, "2024-05-06 07:08:09.25".into()),
+    ] {
+        let (sql, params) = editable
+            .update(column, Cell::Text(value), &rows[0])
+            .unwrap();
+        assert_eq!(s.exec_params(&sql, params), Ok(1));
+    }
+    assert_eq!(
+        s.scalar("SELECT TO_CHAR(d, 'YYYY-MM-DD HH24:MI:SS') || ' ' || TO_CHAR(t, 'HH24:MI:SS.FF2') FROM ferrite_d"),
+        "2024-05-06 00:00:00 07:08:09.25"
+    );
+
+    // 실행 계획: PLAN_TABLE을 지우고, 계획을 세우고, 깊이대로 들여 본다.
+    let plan = Kind::Tibero
+        .explain("SELECT * FROM ferrite_d WHERE id = 1")
+        .unwrap();
+    s.exec(&plan[0]);
+    s.exec(&plan[1]);
+    let (_, rows, _) = s.query(&plan[2]);
+    assert!(
+        rows.iter()
+            .any(|row| row[0].to_string().contains("FERRITE_D")),
+        "{rows:?}"
+    );
+    s.exec("DROP TABLE ferrite_d");
+}
+
+#[test]
 fn cubrid로_시나리오를_돈다() {
     let Some((config, password)) = server(Kind::Cubrid, "FERRITE_TEST_CUBRID") else {
         return;

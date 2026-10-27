@@ -34,6 +34,18 @@ import java.util.concurrent.LinkedBlockingQueue;
 public final class FerriteJdbc {
     private final int pageRows;
     private Connection conn;
+    /** 다시 연결할 때 쓴다(세션을 끊어 멈춘 뒤). */
+    private Driver driver;
+    private String url;
+    private Properties properties;
+    private boolean autoCommit = true;
+    /** 세션을 끊어 멈출 수 있으면 이 연결의 (SID, SERIAL#). Tibero만. */
+    private volatile String[] session;
+    /** 세션을 끊은 연결. 지금 연결이 이것이면 실패한 문장 뒤에 다시 연결한다. */
+    private volatile Connection killed;
+    /** 실행 중인 문장(`running`)을 끝내는 일과 세션 끊기를 묶는다. 끊는 중이면 `killing`. */
+    private final Object killLock = new Object();
+    private boolean killing;
     private Statement statement;
     private ResultSet result;
     /** 실행·읽기 중인 문장. 읽는 스레드가 멈출 때 쓴다. */
@@ -160,7 +172,8 @@ public final class FerriteJdbc {
         } else if ("autocommit".equals(method)) {
             closeResult();
             // JDBC 규약대로 켜면 열린 트랜잭션을 커밋한다.
-            conn.setAutoCommit(Boolean.TRUE.equals(params.get("on")));
+            autoCommit = Boolean.TRUE.equals(params.get("on"));
+            conn.setAutoCommit(autoCommit);
         } else {
             throw new IllegalArgumentException("모르는 요청: " + method);
         }
@@ -169,13 +182,12 @@ public final class FerriteJdbc {
 
     private Map<String, Object> open(Map<String, Object> params) throws Exception {
         String driverClass = (String) params.get("driver");
-        Driver driver;
         try {
             driver = (Driver) Class.forName(driverClass).getDeclaredConstructor().newInstance();
         } catch (ClassNotFoundException e) {
             throw new IllegalStateException("드라이버 클래스를 찾지 못했습니다(" + driverClass + "). 드라이버 jar를 확인하세요");
         }
-        Properties properties = new Properties();
+        properties = new Properties();
         Object extra = params.get("properties");
         if (extra instanceof Map) {
             for (Map.Entry<?, ?> entry : ((Map<?, ?>) extra).entrySet()) {
@@ -187,10 +199,13 @@ public final class FerriteJdbc {
         if (password != null) {
             properties.setProperty("password", (String) password);
         }
-        String url = (String) params.get("url");
+        url = (String) params.get("url");
         conn = driver.connect(url, properties);
         if (conn == null) {
             throw new IllegalStateException("드라이버가 이 URL을 받지 않습니다: " + url);
+        }
+        if (Boolean.TRUE.equals(params.get("stopByKill"))) {
+            session = ownSession();
         }
         DatabaseMetaData meta = conn.getMetaData();
         String name = meta.getDatabaseProductName();
@@ -229,9 +244,9 @@ public final class FerriteJdbc {
             closeQuietly(st);
             statement = null;
             result = null;
-            throw e;
+            throw afterKill(e);
         } finally {
-            running = null;
+            finished();
         }
     }
 
@@ -256,9 +271,9 @@ public final class FerriteJdbc {
                 more = rows.size() == pageRows;
             } catch (SQLException e) {
                 closeResult();
-                throw e;
+                throw afterKill(e);
             } finally {
-                running = null;
+                finished();
             }
             if (!more) {
                 closeResult();
@@ -460,7 +475,7 @@ public final class FerriteJdbc {
             running = st;
             return st.executeUpdate();
         } finally {
-            running = null;
+            finished();
             closeQuietly(st);
         }
     }
@@ -474,13 +489,109 @@ public final class FerriteJdbc {
     }
 
     private void cancel() {
-        Statement st = running;
-        if (st != null) {
-            try {
-                st.cancel();
-            } catch (SQLException e) {
-                e.printStackTrace();
+        final Statement st = running;
+        if (st == null) {
+            return;
+        }
+        try {
+            st.cancel();
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
+        if (session == null) {
+            return;
+        }
+        // Tibero 6은 멈춤 요청을 받고도 문장을 1분 가까이 더 돌린다. 3초 안에 멈추지 않으면 다른
+        // 연결에서 이 세션을 끊는다(ALTER SYSTEM 권한이 있을 때만 된다).
+        Thread killer = new Thread(new Runnable() {
+            public void run() {
+                try {
+                    Thread.sleep(3000);
+                    String[] own = session;
+                    Connection target = conn;
+                    synchronized (killLock) {
+                        // 그 사이 문장이 끝났으면 끊지 않는다(쉬는 연결을 끊게 된다).
+                        if (running != st || own == null) {
+                            return;
+                        }
+                        killing = true;
+                    }
+                    try {
+                        Connection helper = driver.connect(url, properties);
+                        try {
+                            Statement kill = helper.createStatement();
+                            killed = target;
+                            kill.execute("ALTER SYSTEM KILL SESSION (" + own[0] + ", " + own[1] + ")");
+                            kill.close();
+                        } finally {
+                            helper.close();
+                        }
+                    } finally {
+                        synchronized (killLock) {
+                            killing = false;
+                            killLock.notifyAll();
+                        }
+                    }
+                } catch (Exception e) {
+                    e.printStackTrace();
+                }
             }
+        }, "ferrite-jdbc-killer");
+        killer.setDaemon(true);
+        killer.start();
+    }
+
+    /** 이 연결의 (SID, SERIAL#). 볼 권한이 없으면 null(세션을 끊어 멈추지 않는다). */
+    private String[] ownSession() {
+        try {
+            Statement st = conn.createStatement();
+            try {
+                ResultSet rs = st.executeQuery(
+                    "SELECT SID, SERIAL# FROM V$SESSION WHERE SID = (SELECT SID FROM V$MYSTAT WHERE ROWNUM = 1)");
+                if (!rs.next()) {
+                    return null;
+                }
+                String sid = rs.getString(1);
+                String serial = rs.getString(2);
+                // 숫자만 SQL에 넣는다.
+                return sid.matches("\\d+") && serial.matches("\\d+") ? new String[] {sid, serial} : null;
+            } finally {
+                st.close();
+            }
+        } catch (SQLException e) {
+            return null;
+        }
+    }
+
+    /** 세션을 끊어 멈췄으면 다시 연결하고(자동 커밋 상태는 되살린다) 그 사실을 알리는 오류로 바꾼다. */
+    /** 문장이 끝났다. 세션을 끊는 중이면 끝날 때까지 기다린다(그 뒤 다음 일이 죽은 연결을 쓰지 않게). */
+    private void finished() {
+        synchronized (killLock) {
+            running = null;
+            while (killing) {
+                try {
+                    killLock.wait();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    return;
+                }
+            }
+        }
+    }
+
+    private SQLException afterKill(SQLException e) {
+        finished();
+        if (killed == null || killed != conn) {
+            return e;
+        }
+        killed = null;
+        try {
+            conn = driver.connect(url, properties);
+            conn.setAutoCommit(autoCommit);
+            session = ownSession();
+            return new SQLException("문장을 멈추려고 세션을 끊고 다시 연결했습니다(커밋하지 않은 변경은 롤백됐습니다)", e);
+        } catch (SQLException again) {
+            return new SQLException("문장을 멈추려고 세션을 끊었는데 다시 연결하지 못했습니다: " + message(again), e);
         }
     }
 

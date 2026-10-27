@@ -54,6 +54,8 @@ impl Kind {
             // Oracle 드라이버는 문장을 멈출 때 TCP 긴급 데이터(OOB)를 보내는데, NAT·방화벽·Docker를 거치면
             // 닿지 않아 멈추지 않는다. 연결 안의 멈춤 신호로 보내게 한다.
             Kind::Oracle => json!({ "oracle.net.disableOob": "true" }),
+            // DB 관리자가 V$SESSION에서 Ferrite 연결을 알아보게 한다.
+            Kind::Tibero => json!({ "program_name": "Ferrite" }),
             _ => json!({}),
         }
     }
@@ -215,6 +217,8 @@ pub(crate) fn connect(
         json!({
             "driver": config.kind.driver_class(),
             "properties": config.kind.driver_properties(),
+            // Tibero 6은 멈춤 요청 뒤에도 문장을 1분 가까이 돌려, 늦으면 세션을 끊어 멈춘다.
+            "stopByKill": config.kind == Kind::Tibero,
             "url": config.jdbc_url(),
             "user": config.user,
             "password": password,
@@ -297,12 +301,8 @@ impl Jdbc {
     }
 
     /// 조회가 한 표에서 왔고 그 표의 기본 키 열이 모두 결과에 있으면 고칠 수 있다. 표는 SQL에서 찾고
-    /// (`origin`), 열·기본 키는 사이드카가 드라이버 메타데이터로 알려 준다. Tibero는 시험할 서버가 없어
-    /// 아직 고치지 않는다.
+    /// (`origin`), 열·기본 키는 사이드카가 드라이버 메타데이터로 알려 준다.
     fn editable(&mut self, sql: &str, labels: &[String]) -> Option<Editable> {
-        if !matches!(self.kind, Kind::Oracle | Kind::Cubrid) {
-            return None;
-        }
         let select = origin::parse(sql)?;
         let ident = |i: &origin::Ident| json!({ "text": i.text, "quoted": i.quoted });
         let info = self
@@ -340,7 +340,7 @@ impl Jdbc {
                     .iter()
                     .find(|(n, _)| *n == name)
                     .and_then(|(_, ty)| *ty)
-                    .filter(|_| self.kind == Kind::Oracle)
+                    .filter(|_| matches!(self.kind, Kind::Oracle | Kind::Tibero))
                     .map(str::to_owned);
                 Some(Target { name, cast })
             })

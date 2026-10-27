@@ -8,6 +8,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+/// Tibero 실행 계획을 PLAN_TABLE에 남길 때의 STATEMENT_ID.
+const PLAN_ID: &str = "ferrite";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Kind {
@@ -84,8 +87,16 @@ impl Kind {
                 format!("EXPLAIN PLAN FOR {sql}"),
                 "SELECT plan_table_output FROM TABLE(DBMS_XPLAN.DISPLAY())".into(),
             ],
-            // Tibero는 시험할 서버가 없고, CUBRID는 계획을 문장이 아닌 드라이버 API로만 준다.
-            Kind::Tibero | Kind::Cubrid => return None,
+            // DBMS_XPLAN이 없어 PLAN_TABLE을 깊이대로 들여 보인다.
+            Kind::Tibero => vec![
+                format!("DELETE FROM PLAN_TABLE WHERE STATEMENT_ID = '{PLAN_ID}'"),
+                format!("EXPLAIN PLAN SET STATEMENT_ID = '{PLAN_ID}' FOR {sql}"),
+                format!(
+                    "SELECT LPAD(' ', 2 * DEPTH) || OPERATION || NVL2(OBJECT_NAME, ' ' || OBJECT_NAME, '')                      || NVL2(COST, ' (cost ' || COST || ')', '') AS PLAN                      FROM PLAN_TABLE WHERE STATEMENT_ID = '{PLAN_ID}' ORDER BY ID"
+                ),
+            ],
+            // CUBRID는 계획을 문장이 아닌 드라이버 API로만 준다.
+            Kind::Cubrid => return None,
         })
     }
 }
