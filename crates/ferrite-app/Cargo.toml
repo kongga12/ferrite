@@ -11,6 +11,7 @@ name = "ferrite"
 path = "src/main.rs"
 
 [dependencies]
+base64 = "0.22.1"
 dirs = "7.0.0"
 eframe.workspace = true
 egui_tiles = "0.18"
@@ -20,7 +21,10 @@ ferrite-dap.workspace = true
 ferrite-db.workspace = true
 ferrite-egov.workspace = true
 ferrite-lsp.workspace = true
+ferrite-notebook.workspace = true
 ferrite-term.workspace = true
+# 노트북 그림 출력(PNG). eframe이 이미 쓰는 판이다.
+image = { version = "0.25.10", default-features = false, features = ["png"] }
 ropey.workspace = true
 lsp-types = "0.97"
 notify = "8"

@@ -78,7 +78,8 @@ impl Lang {
             "java" => Lang::Java,
             "sql" => Lang::Sql,
             "toml" => Lang::Toml,
-            "json" => Lang::Json,
+            // Jupyter 노트북도 JSON이다(앱은 그 위에 노트북 보기를 얹는다).
+            "json" | "ipynb" => Lang::Json,
             "yml" | "yaml" => Lang::Yaml,
             "xml" | "xsd" | "xsl" | "tld" => Lang::Xml,
             "html" | "htm" => Lang::Html,
