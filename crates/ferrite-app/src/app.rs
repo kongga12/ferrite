@@ -2753,7 +2753,7 @@ impl FerriteApp {
                 ui.separator();
             }
             if let Some(notebook) = doc.notebook.as_mut() {
-                if notebook.ui(ui, &mut doc.buffer) {
+                if notebook.ui(ui, &mut doc.buffer, &doc.path) {
                     return;
                 }
                 if ui.button("노트북 보기").clicked() {
@@ -5363,6 +5363,137 @@ mod tests {
         let notebook = ferrite_notebook::Notebook::parse(&text).unwrap();
         assert_eq!(notebook.len(), 6);
         assert_eq!(notebook.kind(2), ferrite_notebook::CellKind::Markdown);
+        drop(harness);
+        remove_project(&dir);
+    }
+
+    /// PATH의 Python에 ipykernel이 있는지. 없으면 건너뛰되 CI에서는 실패시킨다.
+    fn ipykernel_available() -> bool {
+        let python = if cfg!(windows) { "python" } else { "python3" };
+        let found = std::process::Command::new(python)
+            .args(["-c", "import ipykernel, jupyter_client"])
+            .output()
+            .is_ok_and(|o| o.status.success());
+        if !found {
+            assert!(
+                std::env::var_os("CI").is_none(),
+                "CI에는 ipykernel이 설치되어 있어야 합니다"
+            );
+            eprintln!("ipykernel이 없어 건너뜁니다");
+        }
+        found
+    }
+
+    #[test]
+    fn 노트북_셀을_커널로_실행해_출력을_노트북에_쓴다() {
+        use egui::accesskit::Role;
+        if !ipykernel_available() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("ferrite-notebook-run-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("실행.ipynb");
+        let mut notebook = ferrite_notebook::Notebook::parse(
+            r#"{"cells": [], "metadata": {}, "nbformat": 4, "nbformat_minor": 5}"#,
+        )
+        .unwrap();
+        for (i, source) in ["print('커널')\n6*7", "1/0", "print('안 돈다')"]
+            .iter()
+            .enumerate()
+        {
+            notebook.insert(i, ferrite_notebook::CellKind::Code);
+            notebook.set_source(i, source);
+        }
+        fs::write(&path, notebook.to_json()).unwrap();
+        let root = dir.clone();
+        let mut harness = harness_builder()
+            .with_size(egui::vec2(1200.0, 1000.0))
+            .build_eframe(move |cc| FerriteApp::new(cc, Some(root.clone())));
+        harness.run_ok();
+        harness.state_mut().open_file(path.clone());
+        harness.run_ok();
+        harness.get_by_label("커널: 꺼짐(실행하면 띄웁니다)");
+
+        // 모두 실행: 둘째 셀의 오류에서 멈추고 셋째 셀은 돌지 않는다.
+        harness.get_by_label("모두 실행").click();
+        let index = harness.state().active.unwrap();
+        let parsed = |harness: &Harness<'_, FerriteApp>| {
+            ferrite_notebook::Notebook::parse(&harness.state().docs[index].buffer.text()).unwrap()
+        };
+        let started = std::time::Instant::now();
+        while harness.query_by_label("코드 [2]").is_none() {
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(120),
+                "실행이 끝나지 않았습니다"
+            );
+            harness.run_ok();
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        harness.run_ok();
+        harness.get_by_label("코드 [1]");
+        harness.get_by_label("코드 [ ]");
+        harness.get_by_label("커널: Python 3 (ipykernel)");
+        harness.get_by_label("커널");
+        harness.get_by_label("42");
+        harness.get_by_label_contains("ZeroDivisionError: division by zero");
+        let ran = parsed(&harness);
+        assert_eq!(
+            ran.outputs(0),
+            [
+                ferrite_notebook::Output::Stream {
+                    name: "stdout".into(),
+                    text: "커널\n".into()
+                },
+                ferrite_notebook::Output::Data {
+                    data: vec![("text/plain".into(), "42".into())],
+                    execution_count: Some(1)
+                }
+            ]
+        );
+        assert!(ran.outputs(2).is_empty(), "오류 뒤의 셀은 돌지 않는다");
+        assert!(harness.state().docs[index].is_dirty());
+
+        // 첫 셀에서 Shift+Enter: 그 셀을 다시 실행하고 다음 셀로 간다.
+        harness
+            .query_all_by_role(Role::MultilineTextInput)
+            .next()
+            .unwrap()
+            .focus();
+        harness.run_ok();
+        harness.key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::Enter);
+        let started = std::time::Instant::now();
+        while harness.query_by_label("코드 [3]").is_none() {
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(60),
+                "Shift+Enter로 실행되지 않았습니다"
+            );
+            harness.run_ok();
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        assert_eq!(
+            parsed(&harness).source(0),
+            "print('커널')\n6*7",
+            "줄바꿈이 들어가지 않는다"
+        );
+        assert!(harness.state_mut().save(index));
+        let saved = ferrite_notebook::Notebook::parse(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved.execution_count(0), Some(3));
+
+        // 커널을 다시 시작하면 새 커널이라 실행 번호가 1부터 다시 센다.
+        harness.get_by_label("커널 다시 시작").click();
+        harness.run_ok();
+        harness.get_by_label("커널: 띄우는 중");
+        harness.get_by_label("▶ 실행").click();
+        let started = std::time::Instant::now();
+        while parsed(&harness).execution_count(1) != Some(1) {
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(120),
+                "다시 시작한 커널로 실행되지 않았습니다"
+            );
+            harness.run_ok();
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
         drop(harness);
         remove_project(&dir);
     }
