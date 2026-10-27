@@ -12,6 +12,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 
+use crate::edit::{Editable, Target};
+use crate::origin::{self, Fold};
 use crate::{
     Canceller, Cell, Column, ConnectionConfig, Driver, Event, Io, Kind, PAGE_ROWS, Row, lock,
 };
@@ -154,6 +156,7 @@ pub(crate) struct Jdbc {
     /// 표준 오류의 마지막 줄들(사이드카가 갑자기 끝났을 때 보인다).
     log: Arc<Mutex<VecDeque<String>>>,
     version: String,
+    kind: Kind,
 }
 
 pub(crate) fn connect(
@@ -204,6 +207,7 @@ pub(crate) fn connect(
         output: BufReader::new(stdout),
         log,
         version: String::new(),
+        kind: config.kind,
     };
     let opened = jdbc.call(
         "open",
@@ -291,6 +295,64 @@ impl Jdbc {
         }
     }
 
+    /// 조회가 한 표에서 왔고 그 표의 기본 키 열이 모두 결과에 있으면 고칠 수 있다. 표는 SQL에서 찾고
+    /// (`origin`), 열·기본 키는 사이드카가 드라이버 메타데이터로 알려 준다. Tibero는 시험할 서버가 없어
+    /// 아직 고치지 않는다.
+    fn editable(&mut self, sql: &str, labels: &[String]) -> Option<Editable> {
+        if !matches!(self.kind, Kind::Oracle | Kind::Cubrid) {
+            return None;
+        }
+        let select = origin::parse(sql)?;
+        let ident = |i: &origin::Ident| json!({ "text": i.text, "quoted": i.quoted });
+        let info = self
+            .call(
+                "table",
+                json!({ "schema": select.schema.as_ref().map(ident), "table": ident(&select.table) }),
+            )
+            .ok()
+            .filter(|info| !info.is_null())?;
+        let fold = |name: &str| match info[name].as_str() {
+            Some("upper") => Fold::Upper,
+            Some("lower") => Fold::Lower,
+            _ => Fold::None,
+        };
+        // (열 이름, 형식)
+        let columns: Vec<(String, Option<&str>)> = info["columns"]
+            .as_array()?
+            .iter()
+            .filter_map(|c| Some((c["name"].as_str()?.to_owned(), c["type"].as_str())))
+            .collect();
+        let names: Vec<String> = columns.iter().map(|(name, _)| name.clone()).collect();
+        let key: Vec<String> = info["key"]
+            .as_array()?
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect();
+        let targets = select
+            .columns(labels, &names, fold("fold"), fold("quoted"))
+            .into_iter()
+            .map(|name| {
+                let name = name?;
+                // Oracle은 날짜를 보이는 글자에서 되돌리게 형식을 알린다(`edit::placeholder`).
+                let cast = columns
+                    .iter()
+                    .find(|(n, _)| *n == name)
+                    .and_then(|(_, ty)| *ty)
+                    .filter(|_| self.kind == Kind::Oracle)
+                    .map(str::to_owned);
+                Some(Target { name, cast })
+            })
+            .collect();
+        Editable::new(
+            self.kind,
+            info["schema"].as_str(),
+            info["table"].as_str()?,
+            targets,
+            &key,
+        )
+    }
+
     /// 사이드카가 끝났을 때의 오류. 표준 오류의 마지막 줄을 붙인다.
     fn ended(&mut self) -> String {
         // 표준 오류를 다 읽을 틈을 잠깐 준다.
@@ -334,14 +396,19 @@ impl Driver for Jdbc {
         let Some(columns) = response["columns"].as_array() else {
             return Ok(response["affected"].as_u64());
         };
+        let labels: Vec<String> = columns
+            .iter()
+            .map(|name| name.as_str().unwrap_or_default().to_owned())
+            .collect();
         io.send(Event::Columns(
-            columns
+            labels
                 .iter()
-                .map(|name| Column {
-                    name: name.as_str().unwrap_or_default().to_owned(),
-                })
+                .map(|name| Column { name: name.clone() })
                 .collect(),
         ));
+        if let Some(editable) = self.editable(sql, &labels) {
+            io.send(Event::Editable(editable));
+        }
         loop {
             let (rows, more) = page(&response);
             if !io.page(rows, more) {

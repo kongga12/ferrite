@@ -25,6 +25,7 @@ import java.sql.Types;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Properties;
 import java.util.concurrent.BlockingQueue;
@@ -138,6 +139,9 @@ public final class FerriteJdbc {
             return page();
         } else if ("close".equals(method)) {
             closeResult();
+        } else if ("table".equals(method)) {
+            // 결과를 읽는 중에도 묻는다(결과를 닫지 않는다).
+            return table(params);
         } else if ("update".equals(method)) {
             done.put("affected", update((String) params.get("sql"), (List<?>) params.get("params")));
         } else if ("commit".equals(method)) {
@@ -299,6 +303,94 @@ public final class FerriteJdbc {
         Map<String, Object> value = new LinkedHashMap<String, Object>();
         value.put("hex", hex.toString());
         return value;
+    }
+
+    /** 식별자를 DB가 두는 대소문자로. */
+    private static String fold(String text, boolean upper, boolean lower) {
+        if (upper) {
+            return text.toUpperCase(Locale.ROOT);
+        }
+        return lower ? text.toLowerCase(Locale.ROOT) : text;
+    }
+
+    private static String mode(boolean upper, boolean lower) {
+        return upper ? "upper" : lower ? "lower" : "none";
+    }
+
+    /** {"text", "quoted"} 식별자를 DB가 두는 대소문자로. */
+    private static String identifier(Object value, DatabaseMetaData meta) throws SQLException {
+        Map<?, ?> ident = (Map<?, ?>) value;
+        String text = (String) ident.get("text");
+        if (Boolean.TRUE.equals(ident.get("quoted"))) {
+            return fold(text, meta.storesUpperCaseQuotedIdentifiers(), meta.storesLowerCaseQuotedIdentifiers());
+        }
+        return fold(text, meta.storesUpperCaseIdentifiers(), meta.storesLowerCaseIdentifiers());
+    }
+
+    /**
+     * 표의 열(순서대로, 형식 이름과 함께)과 기본 키. 스키마를 적지 않았으면 사용자 스키마의 표만 찾는다
+     * (다른 스키마의 같은 이름 표나 동의어가 가리키는 표를 고치지 않게). 없거나 둘 이상이면 null.
+     * CUBRID는 스키마 칸이 비고 표 이름이 "소유자.표"로 온다.
+     */
+    private Map<String, Object> table(Map<String, Object> params) throws SQLException {
+        DatabaseMetaData meta = conn.getMetaData();
+        String user = meta.getUserName();
+        String schema = params.get("schema") != null
+            ? identifier(params.get("schema"), meta)
+            : fold(user, meta.storesUpperCaseIdentifiers(), meta.storesLowerCaseIdentifiers());
+        String table = identifier(params.get("table"), meta);
+        List<Object> columns = new ArrayList<Object>();
+        String foundSchema = null;
+        ResultSet rs = meta.getColumns(null, schema, table, null);
+        try {
+            while (rs.next()) {
+                String[] name = qualified(rs.getString("TABLE_SCHEM"), rs.getString("TABLE_NAME"));
+                if (!table.equals(name[1]) || (name[0] != null && !schema.equals(name[0]))) {
+                    continue;
+                }
+                if (!columns.isEmpty() && !java.util.Objects.equals(foundSchema, name[0])) {
+                    return null;
+                }
+                foundSchema = name[0];
+                Map<String, Object> column = new LinkedHashMap<String, Object>();
+                column.put("name", rs.getString("COLUMN_NAME"));
+                column.put("type", rs.getString("TYPE_NAME"));
+                columns.add(column);
+            }
+        } finally {
+            rs.close();
+        }
+        if (columns.isEmpty()) {
+            return null;
+        }
+        Map<Integer, String> key = new java.util.TreeMap<Integer, String>();
+        rs = meta.getPrimaryKeys(null, schema, table);
+        try {
+            while (rs.next()) {
+                String[] name = qualified(rs.getString("TABLE_SCHEM"), rs.getString("TABLE_NAME"));
+                if (table.equals(name[1]) && (name[0] == null || schema.equals(name[0]))) {
+                    key.put(Integer.valueOf(rs.getInt("KEY_SEQ")), rs.getString("COLUMN_NAME"));
+                }
+            }
+        } finally {
+            rs.close();
+        }
+        Map<String, Object> info = new LinkedHashMap<String, Object>();
+        info.put("schema", foundSchema);
+        info.put("table", table);
+        info.put("columns", columns);
+        info.put("key", new ArrayList<Object>(key.values()));
+        info.put("fold", mode(meta.storesUpperCaseIdentifiers(), meta.storesLowerCaseIdentifiers()));
+        info.put("quoted", mode(meta.storesUpperCaseQuotedIdentifiers(), meta.storesLowerCaseQuotedIdentifiers()));
+        return info;
+    }
+
+    /** (스키마, 표). 스키마 칸이 비고 표 이름에 점이 있으면 나눈다(CUBRID 11.2). */
+    private static String[] qualified(String schema, String table) {
+        if (schema == null && table != null && table.indexOf('.') > 0) {
+            return table.split("\\.", 2);
+        }
+        return new String[] {schema, table};
     }
 
     private long update(String sql, List<?> params) throws SQLException {

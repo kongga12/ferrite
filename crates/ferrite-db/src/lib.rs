@@ -9,6 +9,7 @@ pub mod edit;
 pub mod export;
 pub mod jdbc;
 mod mysql;
+mod origin;
 mod postgres;
 pub mod result;
 pub mod secret;

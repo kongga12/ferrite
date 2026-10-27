@@ -88,7 +88,7 @@ fn open(config: &ConnectionConfig, password: Option<String>) -> (Session, String
     }
 }
 
-/// 파라미터 바인딩, 이진 값, 읽기 전용, 닫을 때 커밋하지 않은 변경은 버린다.
+/// 파라미터 바인딩, 별칭 붙인 열, 이진 값, 닫을 때 커밋하지 않은 변경은 버린다.
 fn jdbc_scenario(config: &ConnectionConfig, password: Option<String>, dialect: Dialect) {
     let (mut s, _) = open(config, password.clone());
     s.drop_table("ferrite_j");
@@ -98,10 +98,26 @@ fn jdbc_scenario(config: &ConnectionConfig, password: Option<String>, dialect: D
     let values = vec![Cell::Text("1".into()), Cell::Text("it's; 한글".into())];
     assert_eq!(s.exec_params(insert, values), Ok(1));
     assert_eq!(s.exec_params(insert, vec![Cell::Int(2), Cell::Null]), Ok(1));
-    let (editable, rows) = s.query_editable("SELECT id, name FROM ferrite_j ORDER BY id");
+    let (editable, rows) = s.query_editable("SELECT * FROM ferrite_j ORDER BY id");
+    let editable = editable.expect("한 표에서 기본 키까지 읽으면 고칠 수 있다");
+    assert!(editable.can_edit(0) && editable.can_edit(1));
+    // 기본 키 열 이름을 별칭으로 붙인 다른 열은 그 열로 보지 않는다(CUBRID 드라이버는 그 열을 id
+    // 열이라고 알려 준다). 그 별칭 열을 고치면 엉뚱한 열이 바뀐다.
+    let (aliased, _) = s.query_editable("SELECT id, name AS id FROM ferrite_j");
+    let aliased = aliased.expect("앞 열이 기본 키다");
+    assert!(aliased.can_edit(0) && !aliased.can_edit(1));
+    assert_eq!(
+        aliased
+            .update(0, Cell::Text("9".into()), &rows[1])
+            .unwrap()
+            .1,
+        [Cell::Text("9".into()), Cell::Text("2".into())],
+        "조건은 별칭 열이 아니라 진짜 기본 키 값이다"
+    );
     assert!(
-        editable.is_none(),
-        "JDBC 결과는 아직 그리드에서 고치지 않는다"
+        s.query_editable("SELECT j.id, k.name FROM ferrite_j j, ferrite_j k")
+            .0
+            .is_none()
     );
     assert_eq!(
         rows,
@@ -142,9 +158,35 @@ fn oracle로_시나리오를_돈다() {
         Dialect::Oracle,
     );
     jdbc_scenario(&config, password.clone(), Dialect::Oracle);
+    common::edit_scenario(&config, password.clone());
+
+    // 날짜는 보이는 글자(`2024-01-02 00:00:00.0`)나 날짜만 적어 고친다(세션 날짜 형식과 상관없이).
+    let (mut s, _) = open(&config, password.clone());
+    s.drop_table("ferrite_d");
+    s.exec("CREATE TABLE ferrite_d (id INT PRIMARY KEY, d DATE, t TIMESTAMP)");
+    s.exec(
+        "INSERT INTO ferrite_d VALUES (1, DATE '2024-01-02', TIMESTAMP '2024-01-02 03:04:05.6')",
+    );
+    let (editable, rows) = s.query_editable("SELECT * FROM ferrite_d");
+    let editable = editable.unwrap();
+    assert_eq!(rows[0][1], Cell::Text("2024-01-02 00:00:00.0".into()));
+    for (column, value) in [
+        (1, rows[0][1].to_string()),
+        (1, "2024-05-06".into()),
+        (2, "2024-05-06 07:08:09.25".into()),
+    ] {
+        let (sql, params) = editable
+            .update(column, Cell::Text(value), &rows[0])
+            .unwrap();
+        assert_eq!(s.exec_params(&sql, params), Ok(1));
+    }
+    assert_eq!(
+        s.scalar("SELECT TO_CHAR(d, 'YYYY-MM-DD HH24:MI:SS') || ' ' || TO_CHAR(t, 'HH24:MI:SS.FF2') FROM ferrite_d"),
+        "2024-05-06 00:00:00 07:08:09.25"
+    );
+    s.exec("DROP TABLE ferrite_d");
 
     // 실행 계획은 두 문장(계획 세우기, 보기)이다. CLOB은 글자로 온다.
-    let (mut s, _) = open(&config, password);
     let plan = Kind::Oracle.explain("SELECT * FROM dual").unwrap();
     s.exec(&plan[0]);
     let (_, rows, _) = s.query(&plan[1]);
@@ -168,7 +210,8 @@ fn cubrid로_시나리오를_돈다() {
         "SELECT COUNT(*) FROM db_attribute a, db_attribute b, db_attribute c",
         Dialect::Standard,
     );
-    jdbc_scenario(&config, password, Dialect::Standard);
+    jdbc_scenario(&config, password.clone(), Dialect::Standard);
+    common::edit_scenario(&config, password);
 }
 
 #[test]
