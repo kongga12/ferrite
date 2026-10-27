@@ -1,6 +1,6 @@
 [package]
 name = "ferrite-db"
-description = "Ferrite DB 도구: 연결 관리와 드라이버(SQLite·PostgreSQL·MariaDB)"
+description = "Ferrite DB 도구: 연결 관리와 드라이버(SQLite·PostgreSQL·MariaDB, JDBC 사이드카로 Oracle·Tibero·CUBRID)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -12,4 +12,5 @@ mysql = { version = "28.0.4", default-features = false, features = ["default-rus
 postgres = "0.19.14"
 rusqlite = { version = "0.41.0", features = ["bundled", "column_metadata"] }
 serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
 toml = "1.1.8"
