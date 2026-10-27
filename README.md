@@ -10,7 +10,8 @@ Rust로 작성한 크로스플랫폼(Windows / macOS / Linux) 경량 IDE.
 - 폴더 열기, 지연 로딩 프로젝트 트리(파일 감시로 자동 갱신), 탭 에디터
 - 실행(`Ctrl+F5`): Maven(egov `tomcat7:run`·`spring-boot:run`)·Gradle·cargo·go·CMake·Python·Composer 구성을 자동으로 찾고, `.ferrite/run.toml`에 직접 적은 구성과 함께 터미널 탭에서 돌린다.
 - 디버그(`F5`): 거터를 눌러 중단점(오른쪽 단추로 조건), 한 줄씩(`F10`)·들어가기(`F11`)·나오기(`Shift+F11`), 호출 스택·변수 트리·디버그 출력. 어댑터(debugpy·codelldb·delve·php-debug·java-debug)는 `도구 > 언어 서버`에서 설치한다. Python·Rust(빌드 후)·Go·PHP·Java는 열린 파일로 구성을 만든다. egov 웹 프로젝트는 실행(`Ctrl+F5`)의 "`tomcat7:run` (디버그 5005)"으로 띄운 뒤 디버그의 "5005 포트에 붙기"로 붙는다.
-- DB 연결(`도구 > DB 연결`): PostgreSQL·MariaDB·SQLite 연결을 추가·시험한다. 비밀번호는 파일이 아니라 OS 키체인에 둔다(SQL 콘솔은 다음 단계).
+- DB 연결(`도구 > DB 연결`): PostgreSQL·MariaDB·SQLite 연결을 추가·시험한다. 비밀번호는 파일이 아니라 OS 키체인에 둔다.
+- SQL 콘솔(`도구 > SQL 콘솔`): 고른 글이나 커서가 있는 문장을 실행(`Ctrl+Enter`)하고, 실행 계획·멈추기·자동 커밋·커밋·롤백을 쓴다. 결과 그리드는 스크롤하면 500행씩 더 받고, 10만 행을 넘으면 앞쪽을 버려 100만 행도 메모리가 늘지 않는다. CSV로 내보내기(UTF-8 BOM)는 조회를 다시 실행해 파일로 흘려 쓴다.
 - 도킹 창: 프로젝트·에디터·터미널·문제·검색·참조를 탭으로 묶는다. 탭을 끌어 옆·위아래로 나눈다. 배치는 다음 실행 때 되살아난다(`보기 > 창 배치 초기화`).
 - Git(`Ctrl+Shift+G`): 거터에 변경 줄 표시(저장 전 편집 포함), 상태바에 브랜치, 소스 제어 창에서 diff·스테이지·커밋·푸시·브랜치 전환(git CLI)
 - 통합 터미널(`` Ctrl+` ``): 탭 여러 개, Windows는 ConPTY(PowerShell), 한글 입출력, 256색·트루컬러, 복사(고른 글자)·붙여넣기

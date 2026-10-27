@@ -470,6 +470,7 @@ pub struct FerriteApp {
     commngt: crate::commngt_ui::CommngtWindow,
     /// DB 연결 창.
     db: crate::db_ui::DbWindow,
+    sql: crate::sql_console::SqlConsole,
     /// 창 배치. 그리는 동안에는 창들이 앱을 빌려 쓰므로 잠시 밖으로 꺼낸다(`ui`).
     layout: dock::Layout,
     /// 응답을 기다리는 언어 서버 요청.
@@ -573,6 +574,7 @@ impl FerriteApp {
             new_project: crate::new_project::NewProjectWindow::new(templates_root()),
             commngt: crate::commngt_ui::CommngtWindow::new(templates_dir()),
             db: crate::db_ui::DbWindow::new(connections_path(), secret_store()),
+            sql: Default::default(),
             layout: dock::load(layout_path().as_deref()),
             pending: std::collections::HashMap::new(),
             completion: None,
@@ -2155,6 +2157,10 @@ impl FerriteApp {
                         ui.close();
                         self.db.show();
                     }
+                    if ui.button("SQL 콘솔").clicked() {
+                        ui.close();
+                        dock::show(&mut self.layout, Pane::Sql);
+                    }
                 });
             });
         });
@@ -2826,6 +2832,7 @@ impl egui_tiles::Behavior<Pane> for Dock<'_> {
                 }
             }
             Pane::DebugConsole => app.debugger.console_ui(ui),
+            Pane::Sql => app.sql.ui(ui, &app.db),
         });
         egui_tiles::UiResponse::None
     }
@@ -2929,7 +2936,10 @@ impl eframe::App for FerriteApp {
             self.open_folder(&dir);
         }
         self.commngt.ui(&ctx);
-        self.db.ui(&ctx);
+        if let Some(config) = self.db.ui(&ctx) {
+            self.sql.connect(&config, &self.db, &ctx);
+            dock::show(&mut self.layout, Pane::Sql);
+        }
         self.git.ui(&ctx);
         if let Some(path) = self.config_gen.ui(&ctx) {
             self.status = format!("설정 파일을 만들었습니다: {}", path.display());
@@ -4913,7 +4923,131 @@ mod tests {
             .find(|c| c.name == "운영")
             .unwrap();
         assert_eq!(pg.port, 5432);
-        assert_eq!(app.db.saved_password(&pg.id).as_deref(), Some("비밀!"));
+        assert_eq!(app.db.password(&pg.id).unwrap().as_deref(), Some("비밀!"));
+        drop(harness);
+        remove_project(&dir);
+    }
+
+    /// SQL 콘솔이 `done`이 될 때까지 그린다. 늦으면 콘솔 기록과 함께 실패한다.
+    fn wait_sql(
+        harness: &mut Harness<'_, FerriteApp>,
+        what: &str,
+        done: impl Fn(&Harness<'_, FerriteApp>) -> bool,
+    ) {
+        let started = std::time::Instant::now();
+        while started.elapsed() < std::time::Duration::from_secs(60) {
+            harness.run_ok();
+            if done(harness) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        panic!(
+            "{what} 시간 초과. 기록:\n{}",
+            harness.state().sql.describe()
+        );
+    }
+
+    /// SQL을 콘솔에 넣고 모두 골라 Ctrl+Enter로 실행한다.
+    fn run_sql(harness: &mut Harness<'_, FerriteApp>, sql: &str) {
+        use egui::accesskit::Role;
+        harness.state_mut().sql.text = sql.to_owned();
+        harness.run_ok();
+        harness.get_by_role(Role::MultilineTextInput).focus();
+        harness.run_ok();
+        harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+        harness.run_ok();
+        harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Enter);
+        harness.run_ok();
+    }
+
+    #[test]
+    fn sql_콘솔에서_실행하고_롤백하고_csv로_내보낸다() {
+        use egui::accesskit::Role;
+        let dir = std::env::temp_dir().join(format!("ferrite-sql-ui-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        // 도구 창이 에디터 아래 30%에 붙으므로 결과 행이 보이도록 높게 띄운다.
+        let mut harness = harness_builder()
+            .with_size(egui::vec2(1400.0, 1300.0))
+            .build_eframe(|cc| FerriteApp::new(cc, Some(dir.clone())));
+        harness.run_ok();
+        harness.get_by_label("도구").click();
+        harness.run_ok();
+        harness.get_by_label("DB 연결…").click();
+        harness.run_ok();
+        harness
+            .get_by_role_and_label(Role::Button, "SQLite")
+            .click();
+        harness.run_ok();
+        type_into(&mut harness, "이름", "로컬");
+        type_into(&mut harness, "파일", &dir.join("콘솔.db").to_string_lossy());
+        harness.get_by_label("저장").click();
+        harness.run_ok();
+
+        // 연결 창의 [SQL 콘솔]이 SQL 창을 열고 그 연결로 붙는다.
+        harness.get_by_label("SQL 콘솔").click();
+        wait_sql(&mut harness, "연결", |h| {
+            h.query_by_label_contains("SQLite 3").is_some()
+        });
+        assert!(dock::is_shown(&harness.state().layout, Pane::Sql));
+
+        // 고른 글의 세 문장을 차례로 실행하고 마지막 조회를 그리드에 보인다.
+        run_sql(
+            &mut harness,
+            "CREATE TABLE t (a INTEGER, b TEXT);\nINSERT INTO t VALUES (1, '가나'), (2, NULL);\nSELECT a, b FROM t ORDER BY a",
+        );
+        wait_sql(&mut harness, "조회", |h| {
+            h.query_by_label_contains("ORDER BY a — 2행 받음").is_some()
+        });
+        harness.get_by_label_contains("INSERT INTO t VALUES");
+        harness.get_by_label("가나");
+        harness.get_by_label("NULL");
+
+        // 마지막 조회를 다른 연결로 다시 실행해 CSV로 쓴다.
+        let csv = dir.join("결과.csv");
+        let ctx = harness.ctx.clone();
+        let app = harness.state_mut();
+        app.sql.start_export(csv.clone(), &app.db, &ctx);
+        wait_sql(&mut harness, "CSV", |h| {
+            h.query_by_label_contains("CSV로 저장했습니다").is_some()
+        });
+        assert_eq!(
+            fs::read_to_string(&csv).unwrap(),
+            "\u{feff}a,b\n1,가나\n2,\n"
+        );
+
+        // 자동 커밋을 끄고 지운 뒤 롤백하면 행이 돌아온다.
+        harness.get_by_label("자동 커밋").click();
+        wait_sql(&mut harness, "자동 커밋 끄기", |h| {
+            h.query_by_label("트랜잭션 중").is_some()
+        });
+        run_sql(&mut harness, "DELETE FROM t");
+        wait_sql(&mut harness, "지우기", |h| {
+            h.query_by_label_contains("DELETE FROM t — 2행 바뀜")
+                .is_some()
+        });
+        harness.get_by_label("롤백").click();
+        wait_sql(&mut harness, "롤백", |h| {
+            h.query_by_label("롤백했습니다").is_some()
+        });
+        run_sql(&mut harness, "SELECT count(*) AS n FROM t");
+        wait_sql(&mut harness, "세기", |h| {
+            h.query_by_label_contains("FROM t — 1행 받음").is_some()
+        });
+        harness.get_by_label("2");
+
+        // 실행 계획은 종류마다 맞는 문장으로 본다(SQLite: EXPLAIN QUERY PLAN).
+        harness.state_mut().sql.text = "SELECT * FROM t WHERE a = 1".into();
+        harness.run_ok();
+        harness.get_by_role(Role::MultilineTextInput).focus();
+        harness.run_ok();
+        harness.get_by_label("실행 계획").click();
+        wait_sql(&mut harness, "실행 계획", |h| {
+            h.query_by_label_contains("EXPLAIN QUERY PLAN SELECT")
+                .is_some()
+        });
+        harness.get_by_label_contains("SCAN t");
         drop(harness);
         remove_project(&dir);
     }

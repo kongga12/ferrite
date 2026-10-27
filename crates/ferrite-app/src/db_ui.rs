@@ -64,14 +64,13 @@ impl DbWindow {
         self.open = true;
     }
 
-    #[cfg(test)]
     pub fn connections(&self) -> &[ConnectionConfig] {
         &self.connections
     }
 
-    #[cfg(test)]
-    pub fn saved_password(&self, id: &str) -> Option<String> {
-        self.secrets.get(id).ok().flatten()
+    /// 키체인에 저장된 비밀번호.
+    pub fn password(&self, id: &str) -> Result<Option<String>, String> {
+        self.secrets.get(id)
     }
 
     fn save_list(&mut self) -> Result<(), String> {
@@ -177,9 +176,10 @@ impl DbWindow {
         self.error = self.save_list().err().or(secret.err());
     }
 
-    pub fn ui(&mut self, ctx: &egui::Context) {
+    /// [SQL 콘솔]을 누르면 그 연결을 돌려준다.
+    pub fn ui(&mut self, ctx: &egui::Context) -> Option<ConnectionConfig> {
         if !self.open {
-            return;
+            return None;
         }
         self.poll_tests();
         let mut open = self.open;
@@ -203,6 +203,9 @@ impl DbWindow {
                         ui.weak(connection.summary());
                     });
                     ui.horizontal(|ui| {
+                        if ui.button("SQL 콘솔").clicked() {
+                            action = Some(Action::Console(connection.clone()));
+                        }
                         if ui.button("연결 시험").clicked() {
                             action = Some(Action::Test(connection.clone()));
                         }
@@ -257,12 +260,15 @@ impl DbWindow {
                 self.confirm_delete = None;
                 self.delete(&id);
             }
+            Some(Action::Console(config)) => return Some(config),
             None => {}
         }
+        None
     }
 }
 
 enum Action {
+    Console(ConnectionConfig),
     Test(ConnectionConfig),
     TestEditor,
     Edit(ConnectionConfig),
