@@ -4994,7 +4994,8 @@ mod tests {
             .find(|c| c.name == "오라클")
             .cloned()
             .unwrap();
-        assert_eq!(oracle.drivers, [lib.join("ojdbc6.jar")]);
+        // 앱은 프로젝트 경로를 실제 경로로 연다(macOS 임시 폴더 `/var` → `/private/var`).
+        assert_eq!(oracle.drivers, [real_path(&lib.join("ojdbc6.jar"))]);
         assert_eq!(oracle.jdbc_url(), "jdbc:oracle:thin:@//localhost:1521/XE");
         drop(harness);
         remove_project(&dir);
