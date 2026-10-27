@@ -10,6 +10,8 @@ use std::hash::{BuildHasher, Hasher};
 use serde::Serialize;
 use serde_json::{Map, Value};
 
+pub mod kernel;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CellKind {
     Code,
@@ -175,6 +177,70 @@ impl Notebook {
             .or_else(|| metadata["kernelspec"]["language"].as_str())
     }
 
+    /// 노트북을 만든 커널의 이름(kernelspec). 모르면 None.
+    pub fn kernel_name(&self) -> Option<&str> {
+        self.doc["metadata"]["kernelspec"]["name"].as_str()
+    }
+
+    /// 코드 셀의 출력을 비운다.
+    pub fn clear_outputs(&mut self, index: usize) {
+        if self.kind(index) == CellKind::Code
+            && let Some(cell) = self.cell_mut(index)
+        {
+            cell.insert("outputs".into(), Value::Array(Vec::new()));
+        }
+    }
+
+    pub fn set_execution_count(&mut self, index: usize, count: Option<u64>) {
+        if self.kind(index) == CellKind::Code
+            && let Some(cell) = self.cell_mut(index)
+        {
+            cell.insert(
+                "execution_count".into(),
+                count.map_or(Value::Null, Value::from),
+            );
+        }
+    }
+
+    /// 커널 출력(nbformat 출력 JSON)을 코드 셀에 더한다. nbformat처럼 글은 줄 목록으로 쓰고, 바로 앞
+    /// 출력과 같은 스트림이면 이어 붙인다.
+    pub fn push_output(&mut self, index: usize, mut output: Value) {
+        if self.kind(index) != CellKind::Code {
+            return;
+        }
+        let Some(cell) = self.cell_mut(index) else {
+            return;
+        };
+        let outputs = cell
+            .entry("outputs")
+            .or_insert_with(|| Value::Array(Vec::new()));
+        let Some(outputs) = outputs.as_array_mut() else {
+            return;
+        };
+        if output["output_type"] == "stream" {
+            if let Some(last) = outputs.last_mut()
+                && last["output_type"] == "stream"
+                && last["name"] == output["name"]
+            {
+                let joined = text(&last["text"]) + &text(&output["text"]);
+                last["text"] = lines(&joined);
+                return;
+            }
+            output["text"] = lines(&text(&output["text"]));
+        } else if let Some(data) = output.get_mut("data").and_then(Value::as_object_mut) {
+            for (mime, value) in data.iter_mut() {
+                // nbformat은 글 형식만 줄로 나눈다(그림 base64는 한 줄 그대로).
+                let split = mime.starts_with("text/")
+                    || mime == "image/svg+xml"
+                    || mime == "application/javascript";
+                if split && value.is_string() {
+                    *value = lines(&text(value));
+                }
+            }
+        }
+        outputs.push(output);
+    }
+
     /// `at` 자리에 빈 셀을 넣는다. nbformat 4.5부터는 셀마다 고유 id가 있어야 한다.
     pub fn insert(&mut self, at: usize, kind: CellKind) {
         let with_id = self.doc["nbformat_minor"].as_u64().unwrap_or(0) >= 5;
@@ -311,6 +377,7 @@ pub fn strip_ansi(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     const SMALL: &str = r#"{
  "cells": [
@@ -402,5 +469,60 @@ mod tests {
             strip_ansi("\u{1b}[0;31mZeroDivisionError\u{1b}[0m: division by zero"),
             "ZeroDivisionError: division by zero"
         );
+    }
+
+    #[test]
+    fn 커널_출력을_nbformat_모양으로_더한다() {
+        let mut notebook = Notebook::parse(SMALL).unwrap();
+        notebook.clear_outputs(0);
+        notebook.set_execution_count(0, None);
+        let stream = |text: &str| json!({"output_type": "stream", "name": "stdout", "text": text});
+        notebook.push_output(
+            0,
+            stream(
+                "안녕
+둘",
+            ),
+        );
+        notebook.push_output(
+            0,
+            stream(
+                "째
+",
+            ),
+        );
+        notebook.push_output(
+            0,
+            json!({"output_type": "execute_result", "execution_count": 2, "metadata": {},
+                "data": {"text/plain": "a
+b", "image/png": "iVBOR
+"}}),
+        );
+        notebook.set_execution_count(0, Some(2));
+        let cell = &notebook.doc["cells"][0];
+        assert_eq!(
+            cell["outputs"][0]["text"],
+            json!([
+                "안녕
+", "둘째
+"
+            ]),
+            "스트림은 이어 붙인다"
+        );
+        assert_eq!(
+            cell["outputs"][1]["data"]["text/plain"],
+            json!([
+                "a
+", "b"
+            ])
+        );
+        assert_eq!(
+            cell["outputs"][1]["data"]["image/png"],
+            "iVBOR
+",
+            "그림은 나누지 않는다"
+        );
+        assert_eq!(notebook.execution_count(0), Some(2));
+        assert_eq!(notebook.outputs(0).len(), 2);
     }
 }

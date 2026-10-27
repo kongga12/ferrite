@@ -1,11 +1,12 @@
 [package]
 name = "ferrite-notebook"
-description = "Ferrite 노트북: Jupyter .ipynb(nbformat 4) 읽기·고치기·쓰기"
+description = "Ferrite 노트북: Jupyter .ipynb(nbformat 4) 읽기·고치기·쓰기, Jupyter 커널 실행"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
 [dependencies]
+base64 = "0.22.1"
 serde = "1.0.229"
 serde_json = "1.0.154"
