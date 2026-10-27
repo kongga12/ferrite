@@ -5367,21 +5367,111 @@ mod tests {
         remove_project(&dir);
     }
 
-    /// PATH의 Python에 ipykernel이 있는지. 없으면 건너뛰되 CI에서는 실패시킨다.
-    fn ipykernel_available() -> bool {
+    /// PATH의 Python으로 `modules`를 가져올 수 있는지. 없으면 건너뛰되 CI에서는 실패시킨다.
+    fn python_has(modules: &str) -> bool {
         let python = if cfg!(windows) { "python" } else { "python3" };
         let found = std::process::Command::new(python)
-            .args(["-c", "import ipykernel, jupyter_client"])
+            .args(["-c", &format!("import {modules}")])
             .output()
             .is_ok_and(|o| o.status.success());
         if !found {
             assert!(
                 std::env::var_os("CI").is_none(),
-                "CI에는 ipykernel이 설치되어 있어야 합니다"
+                "CI에는 {modules}이(가) 설치되어 있어야 합니다"
             );
-            eprintln!("ipykernel이 없어 건너뜁니다");
+            eprintln!("{modules}이(가) 없어 건너뜁니다");
         }
         found
+    }
+
+    fn ipykernel_available() -> bool {
+        python_has("ipykernel, jupyter_client")
+    }
+
+    /// `done`이 될 때까지 프레임을 돌린다(최대 120초, 커널을 처음 띄울 때 느리다).
+    fn wait_until(
+        harness: &mut Harness<'_, FerriteApp>,
+        what: &str,
+        mut done: impl FnMut(&mut Harness<'_, FerriteApp>) -> bool,
+    ) {
+        let started = std::time::Instant::now();
+        while !done(harness) {
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(120),
+                "{what} 시간 초과"
+            );
+            harness.run_ok();
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        harness.run_ok();
+    }
+
+    #[test]
+    fn 커널의_dataframe을_그리드로_보고_정렬한다() {
+        use egui::accesskit::Role;
+        if !python_has("ipykernel, jupyter_client, pandas") {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("ferrite-frame-ui-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("표.ipynb");
+        let mut notebook = ferrite_notebook::Notebook::parse(
+            r#"{"cells": [], "metadata": {}, "nbformat": 4, "nbformat_minor": 5}"#,
+        )
+        .unwrap();
+        notebook.insert(0, ferrite_notebook::CellKind::Code);
+        notebook.set_source(
+            0,
+            "import pandas as pd\ndf = pd.DataFrame({'이름': [f'사람{i}' for i in range(500)], 'n': range(500)})",
+        );
+        fs::write(&path, notebook.to_json()).unwrap();
+        let root = dir.clone();
+        let mut harness = harness_builder()
+            .with_size(egui::vec2(1200.0, 1000.0))
+            .build_eframe(move |cc| FerriteApp::new(cc, Some(root.clone())));
+        harness.run_ok();
+        harness.state_mut().open_file(path.clone());
+        harness.run_ok();
+
+        harness.get_by_label("DataFrame 보기").click();
+        harness.run_ok();
+        harness.get_by_label("커널이 꺼져 있습니다. 셀을 실행하면 DataFrame을 볼 수 있습니다");
+        harness.get_by_label("모두 실행").click();
+        wait_until(&mut harness, "셀 실행", |h| {
+            h.query_by_label("코드 [1]").is_some()
+        });
+
+        // 실행이 끝나면 목록을 다시 묻는다. 답이 올 때까지 목록을 열어 본다.
+        wait_until(&mut harness, "DataFrame 목록", |h| {
+            h.get_by_role_and_label(Role::ComboBox, "DataFrame").click();
+            h.run_ok();
+            let found = h.query_by_label("df · 500행 × 2열").is_some();
+            if found {
+                h.get_by_label("df · 500행 × 2열").click();
+            } else {
+                h.key_press(egui::Key::Escape);
+            }
+            found
+        });
+        wait_until(&mut harness, "첫 페이지", |h| {
+            h.query_by_label("사람0").is_some()
+        });
+        harness.get_by_label("500행 × 2열");
+
+        // 머리글을 누르면 오름차순, 한 번 더 누르면 내림차순으로 커널에서 정렬한다.
+        harness.get_by_label("n").click();
+        harness.run_ok();
+        harness.get_by_label("n ▲").click();
+        wait_until(&mut harness, "내림차순 정렬", |h| {
+            h.query_by_label("사람499").is_some()
+        });
+        assert!(
+            harness.query_by_label("사람0").is_none(),
+            "맨 위는 큰 수부터"
+        );
+        drop(harness);
+        remove_project(&dir);
     }
 
     #[test]

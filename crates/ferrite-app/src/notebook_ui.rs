@@ -15,6 +15,8 @@ use base64::Engine as _;
 use eframe::egui;
 use ferrite_core::buffer::Buffer;
 use ferrite_notebook::kernel::{Event, Kernel, Status};
+
+use crate::frame_ui::FrameViewer;
 use ferrite_notebook::{CellKind, Notebook, Output, strip_ansi};
 
 /// HTML 출력 요약에 보이는 최대 줄 수.
@@ -27,6 +29,7 @@ enum KernelState {
     Starting,
     Ready {
         name: String,
+        language: String,
         notice: Option<String>,
     },
     /// 끝났거나 띄우지 못했다(까닭). 다시 실행하면 새로 띄운다.
@@ -51,6 +54,8 @@ pub struct NotebookView {
     next_key: u64,
     kernel: Option<Kernel>,
     kernel_state: KernelState,
+    /// 커널의 DataFrame 보기(아래 판).
+    frames: FrameViewer,
     /// 실행 줄: (실행 id, 셀 번호). 맨 앞이 실행 중이다.
     queue: VecDeque<(u64, u64)>,
 }
@@ -202,7 +207,7 @@ impl NotebookView {
                     ui.spinner();
                     ui.label("커널: 띄우는 중");
                 }
-                KernelState::Ready { name, notice } => {
+                KernelState::Ready { name, notice, .. } => {
                     if self.queue.is_empty() {
                         ui.label(format!("커널: {name}"));
                     } else {
@@ -219,8 +224,36 @@ impl NotebookView {
                         .on_hover_text(reason);
                 }
             }
+            ui.separator();
+            if ui
+                .toggle_value(&mut self.frames.open, "DataFrame 보기")
+                .changed()
+                && self.frames.open
+            {
+                self.frames.invalidate();
+            }
         });
         ui.separator();
+        if self.frames.open {
+            let kernel = match (&mut self.kernel, &self.kernel_state) {
+                (Some(kernel), KernelState::Ready { language, .. }) if language == "python" => {
+                    Ok(kernel)
+                }
+                (Some(_), KernelState::Ready { .. }) => {
+                    Err("DataFrame 보기는 Python 커널에서만 됩니다")
+                }
+                (Some(_), KernelState::Starting) => Err("커널을 띄우는 중입니다"),
+                _ => Err("커널이 꺼져 있습니다. 셀을 실행하면 DataFrame을 볼 수 있습니다"),
+            };
+            egui::Panel::bottom("notebook_frames")
+                .resizable(true)
+                .default_size(260.0)
+                .show(ui, |ui| {
+                    // 내용이 적어도 판 높이를 지킨다(egui는 그린 크기를 판 크기로 기억한다).
+                    ui.set_min_height(ui.available_height());
+                    self.frames.ui(ui, kernel);
+                });
+        }
         let ctx = ui.ctx().clone();
         let Self {
             sources,
@@ -323,6 +356,7 @@ impl NotebookView {
                 // 버리면 사이드카가 이전 커널을 끈다(실행 중이어도). 새 커널은 곧바로 띄운다.
                 self.kernel = None;
                 self.queue.clear();
+                self.frames.reset();
                 self.start_kernel(path, ctx);
                 return;
             }
@@ -435,13 +469,17 @@ impl NotebookView {
                 _ => None,
             };
             match event {
+                event @ (Event::Frames { .. } | Event::Page { .. }) => self.frames.receive(event),
                 Event::Started {
                     display_name,
+                    language,
                     missing,
                     ..
                 } => {
+                    self.frames.reset();
                     self.kernel_state = KernelState::Ready {
                         name: display_name,
+                        language,
                         notice: missing.map(|m| {
                             format!("노트북의 커널({m})이 이 컴퓨터에 없어 대신 띄웠습니다")
                         }),
@@ -471,6 +509,10 @@ impl NotebookView {
                         changed = true;
                     }
                     self.queue.retain(|(e, _)| *e != id);
+                    // 실행이 다 끝나면 DataFrame이 바뀌었을 수 있다.
+                    if self.queue.is_empty() {
+                        self.frames.invalidate();
+                    }
                     if status == Status::Dead {
                         self.kernel_state = KernelState::Ended(
                             "커널이 죽었습니다. 다시 실행하면 새로 띄웁니다".into(),
@@ -487,6 +529,7 @@ impl NotebookView {
         if ended {
             self.kernel = None;
             self.queue.clear();
+            self.frames.reset();
         }
         if changed {
             self.write(buffer);

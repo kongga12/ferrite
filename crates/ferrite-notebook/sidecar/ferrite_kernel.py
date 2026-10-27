@@ -4,11 +4,14 @@ jupyter_client로 Jupyter 커널을 띄우고 Ferrite와는 표준 입출력의 
 Python 3.8 문법만 쓴다(사용자의 Python에서 돈다).
 
 요청: {"method": "start", "params": {"kernel", "cwd"}}, {"method": "execute", "params": {"id", "code"}},
+{"method": "data", "params": {"id", "kind"(frames·page), "name", "start", "stop", "sort", "ascending"}},
 {"method": "interrupt"}. 입력이 닫히면 커널을 끄고 끝난다.
 알림: started {name, display_name, language, missing}, output {id, output(nbformat 출력)}, clear {id},
-done {id, execution_count, status(ok·error·aborted·dead)}, error {kind, message}(보낸 뒤 끝난다).
+done {id, execution_count, status(ok·error·aborted·dead)}, value {id, kind, value 또는 error},
+error {kind, message}(보낸 뒤 끝난다).
 """
 
+import ast
 import json
 import os
 import queue
@@ -23,6 +26,46 @@ os.dup2(2, 1)
 sys.stdout = sys.stderr
 
 commands = queue.Queue()
+
+# 커널 안에서 도는 DataFrame 도우미. 조용한 실행(번호·출력·기록 없음)으로 정의하고 user_expressions로
+# 부른다. 사용자 이름공간에는 `_ferrite` 하나만 둔다. pandas를 가져오지 않은 커널에서는 가져오지 않는다.
+KERNEL_HELPER = """
+class _ferrite:
+    @staticmethod
+    def frames():
+        import json, sys
+        pd = sys.modules.get("pandas")
+        if pd is None:
+            return "[]"
+        return json.dumps([
+            {"name": k, "rows": int(v.shape[0]), "columns": int(v.shape[1])}
+            for k, v in list(get_ipython().user_ns.items())
+            if not k.startswith("_") and isinstance(v, pd.DataFrame)
+        ])
+
+    @staticmethod
+    def page(name, start, stop, sort, ascending):
+        import json
+        frame = get_ipython().user_ns[name]
+        if sort is not None:
+            # 열 이름·색인이 겹쳐도 되게 자리로 정렬한다. 섞인 형식이면 글자로 비교한다.
+            # ponytail: 페이지마다 다시 정렬한다. 수백만 행에서 느리면 정렬 순서를 캐시한다.
+            key = frame.iloc[:, sort].reset_index(drop=True)
+            try:
+                order = key.sort_values(ascending=ascending, kind="stable").index
+            except TypeError:
+                order = key.astype(str).sort_values(ascending=ascending, kind="stable").index
+            frame = frame.iloc[order]
+        part = frame.iloc[start:stop]
+        data = part.to_json(orient="values", date_format="iso", double_precision=15, default_handler=str)
+        return json.dumps({
+            "rows": int(frame.shape[0]),
+            "columns": [str(c) for c in frame.columns],
+            "dtypes": [str(t) for t in frame.dtypes],
+            "index": [str(i) for i in part.index],
+            "data": json.loads(data),
+        })
+"""
 
 
 def send(event, **fields):
@@ -160,10 +203,44 @@ class Session:
                     self.pending.remove(command)
                     send("done", id=command["params"]["id"], execution_count=None, status="aborted")
 
-    def reply(self, msg_id):
+    def data(self, params):
+        """DataFrame 목록이나 한 페이지를 답한다. 실패해도 사이드카는 끝나지 않는다."""
+        request, kind = params["id"], params.get("kind")
+        try:
+            if self.kc is None:
+                raise RuntimeError("kernel is not running")
+            if kind == "page":
+                args = (
+                    str(params["name"]),
+                    int(params["start"]),
+                    int(params["stop"]),
+                    None if params.get("sort") is None else int(params["sort"]),
+                    bool(params.get("ascending", True)),
+                )
+                expression = "_ferrite.page(%s)" % ", ".join(repr(a) for a in args)
+            else:
+                expression = "_ferrite.frames()"
+            msg_id = self.kc.execute(
+                KERNEL_HELPER,
+                silent=True,
+                store_history=False,
+                user_expressions={"value": expression},
+                allow_stdin=False,
+            )
+            result = self.reply(msg_id, timeout=60).get("user_expressions", {}).get("value", {})
+            if result.get("status") != "ok":
+                raise RuntimeError("%s: %s" % (result.get("ename"), result.get("evalue")))
+            # 값은 파이썬 글자의 repr로 온다.
+            value = json.loads(ast.literal_eval(result["data"]["text/plain"]))
+        except Exception as e:
+            send("value", id=request, kind=kind, error=str(e))
+            return
+        send("value", id=request, kind=kind, value=value)
+
+    def reply(self, msg_id, timeout=10):
         while True:
             try:
-                msg = self.kc.get_shell_msg(timeout=10)
+                msg = self.kc.get_shell_msg(timeout=timeout)
             except queue.Empty:
                 return {}
             if msg["parent_header"].get("msg_id") == msg_id:
@@ -194,6 +271,8 @@ def main():
                 session.start(params)
             elif method == "execute":
                 session.execute(params)
+            elif method == "data":
+                session.data(params)
             elif method == "interrupt" and session.km is not None:
                 session.km.interrupt_kernel()
     except Exception as e:
