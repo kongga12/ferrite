@@ -68,6 +68,8 @@ pub struct Table {
     pub schema: Option<String>,
     pub name: String,
     pub view: bool,
+    /// 동의어면 가리키는 표(`주인.표`). 열은 그 표의 열이다.
+    pub synonym: Option<String>,
     pub columns: Vec<TableColumn>,
 }
 
@@ -111,6 +113,7 @@ pub(crate) fn group_tables(
                 schema,
                 name,
                 view,
+                synonym: None,
                 columns: Vec::new(),
             });
         }

@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use common::{Dialect, Session};
 use ferrite_db::jdbc::{self, DOWNLOADS};
-use ferrite_db::{Cell, ConnectionConfig, Kind};
+use ferrite_db::{Cell, ConnectionConfig, Event, Kind};
 
 fn setup() -> bool {
     let javac = format!("javac{}", std::env::consts::EXE_SUFFIX);
@@ -144,6 +144,48 @@ fn jdbc_scenario(config: &ConnectionConfig, password: Option<String>, dialect: D
     s.exec("DROP TABLE ferrite_j");
 }
 
+/// 동의어: 사용자 동의어가 가리키는 표의 열과 함께 스키마에 보이고, 시스템 계정의 PUBLIC 동의어(사전 뷰)는
+/// 넣지 않는다.
+fn synonym_scenario(config: &ConnectionConfig, password: Option<String>) {
+    let (mut s, _) = open(config, password);
+    s.conn().execute("DROP SYNONYM ferrite_syn");
+    s.wait(|e| matches!(e, Event::Done { .. } | Event::Error(_)));
+    s.drop_table("ferrite_st");
+    s.exec("CREATE TABLE ferrite_st (id INT PRIMARY KEY, name VARCHAR(30))");
+    s.exec("CREATE SYNONYM ferrite_syn FOR ferrite_st");
+    s.conn().load_schema();
+    let tables = match s.wait(|e| matches!(e, Event::Schema(_) | Event::Error(_))) {
+        Event::Schema(tables) => tables,
+        other => panic!("스키마: {other:?}"),
+    };
+    let synonym = tables
+        .iter()
+        .find(|t| t.name.eq_ignore_ascii_case("ferrite_syn"))
+        .unwrap_or_else(|| panic!("동의어가 없다: {tables:?}"));
+    let target = synonym
+        .synonym
+        .as_deref()
+        .unwrap_or_default()
+        .to_lowercase();
+    assert!(target.ends_with(".ferrite_st"), "{target}");
+    let columns: Vec<String> = synonym
+        .columns
+        .iter()
+        .map(|c| c.name.to_lowercase())
+        .collect();
+    assert_eq!(columns, ["id", "name"]);
+    let system = ["sys.", "system.", "syscat.", "sysgis."];
+    assert!(
+        tables.iter().all(|t| t
+            .synonym
+            .as_deref()
+            .is_none_or(|target| !system.iter().any(|s| target.to_lowercase().starts_with(s)))),
+        "시스템 계정의 표를 가리키는 동의어는 넣지 않는다"
+    );
+    s.exec("DROP SYNONYM ferrite_syn");
+    s.exec("DROP TABLE ferrite_st");
+}
+
 #[test]
 fn oracle로_시나리오를_돈다() {
     let Some((config, password)) = server(Kind::Oracle, "FERRITE_TEST_ORACLE") else {
@@ -160,6 +202,7 @@ fn oracle로_시나리오를_돈다() {
     jdbc_scenario(&config, password.clone(), Dialect::Oracle);
     common::edit_scenario(&config, password.clone());
     common::schema_scenario(&config, password.clone());
+    synonym_scenario(&config, password.clone());
 
     // 날짜는 보이는 글자(`2024-01-02 00:00:00.0`)나 날짜만 적어 고친다(세션 날짜 형식과 상관없이).
     let (mut s, _) = open(&config, password.clone());
@@ -215,6 +258,7 @@ fn tibero로_시나리오를_돈다() {
     jdbc_scenario(&config, password.clone(), Dialect::Oracle);
     common::edit_scenario(&config, password.clone());
     common::schema_scenario(&config, password.clone());
+    synonym_scenario(&config, password.clone());
 
     // 날짜는 보이는 글자(`2024-01-02 00:00:00`)나 날짜만 적어 고친다.
     let (mut s, _) = open(&config, password);
@@ -270,7 +314,8 @@ fn cubrid로_시나리오를_돈다() {
     );
     jdbc_scenario(&config, password.clone(), Dialect::Standard);
     common::edit_scenario(&config, password.clone());
-    common::schema_scenario(&config, password);
+    common::schema_scenario(&config, password.clone());
+    synonym_scenario(&config, password);
 }
 
 #[test]
