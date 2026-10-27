@@ -21,6 +21,13 @@ fn sqlite_파일로_시나리오를_돌린다() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[test]
+fn sqlite_결과를_고친다() {
+    let (dir, config) = temp_config("edit");
+    common::edit_scenario(&config, None);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 fn temp_config(tag: &str) -> (std::path::PathBuf, ConnectionConfig) {
     let dir = std::env::temp_dir().join(format!("ferrite-db-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);

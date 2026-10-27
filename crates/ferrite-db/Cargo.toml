@@ -10,6 +10,6 @@ publish.workspace = true
 keyring = "4.2.0"
 mysql = { version = "28.0.4", default-features = false, features = ["default-rust"] }
 postgres = "0.19.14"
-rusqlite = { version = "0.41.0", features = ["bundled"] }
+rusqlite = { version = "0.41.0", features = ["bundled", "column_metadata"] }
 serde = { version = "1.0.229", features = ["derive"] }
 toml = "1.1.8"

@@ -5,6 +5,7 @@
 //! 기다리고, UI가 `fetch`하면 다음 페이지를 보낸다(100만 행도 메모리는 받은 페이지만큼만 쓴다).
 
 pub mod config;
+pub mod edit;
 pub mod export;
 mod mysql;
 mod postgres;
@@ -19,6 +20,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 pub use config::{ConnectionConfig, Kind};
+pub use edit::Editable;
 
 /// 한 번에 보내는 행 수.
 pub const PAGE_ROWS: usize = 500;
@@ -64,6 +66,8 @@ pub enum Event {
     Disconnected(String),
     /// 결과 집합의 열. 이어서 `Rows`가 온다.
     Columns(Vec<Column>),
+    /// 방금 온 열의 결과를 고칠 수 있다(`Columns`와 첫 `Rows` 사이에 온다).
+    Editable(Editable),
     /// 결과 페이지. `more`면 `fetch`로 다음 페이지를 받는다.
     Rows {
         rows: Vec<Row>,
@@ -83,6 +87,8 @@ pub enum Event {
 
 enum Command {
     Execute(String),
+    /// 파라미터를 묶어 실행한다(결과 집합이 아닌 문장).
+    ExecuteParams(String, Vec<Cell>),
     Fetch,
     CloseResult,
     Commit,
@@ -129,6 +135,8 @@ pub(crate) trait Driver {
     /// 문장 하나를 실행한다. 결과 집합이면 `Columns`를 보내고 `io.page`로 페이지를 보낸다.
     /// 결과 집합이 아니면 바뀐 행 수를 돌려준다.
     fn execute(&mut self, sql: &str, io: &mut Io) -> Result<Option<u64>, String>;
+    /// 파라미터를 묶어 결과 집합이 아닌 문장을 실행하고 바뀐 행 수를 돌려준다.
+    fn execute_params(&mut self, sql: &str, params: &[Cell]) -> Result<u64, String>;
     fn commit(&mut self) -> Result<(), String>;
     fn rollback(&mut self) -> Result<(), String>;
     fn set_autocommit(&mut self, on: bool) -> Result<(), String>;
@@ -203,6 +211,14 @@ impl Connection {
         let _ = self.commands.send(Command::Execute(sql.to_owned()));
     }
 
+    /// 파라미터를 묶어 결과 집합이 아닌 문장(UPDATE 등)을 실행한다. 값은 SQL 글에 붙지 않는다.
+    /// 읽던 결과가 있으면 닫는다.
+    pub fn execute_params(&self, sql: &str, params: Vec<Cell>) {
+        let _ = self
+            .commands
+            .send(Command::ExecuteParams(sql.to_owned(), params));
+    }
+
     /// 다음 결과 페이지를 받는다.
     pub fn fetch(&self) {
         let _ = self.commands.send(Command::Fetch);
@@ -262,13 +278,13 @@ fn serve(driver: &mut dyn Driver, io: &mut Io) {
         match command {
             Command::Execute(sql) => {
                 let started = Instant::now();
-                match driver.execute(&sql, io) {
-                    Ok(affected) => io.send(Event::Done {
-                        affected,
-                        elapsed: started.elapsed(),
-                    }),
-                    Err(e) => io.send(Event::Error(e)),
-                }
+                let result = driver.execute(&sql, io);
+                finish(io, started, result);
+            }
+            Command::ExecuteParams(sql, params) => {
+                let started = Instant::now();
+                let result = driver.execute_params(&sql, &params).map(Some);
+                finish(io, started, result);
             }
             // 열린 결과가 없을 때 온 것은 버린다.
             Command::Fetch | Command::CloseResult => {}
@@ -287,6 +303,16 @@ fn serve(driver: &mut dyn Driver, io: &mut Io) {
                 }
             }
         }
+    }
+}
+
+fn finish(io: &Io, started: Instant, result: Result<Option<u64>, String>) {
+    match result {
+        Ok(affected) => io.send(Event::Done {
+            affected,
+            elapsed: started.elapsed(),
+        }),
+        Err(e) => io.send(Event::Error(e)),
     }
 }
 

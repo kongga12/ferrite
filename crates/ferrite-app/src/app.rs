@@ -4961,16 +4961,18 @@ mod tests {
         harness.run_ok();
     }
 
-    #[test]
-    fn sql_콘솔에서_실행하고_롤백하고_csv로_내보낸다() {
+    /// SQLite 연결을 추가하고 연결 창의 [SQL 콘솔]로 SQL 창을 열어 붙인다.
+    fn sql_console_harness(dir: &std::path::Path) -> Harness<'static, FerriteApp> {
         use egui::accesskit::Role;
-        let dir = std::env::temp_dir().join(format!("ferrite-sql-ui-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        // 도구 창이 에디터 아래 30%에 붙으므로 결과 행이 보이도록 높게 띄운다.
+        let _ = fs::remove_dir_all(dir);
+        fs::create_dir_all(dir).unwrap();
+        let root = dir.to_path_buf();
+        // 도구 창이 에디터 아래 30%에 붙으므로 결과 행이 보이도록 높게 띄운다. 한 프레임을 1/60초로 해
+        // 두 번 누르기가 egui의 더블 클릭 간격(0.3초) 안에 들어가게 한다(기본은 프레임마다 0.25초).
         let mut harness = harness_builder()
             .with_size(egui::vec2(1400.0, 1300.0))
-            .build_eframe(|cc| FerriteApp::new(cc, Some(dir.clone())));
+            .with_step_dt(1.0 / 60.0)
+            .build_eframe(move |cc| FerriteApp::new(cc, Some(root.clone())));
         harness.run_ok();
         harness.get_by_label("도구").click();
         harness.run_ok();
@@ -4991,6 +4993,14 @@ mod tests {
             h.query_by_label_contains("SQLite 3").is_some()
         });
         assert!(dock::is_shown(&harness.state().layout, Pane::Sql));
+        harness
+    }
+
+    #[test]
+    fn sql_콘솔에서_실행하고_롤백하고_csv로_내보낸다() {
+        use egui::accesskit::Role;
+        let dir = std::env::temp_dir().join(format!("ferrite-sql-ui-{}", std::process::id()));
+        let mut harness = sql_console_harness(&dir);
 
         // 고른 글의 세 문장을 차례로 실행하고 마지막 조회를 그리드에 보인다.
         run_sql(
@@ -5048,6 +5058,101 @@ mod tests {
                 .is_some()
         });
         harness.get_by_label_contains("SCAN t");
+        drop(harness);
+        remove_project(&dir);
+    }
+
+    /// 그리드 칸을 두 번 눌러 고친다. 앞서 누른 단추와 0.3초 안이면 egui가 세 번 누르기로 세므로 먼저
+    /// 시간을 흘려 보낸다.
+    fn edit_cell(harness: &mut Harness<'_, FerriteApp>, label: &str) {
+        harness.run_steps(20);
+        harness.get_by_label(label).click();
+        harness.step();
+        harness.get_by_label(label).click();
+        harness.run_ok();
+        harness.get_by_label("새 값");
+    }
+
+    #[test]
+    fn sql_콘솔_그리드에서_값을_고친다() {
+        use egui::accesskit::Role;
+        let dir = std::env::temp_dir().join(format!("ferrite-sql-edit-{}", std::process::id()));
+        let mut harness = sql_console_harness(&dir);
+        run_sql(
+            &mut harness,
+            "CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT, note TEXT);\nINSERT INTO t VALUES (1, '가나', NULL), (2, '다라', 'x');\nSELECT id, name, note FROM t ORDER BY id",
+        );
+        wait_sql(&mut harness, "조회", |h| {
+            h.query_by_label_contains("ORDER BY id — 2행 받음")
+                .is_some()
+        });
+        harness.get_by_label_contains("t · 칸을 두 번 눌러 고칩니다");
+
+        // 글자 칸의 값을 모두 골라 바꾸고 Enter로 저장한다(따옴표·세미콜론도 값 그대로).
+        edit_cell(&mut harness, "다라");
+        harness
+            .get_by_role_and_label(Role::TextInput, "새 값")
+            .focus();
+        harness.run_ok();
+        harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+        harness.run_ok();
+        harness
+            .get_by_role_and_label(Role::TextInput, "새 값")
+            .type_text("it's; 바뀜");
+        harness.run_ok();
+        harness.key_press(egui::Key::Enter);
+        wait_sql(&mut harness, "이름 고치기", |h| {
+            h.query_by_label("2행 값을 고쳤습니다").is_some()
+        });
+        harness.get_by_label("it's; 바뀜");
+
+        // NULL 칸은 NULL을 풀고 적어 [저장]한다.
+        edit_cell(&mut harness, "NULL");
+        harness
+            .get_by_role_and_label(Role::CheckBox, "NULL")
+            .click();
+        harness.run_ok();
+        type_into(&mut harness, "새 값", "메모");
+        harness.get_by_label("저장").click();
+        wait_sql(&mut harness, "NULL 고치기", |h| {
+            h.query_by_label("1행 값을 고쳤습니다").is_some()
+        });
+
+        // 트랜잭션 안에서 NULL로 고친 뒤 롤백하면, 다시 실행했을 때 앞 값이 보인다.
+        harness.get_by_label("자동 커밋").click();
+        wait_sql(&mut harness, "자동 커밋 끄기", |h| {
+            h.query_by_label("트랜잭션 중").is_some()
+        });
+        edit_cell(&mut harness, "가나");
+        harness
+            .get_by_role_and_label(Role::CheckBox, "NULL")
+            .click();
+        harness.run_ok();
+        harness.get_by_label("저장").click();
+        wait_sql(&mut harness, "트랜잭션 안에서 고치기", |h| {
+            h.query_by_label("1행 값을 고쳤습니다 (커밋해야 저장됩니다)")
+                .is_some()
+        });
+        harness.get_by_label("롤백").click();
+        wait_sql(&mut harness, "롤백", |h| {
+            h.query_by_label("롤백했습니다").is_some()
+        });
+        run_sql(&mut harness, "SELECT id, name, note FROM t ORDER BY id");
+        // 처음 실행한 같은 조회의 기록과 둘이 된다.
+        wait_sql(&mut harness, "다시 조회", |h| {
+            h.query_all_by_label("SELECT id, name, note FROM t ORDER BY id — 2행 받음")
+                .count()
+                == 2
+        });
+        harness.get_by_label("가나");
+        harness.get_by_label("메모");
+        harness.get_by_label("it's; 바뀜");
+
+        // 기본 키가 빠진 조회는 읽기 전용이다.
+        run_sql(&mut harness, "SELECT name FROM t");
+        wait_sql(&mut harness, "읽기 전용", |h| {
+            h.query_by_label_contains("읽기 전용").is_some()
+        });
         drop(harness);
         remove_project(&dir);
     }

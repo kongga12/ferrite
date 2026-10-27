@@ -4,7 +4,7 @@
 
 use std::collections::VecDeque;
 
-use crate::{Column, PAGE_ROWS, Row};
+use crate::{Cell, Column, PAGE_ROWS, Row};
 
 /// 기본 상한(행).
 pub const ROW_LIMIT: usize = 100_000;
@@ -65,6 +65,21 @@ impl ResultBuffer {
         self.dropped + self.rows.len()
     }
 
+    /// 받은 행 번호(버린 행 포함, 0부터)의 칸을 바꾼다. 이미 버린 행이면 false.
+    pub fn set(&mut self, number: usize, column: usize, cell: Cell) -> bool {
+        let slot = number
+            .checked_sub(self.dropped)
+            .and_then(|index| self.rows.get_mut(index))
+            .and_then(|row| row.get_mut(column));
+        match slot {
+            Some(slot) => {
+                *slot = cell;
+                true
+            }
+            None => false,
+        }
+    }
+
     pub fn has_more(&self) -> bool {
         self.more
     }
@@ -83,7 +98,6 @@ impl ResultBuffer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Cell;
 
     fn page(from: usize, n: usize) -> Vec<Row> {
         (from..from + n)
@@ -112,5 +126,11 @@ mod tests {
         buffer.push(page(1_500, 10), false);
         assert!(!buffer.has_more());
         assert!(!buffer.wants_more(1_000), "끝까지 받았다");
+
+        // 칸은 받은 행 번호로 고친다. 버린 행은 고치지 않는다.
+        assert!(buffer.set(1_509, 0, Cell::Null));
+        assert_eq!(buffer.row(buffer.len() - 1), Some(&vec![Cell::Null]));
+        assert!(!buffer.set(3, 0, Cell::Null), "버린 행");
+        assert!(!buffer.set(1_509, 1, Cell::Null), "없는 열");
     }
 }

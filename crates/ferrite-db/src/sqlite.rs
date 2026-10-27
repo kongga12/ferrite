@@ -1,8 +1,9 @@
 //! SQLite(rusqlite, SQLite 내장 빌드). 멈춤은 인터럽트로 한다.
 
-use rusqlite::types::ValueRef;
+use rusqlite::types::{Value, ValueRef};
 
-use crate::{Canceller, Cell, Column, ConnectionConfig, Driver, Event, Io, PAGE_ROWS, Row};
+use crate::edit::{Editable, Target, quote};
+use crate::{Canceller, Cell, Column, ConnectionConfig, Driver, Event, Io, Kind, PAGE_ROWS, Row};
 
 pub(crate) struct Sqlite {
     conn: rusqlite::Connection,
@@ -34,6 +35,58 @@ fn cell(value: ValueRef<'_>) -> Cell {
     }
 }
 
+fn param(cell: &Cell) -> Value {
+    match cell {
+        Cell::Null => Value::Null,
+        Cell::Int(n) => Value::Integer(*n),
+        Cell::Float(n) => Value::Real(*n),
+        Cell::Text(text) => Value::Text(text.clone()),
+        Cell::Bytes(bytes) => Value::Blob(bytes.clone()),
+    }
+}
+
+/// 결과 열이 모두 한 표에서 왔고 그 표의 기본 키 열이 다 있으면 고칠 수 있다.
+fn editable(conn: &rusqlite::Connection, statement: &rusqlite::Statement<'_>) -> Option<Editable> {
+    let origins: Vec<Option<(String, String, String)>> = statement
+        .columns_with_metadata()
+        .map(|c| {
+            Some((
+                c.database_name()?.to_owned(),
+                c.table_name()?.to_owned(),
+                c.origin_name()?.to_owned(),
+            ))
+        })
+        .collect();
+    let (database, table, _) = origins.iter().flatten().next()?.clone();
+    if origins
+        .iter()
+        .flatten()
+        .any(|(d, t, _)| (d, t) != (&database, &table))
+    {
+        return None;
+    }
+    let pragma = format!(
+        "PRAGMA {}.table_info({})",
+        quote(Kind::Sqlite, &database),
+        quote(Kind::Sqlite, &table)
+    );
+    let mut pragma = conn.prepare(&pragma).ok()?;
+    let mut keys: Vec<(i64, String)> = pragma
+        .query_map([], |row| Ok((row.get("pk")?, row.get("name")?)))
+        .ok()?
+        .collect::<Result<_, _>>()
+        .ok()?;
+    // pk는 기본 키 안의 순서(1부터), 기본 키가 아니면 0.
+    keys.retain(|(pk, _)| *pk > 0);
+    keys.sort();
+    let key_names: Vec<String> = keys.into_iter().map(|(_, name)| name).collect();
+    let columns = origins
+        .into_iter()
+        .map(|o| o.map(|(_, _, name)| Target { name, cast: None }))
+        .collect();
+    Editable::new(Kind::Sqlite, Some(&database), &table, columns, &key_names)
+}
+
 impl Sqlite {
     fn batch(&self, sql: &str) -> Result<(), String> {
         self.conn.execute_batch(sql).map_err(|e| e.to_string())
@@ -60,7 +113,11 @@ impl Driver for Sqlite {
                 name: name.to_owned(),
             })
             .collect();
+        let editable = editable(&self.conn, &statement);
         io.send(Event::Columns(columns));
+        if let Some(editable) = editable {
+            io.send(Event::Editable(editable));
+        }
         let mut rows = statement.query([]).map_err(|e| e.to_string())?;
         let mut page: Vec<Row> = Vec::with_capacity(PAGE_ROWS);
         loop {
@@ -81,6 +138,13 @@ impl Driver for Sqlite {
                 }
             }
         }
+    }
+
+    fn execute_params(&mut self, sql: &str, params: &[Cell]) -> Result<u64, String> {
+        self.conn
+            .execute(sql, rusqlite::params_from_iter(params.iter().map(param)))
+            .map(|n| n as u64)
+            .map_err(|e| e.to_string())
     }
 
     fn commit(&mut self) -> Result<(), String> {
