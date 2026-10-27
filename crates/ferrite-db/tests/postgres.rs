@@ -134,7 +134,8 @@ fn postgresql로_시나리오를_돌린다() {
         let (config, password) = from_env(&value);
         common::scenario(&config, password.clone(), "PostgreSQL ", long);
         common::postgres_extras(&config, password.clone());
-        common::edit_scenario(&config, password);
+        common::edit_scenario(&config, password.clone());
+        common::schema_scenario(&config, password);
         return;
     }
     let Some(bin) = pg_bin() else {
@@ -149,4 +150,5 @@ fn postgresql로_시나리오를_돌린다() {
     common::scenario(&config, None, "PostgreSQL ", long);
     common::postgres_extras(&config, None);
     common::edit_scenario(&config, None);
+    common::schema_scenario(&config, None);
 }

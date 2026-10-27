@@ -787,7 +787,24 @@
     - Oracle XE 11g·CUBRID 11.2(로컬 Docker): 5-2b 공통 편집 시나리오(복합 기본 키, 식 열, 따옴표·세미콜론 값, 글자로 적은 수, NULL, 같은 값 1행, 지워진 행 0행, 트랜잭션 안 틀린 값 뒤 롤백, 기본 키 없음·빠짐·두 표는 읽기 전용), `SELECT *`, 기본 키 이름을 별칭으로 붙인 열은 못 고치고 조건은 진짜 기본 키 값, Oracle DATE·TIMESTAMP를 보인 글자·날짜만으로 고치기
     - 실제 앱(Windows): CUBRID 2,000행 표에서 "dba.demo_emp · 칸을 두 번 눌러 고칩니다"를 보고 2행 이름을 두 번 눌러 고쳐, DB에서 그 행만 바뀐 것을 확인했다. 임시 연결 목록과 사이드카 폴더는 지웠다.
   - 찾은 것: 처음에는 ORDER BY 목록의 쉼표를 표를 더하는 쉼표로 읽어 `ORDER BY k1, k2` 조회를 읽기 전용으로 봤다(실서버 시나리오에서 찾음). 표를 더하는 쉼표는 표 이름 바로 뒤에서만 막는다.
-- [ ] 5-4 스키마 브라우저, 매퍼 SQL의 테이블·컬럼 완성·검증
+- [x] 5-4 스키마 브라우저(도구 > 스키마 브라우저)
+  - 연결의 기본 자리에 있는 표·뷰와 열(이름, DB가 보이는 형식)을 한 번에 읽는다(`Connection::load_schema` → `Event::Schema`). 콘솔 연결의 결과를 닫지 않게 따로 연결해 읽고 닫는다.
+    | 종류 | 읽는 곳 | 범위 |
+    |---|---|---|
+    | SQLite | `sqlite_master`, `PRAGMA table_info` | main |
+    | PostgreSQL | `pg_class`·`pg_attribute`, `format_type` | `pg_*`·`information_schema` 밖의 모든 스키마(`public`은 스키마 이름 없이 먼저) |
+    | MariaDB | `information_schema.COLUMNS`·`TABLES` | 현재 DB(없으면 시스템 DB 밖의 모든 DB) |
+    | Oracle·Tibero·CUBRID | `DatabaseMetaData.getTables`·`getColumns`(스키마 전체를 한 번에) | 사용자 스키마. Oracle 휴지통(`BIN$…`)은 뺀다 |
+  - 창: 연결 고르기(고르면 바로 읽는다), [새로 고침], 표·열 이름으로 찾기(열 이름으로 찾으면 그 표를 펼친다), "표 N개 · 뷰 M개", 표마다 열과 형식, [SQL 콘솔에서 조회](`SELECT * FROM 표`. 따옴표 없이 같은 이름이 아니면 따옴표로 감싼다: Oracle·Tibero 대문자, PostgreSQL 소문자)
+  - 기본 키 표시는 하지 않았다. JDBC는 표마다 `getPrimaryKeys`를 물어야 해 표가 많으면 느리다. 필요하면 DB별 사전 조회로 한 번에 읽는다.
+  - 검증
+    - 단위: 식별자 따옴표(종류별 대소문자, 한글·공백)
+    - 공통 시나리오(SQLite·PostgreSQL 로컬, Oracle XE 11g·CUBRID 11.2 로컬 Docker, MariaDB CI): 표와 뷰를 만들어 읽고, 뷰 표시와 열 순서·형식(`char`가 든 이름)을 본다
+    - 창 테스트(SQLite): 한글 이름 표·영문 표·뷰를 만들고 연결을 골라 "표 2개 · 뷰 1개", 열 이름(price)으로 찾기, 표를 펼쳐 [SQL 콘솔에서 조회] → `SELECT * FROM "주문"` 2행
+    - 실제 앱(Windows): CUBRID 연결을 골라 `demo_emp` 표와 열·형식을 보고, [SQL 콘솔에서 조회]로 SQL 탭이 열려 조회되는 것을 화면으로 확인했다. 임시 연결 목록과 사이드카 폴더는 지웠다.
+- [ ] 5-4b 매퍼 SQL의 테이블·컬럼 완성·검증
+  - 매퍼 기능은 앱이 띄우는 별도 LSP 서버(`ferrite --egov-ls`)라 앱의 DB 연결을 모른다. 그래서 앱 쪽에서 붙인다: 완성 응답(`on_lsp_response`의 목록)에 표·열 항목을 더하고, 진단은 고유 서버 이름으로 `DocSync::set_problems`에 넣는다. 스키마는 스키마 브라우저가 읽은 것을 쓴다.
+  - 매퍼 SQL에는 아직 토크나이저가 없다. `mapper::parse`(tree-sitter-xml)와 `open_element`로 문장 본문을 찾고, `<if>`·`<where>`·`<include refid>` 같은 동적 태그 안의 글을 이어 SQL로 읽는다.
 - [ ] 3개 OS 검증
 
 ### Phase 6 — 데이터 사이언스

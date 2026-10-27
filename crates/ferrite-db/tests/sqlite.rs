@@ -25,6 +25,7 @@ fn sqlite_파일로_시나리오를_돌린다() {
 fn sqlite_결과를_고친다() {
     let (dir, config) = temp_config("edit");
     common::edit_scenario(&config, None);
+    common::schema_scenario(&config, None);
     let _ = std::fs::remove_dir_all(&dir);
 }
 

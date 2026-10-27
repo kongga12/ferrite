@@ -6,7 +6,10 @@ use mysql::prelude::Queryable;
 use mysql::{Conn, Opts, OptsBuilder, Value};
 
 use crate::edit::{Editable, Target};
-use crate::{Canceller, Cell, Column, ConnectionConfig, Driver, Event, Io, Kind, PAGE_ROWS, Row};
+use crate::{
+    Canceller, Cell, Column, ConnectionConfig, Driver, Event, Io, Kind, PAGE_ROWS, Row, Table,
+    group_tables,
+};
 
 pub(crate) struct MariaDb {
     conn: Conn,
@@ -18,6 +21,15 @@ pub(crate) struct MariaDb {
 const PRIMARY_KEY: &str = "SELECT COLUMN_NAME FROM information_schema.KEY_COLUMN_USAGE \
      WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND CONSTRAINT_NAME = 'PRIMARY' \
      ORDER BY ORDINAL_POSITION";
+
+/// 스키마 브라우저: 현재 DB(없으면 시스템 DB 밖의 모든 DB)의 표·뷰와 열.
+const SCHEMA_COLUMNS: &str = "SELECT c.TABLE_SCHEMA, c.TABLE_NAME, t.TABLE_TYPE = 'VIEW', \
+     c.COLUMN_NAME, c.COLUMN_TYPE \
+     FROM information_schema.COLUMNS c JOIN information_schema.TABLES t \
+     ON t.TABLE_SCHEMA = c.TABLE_SCHEMA AND t.TABLE_NAME = c.TABLE_NAME \
+     WHERE c.TABLE_SCHEMA = DATABASE() OR (DATABASE() IS NULL AND c.TABLE_SCHEMA NOT IN \
+     ('mysql', 'information_schema', 'performance_schema', 'sys')) \
+     ORDER BY c.TABLE_SCHEMA, c.TABLE_NAME, c.ORDINAL_POSITION";
 
 pub(crate) fn connect(
     config: &ConnectionConfig,
@@ -191,5 +203,22 @@ impl Driver for MariaDb {
         } else {
             "SET autocommit=0"
         })
+    }
+
+    fn schema(&mut self) -> Result<Vec<Table>, String> {
+        // (스키마, 표, 뷰인지, 열, 형식). 현재 DB가 없으면 시스템 DB 밖의 모든 DB.
+        type Line = (String, String, i64, String, String);
+        let rows: Vec<Line> = self.conn.query(SCHEMA_COLUMNS).map_err(|e| e.to_string())?;
+        let current: Option<String> = self
+            .conn
+            .query_first("SELECT DATABASE()")
+            .map_err(|e| e.to_string())?
+            .flatten();
+        Ok(group_tables(rows.into_iter().map(
+            |(schema, table, view, column, ty)| {
+                let schema = (current.as_ref() != Some(&schema)).then_some(schema);
+                (schema, table, view != 0, column, ty)
+            },
+        )))
     }
 }

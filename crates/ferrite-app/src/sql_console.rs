@@ -221,6 +221,22 @@ impl SqlConsole {
         self.next();
     }
 
+    /// 글을 `sql`로 바꾸고 실행한다(스키마 브라우저의 [SQL 콘솔에서 조회]). 연결은 먼저 고른다.
+    pub fn query(&mut self, sql: String) {
+        if self.executing() {
+            self.note(true, "다른 문장이 실행 중입니다");
+            return;
+        }
+        if self.reading
+            && let Some(live) = &self.live
+        {
+            live.connection.close_result();
+        }
+        self.text = sql.clone();
+        self.queue = VecDeque::from([Job::Sql(sql)]);
+        self.next();
+    }
+
     /// 앞 일이 끝났으면 다음 일을 보낸다. 새 문장이면 앞 결과를 지운다(값 고치기는 그대로 둔다).
     fn next(&mut self) {
         if self.running.is_some() {
@@ -433,6 +449,8 @@ impl SqlConsole {
                         .unwrap_or("트랜잭션을 바꿨습니다");
                     self.note(false, done);
                 }
+                // 콘솔은 스키마를 읽지 않는다(스키마 브라우저는 따로 연결한다).
+                Event::Schema(_) => {}
             }
         }
         self.next();

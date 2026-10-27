@@ -8,7 +8,8 @@ use postgres::{Client, NoTls, SimpleQueryMessage};
 
 use crate::edit::{Editable, Target};
 use crate::{
-    Canceller, Cell, Column, ConnectionConfig, Driver, Event, Io, Kind, PAGE_ROWS, Row, is_query,
+    Canceller, Cell, Column, ConnectionConfig, Driver, Event, Io, Kind, PAGE_ROWS, Row, Table,
+    group_tables, is_query,
 };
 
 pub(crate) struct Postgres {
@@ -27,6 +28,15 @@ const TABLE_COLUMNS: &str = "SELECT a.attnum, a.attname::text, format_type(a.att
      JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped \
      LEFT JOIN pg_index i ON i.indrelid = c.oid AND i.indisprimary \
      WHERE c.oid = $1 AND c.relkind IN ('r', 'p')";
+
+/// 스키마 브라우저: 시스템 스키마(`pg_*`, `information_schema`) 밖의 표·뷰와 열.
+const SCHEMA_COLUMNS: &str = "SELECT n.nspname::text, c.relname::text, c.relkind IN ('v', 'm'), \
+     a.attname::text, format_type(a.atttypid, a.atttypmod) \
+     FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
+     JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped \
+     WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f') AND n.nspname !~ '^pg_' \
+     AND n.nspname <> 'information_schema' \
+     ORDER BY n.nspname = 'public' DESC, n.nspname, c.relname, a.attnum";
 
 /// 파라미터는 모두 글자로 보내고 SQL에서 열 형식으로 바꾼다(`CAST($n AS 형식)`).
 fn text_param(cell: &Cell) -> Option<String> {
@@ -296,5 +306,27 @@ impl Driver for Postgres {
         }
         self.manual = !on;
         Ok(())
+    }
+
+    fn schema(&mut self) -> Result<Vec<Table>, String> {
+        let rows = self
+            .client
+            .query(SCHEMA_COLUMNS, &[])
+            .map_err(|e| error(&e))?;
+        let rows = rows
+            .iter()
+            .map(|row| {
+                let schema: String = row.try_get(0)?;
+                Ok((
+                    (schema != "public").then_some(schema),
+                    row.try_get(1)?,
+                    row.try_get(2)?,
+                    row.try_get(3)?,
+                    row.try_get(4)?,
+                ))
+            })
+            .collect::<Result<Vec<_>, postgres::Error>>()
+            .map_err(|e| error(&e))?;
+        Ok(group_tables(rows))
     }
 }

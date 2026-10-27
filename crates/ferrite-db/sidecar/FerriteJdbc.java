@@ -139,6 +139,9 @@ public final class FerriteJdbc {
             return page();
         } else if ("close".equals(method)) {
             closeResult();
+        } else if ("schema".equals(method)) {
+            closeResult();
+            return schema();
         } else if ("table".equals(method)) {
             // 결과를 읽는 중에도 묻는다(결과를 닫지 않는다).
             return table(params);
@@ -383,6 +386,53 @@ public final class FerriteJdbc {
         info.put("fold", mode(meta.storesUpperCaseIdentifiers(), meta.storesLowerCaseIdentifiers()));
         info.put("quoted", mode(meta.storesUpperCaseQuotedIdentifiers(), meta.storesLowerCaseQuotedIdentifiers()));
         return info;
+    }
+
+    /**
+     * 사용자 스키마의 표·뷰와 열(스키마 브라우저). 열은 스키마 전체를 한 번에 읽는다(표마다 묻지 않는다).
+     * Oracle 휴지통의 표(BIN$…)는 뺀다.
+     */
+    private Map<String, Object> schema() throws SQLException {
+        DatabaseMetaData meta = conn.getMetaData();
+        String user = fold(meta.getUserName(), meta.storesUpperCaseIdentifiers(), meta.storesLowerCaseIdentifiers());
+        Map<String, Map<String, Object>> tables = new java.util.TreeMap<String, Map<String, Object>>();
+        ResultSet rs = meta.getTables(null, user, "%", new String[] {"TABLE", "VIEW"});
+        try {
+            while (rs.next()) {
+                String[] name = qualified(rs.getString("TABLE_SCHEM"), rs.getString("TABLE_NAME"));
+                if ((name[0] != null && !user.equals(name[0])) || name[1].startsWith("BIN$")) {
+                    continue;
+                }
+                Map<String, Object> table = new LinkedHashMap<String, Object>();
+                table.put("name", name[1]);
+                table.put("view", "VIEW".equalsIgnoreCase(rs.getString("TABLE_TYPE")));
+                table.put("columns", new ArrayList<Object>());
+                tables.put(name[1], table);
+            }
+        } finally {
+            rs.close();
+        }
+        rs = meta.getColumns(null, user, "%", "%");
+        try {
+            while (rs.next()) {
+                String[] name = qualified(rs.getString("TABLE_SCHEM"), rs.getString("TABLE_NAME"));
+                Map<String, Object> table = tables.get(name[1]);
+                if (table == null || (name[0] != null && !user.equals(name[0]))) {
+                    continue;
+                }
+                Map<String, Object> column = new LinkedHashMap<String, Object>();
+                column.put("name", rs.getString("COLUMN_NAME"));
+                column.put("type", rs.getString("TYPE_NAME"));
+                @SuppressWarnings("unchecked")
+                List<Object> columns = (List<Object>) table.get("columns");
+                columns.add(column);
+            }
+        } finally {
+            rs.close();
+        }
+        Map<String, Object> result = new LinkedHashMap<String, Object>();
+        result.put("tables", new ArrayList<Object>(tables.values()));
+        return result;
     }
 
     /** (스키마, 표). 스키마 칸이 비고 표 이름에 점이 있으면 나눈다(CUBRID 11.2). */

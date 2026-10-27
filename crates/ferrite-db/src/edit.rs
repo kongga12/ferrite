@@ -115,6 +115,26 @@ impl Editable {
     }
 }
 
+/// SQL에 쓸 식별자. 따옴표 없이 써도 같은 이름이면 그대로, 아니면 따옴표로 감싼다(Oracle·Tibero는
+/// 대문자, PostgreSQL은 소문자 이름만 따옴표 없이 같다).
+pub fn identifier(kind: Kind, name: &str) -> String {
+    let mut chars = name.chars();
+    let plain = chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && match kind {
+            Kind::Oracle | Kind::Tibero => !name.chars().any(|c| c.is_ascii_lowercase()),
+            Kind::Postgres => !name.chars().any(|c| c.is_ascii_uppercase()),
+            Kind::Sqlite | Kind::MariaDb | Kind::Cubrid => true,
+        };
+    if plain {
+        name.to_owned()
+    } else {
+        quote(kind, name)
+    }
+}
+
 /// 식별자를 따옴표로 감싼다(MariaDB는 역따옴표, 나머지는 큰따옴표).
 pub(crate) fn quote(kind: Kind, name: &str) -> String {
     match kind {
@@ -236,6 +256,17 @@ mod tests {
                 .0
                 .contains(r#""AT" = TO_TIMESTAMP(?, 'YYYY-MM-DD HH24:MI:SS.FF')"#)
         );
+    }
+
+    #[test]
+    fn 필요할_때만_식별자를_따옴표로_감싼다() {
+        assert_eq!(identifier(Kind::Oracle, "EMP_01"), "EMP_01");
+        assert_eq!(identifier(Kind::Oracle, "Emp"), "\"Emp\"");
+        assert_eq!(identifier(Kind::Postgres, "emp"), "emp");
+        assert_eq!(identifier(Kind::Postgres, "Emp"), "\"Emp\"");
+        assert_eq!(identifier(Kind::MariaDb, "주문"), "`주문`");
+        assert_eq!(identifier(Kind::Cubrid, "order item"), "\"order item\"");
+        assert_eq!(identifier(Kind::Sqlite, "Emp"), "Emp");
     }
 
     #[test]

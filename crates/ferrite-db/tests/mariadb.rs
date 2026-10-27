@@ -31,5 +31,6 @@ fn mariadb로_시나리오를_돌린다() {
         "MariaDB·MySQL ",
         "SELECT SLEEP(30)",
     );
-    common::edit_scenario(&config, password);
+    common::edit_scenario(&config, password.clone());
+    common::schema_scenario(&config, password);
 }

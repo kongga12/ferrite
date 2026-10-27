@@ -487,6 +487,9 @@ pub struct FerriteApp {
     /// DB 연결 창.
     db: crate::db_ui::DbWindow,
     sql: crate::sql_console::SqlConsole,
+    schema: crate::schema_ui::SchemaBrowser,
+    /// 스키마 브라우저가 맡긴 일. 배치를 바꾸므로 창 밖에서 처리한다.
+    schema_action: Option<crate::schema_ui::Action>,
     /// 창 배치. 그리는 동안에는 창들이 앱을 빌려 쓰므로 잠시 밖으로 꺼낸다(`ui`).
     layout: dock::Layout,
     /// 응답을 기다리는 언어 서버 요청.
@@ -595,6 +598,8 @@ impl FerriteApp {
             db: crate::db_ui::DbWindow::new(connections_path(), secret_store())
                 .with_driver_dirs(maven_repository(), jdbc_dir().map(|d| d.join("drivers"))),
             sql: Default::default(),
+            schema: Default::default(),
+            schema_action: None,
             layout: dock::load(layout_path().as_deref()),
             pending: std::collections::HashMap::new(),
             completion: None,
@@ -2178,6 +2183,10 @@ impl FerriteApp {
                         let root = self.tree.as_ref().map(|t| t.root().to_path_buf());
                         self.db.show(root.as_deref());
                     }
+                    if ui.button("스키마 브라우저").clicked() {
+                        ui.close();
+                        dock::show(&mut self.layout, Pane::Schema);
+                    }
                     if ui.button("SQL 콘솔").clicked() {
                         ui.close();
                         dock::show(&mut self.layout, Pane::Sql);
@@ -2854,6 +2863,11 @@ impl egui_tiles::Behavior<Pane> for Dock<'_> {
             }
             Pane::DebugConsole => app.debugger.console_ui(ui),
             Pane::Sql => app.sql.ui(ui, &app.db),
+            Pane::Schema => {
+                if let Some(action) = app.schema.ui(ui, &app.db) {
+                    app.schema_action = Some(action);
+                }
+            }
         });
         egui_tiles::UiResponse::None
     }
@@ -2959,6 +2973,11 @@ impl eframe::App for FerriteApp {
         self.commngt.ui(&ctx);
         if let Some(config) = self.db.ui(&ctx) {
             self.sql.connect(&config, &self.db, &ctx);
+            dock::show(&mut self.layout, Pane::Sql);
+        }
+        if let Some(crate::schema_ui::Action::Query(config, sql)) = self.schema_action.take() {
+            self.sql.connect(&config, &self.db, &ctx);
+            self.sql.query(sql);
             dock::show(&mut self.layout, Pane::Sql);
         }
         self.git.ui(&ctx);
@@ -5032,6 +5051,65 @@ mod tests {
         harness.run_ok();
         harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Enter);
         harness.run_ok();
+    }
+
+    #[test]
+    fn 스키마_브라우저로_표와_열을_보고_콘솔에서_조회한다() {
+        use egui::accesskit::Role;
+        let dir = std::env::temp_dir().join(format!("ferrite-schema-ui-{}", std::process::id()));
+        let mut harness = sql_console_harness(&dir);
+        run_sql(
+            &mut harness,
+            "CREATE TABLE 주문 (번호 INTEGER PRIMARY KEY, 메모 TEXT);\nCREATE TABLE item (id INTEGER, price REAL);\nCREATE VIEW v_item AS SELECT id FROM item;\nINSERT INTO 주문 VALUES (1, '첫'), (2, '둘')",
+        );
+        wait_sql(&mut harness, "표 만들기", |h| {
+            h.query_by_label_contains("— 2행 바뀜").is_some()
+        });
+
+        harness.get_by_label("도구").click();
+        harness.run_ok();
+        harness.get_by_label("스키마 브라우저").click();
+        harness.run_ok();
+        assert!(dock::is_shown(&harness.state().layout, Pane::Schema));
+        harness
+            .get_by_role_and_label(Role::ComboBox, "연결")
+            .click();
+        harness.run_ok();
+        // 연결 창 목록의 "로컬"은 글자이고, 고르기 목록의 것은 버튼이다.
+        harness.get_by_role_and_label(Role::Button, "로컬").click();
+        wait_sql(&mut harness, "스키마 읽기", |h| {
+            h.query_by_label_contains("표 2개 · 뷰 1개").is_some()
+        });
+
+        // 열 이름으로 찾으면 그 표만 펼쳐 보인다.
+        type_into(&mut harness, "찾기", "price");
+        harness.run_ok();
+        harness.get_by_label_contains("찾은 것 1개");
+        harness.get_by_label("price");
+        assert!(harness.query_by_label("주문").is_none());
+
+        // 표를 펼쳐 SQL 콘솔에서 조회한다(한글 이름은 따옴표로 감싼다).
+        harness
+            .get_by_role_and_label(Role::TextInput, "찾기")
+            .focus();
+        harness.run_ok();
+        harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+        harness.run_ok();
+        harness
+            .get_by_role_and_label(Role::TextInput, "찾기")
+            .type_text("주문");
+        harness.run_ok();
+        harness.get_by_label("주문").click();
+        harness.run_ok();
+        harness.get_by_label("메모");
+        harness.get_by_label("SQL 콘솔에서 조회").click();
+        wait_sql(&mut harness, "조회", |h| {
+            h.query_by_label("SELECT * FROM \"주문\" — 2행 받음")
+                .is_some()
+        });
+        assert_eq!(harness.state().sql.text, "SELECT * FROM \"주문\"");
+        drop(harness);
+        remove_project(&dir);
     }
 
     /// SQLite 연결을 추가하고 연결 창의 [SQL 콘솔]로 SQL 창을 열어 붙인다.

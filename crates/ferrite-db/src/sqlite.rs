@@ -3,7 +3,10 @@
 use rusqlite::types::{Value, ValueRef};
 
 use crate::edit::{Editable, Target, quote};
-use crate::{Canceller, Cell, Column, ConnectionConfig, Driver, Event, Io, Kind, PAGE_ROWS, Row};
+use crate::{
+    Canceller, Cell, Column, ConnectionConfig, Driver, Event, Io, Kind, PAGE_ROWS, Row, Table,
+    group_tables,
+};
 
 pub(crate) struct Sqlite {
     conn: rusqlite::Connection,
@@ -91,6 +94,32 @@ impl Sqlite {
     fn batch(&self, sql: &str) -> Result<(), String> {
         self.conn.execute_batch(sql).map_err(|e| e.to_string())
     }
+
+    fn tables(&self) -> rusqlite::Result<Vec<Table>> {
+        let mut list = self.conn.prepare(
+            "SELECT name, type = 'view' FROM sqlite_master \
+             WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\' ORDER BY name",
+        )?;
+        let names: Vec<(String, bool)> = list
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<Result<_, _>>()?;
+        let mut rows = Vec::new();
+        for (name, view) in names {
+            let mut pragma = self.conn.prepare(&format!(
+                "PRAGMA table_info({})",
+                quote(Kind::Sqlite, &name)
+            ))?;
+            let columns: Vec<(String, String)> = pragma
+                .query_map([], |row| Ok((row.get("name")?, row.get("type")?)))?
+                .collect::<Result<_, _>>()?;
+            rows.extend(
+                columns
+                    .into_iter()
+                    .map(|(column, ty)| (None, name.clone(), view, column, ty)),
+            );
+        }
+        Ok(group_tables(rows))
+    }
 }
 
 impl Driver for Sqlite {
@@ -176,5 +205,9 @@ impl Driver for Sqlite {
         }
         self.manual = !on;
         Ok(())
+    }
+
+    fn schema(&mut self) -> Result<Vec<Table>, String> {
+        self.tables().map_err(|e| e.to_string())
     }
 }
