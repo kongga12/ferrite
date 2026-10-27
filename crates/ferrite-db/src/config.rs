@@ -40,6 +40,19 @@ impl Kind {
     pub fn is_server(self) -> bool {
         self != Kind::Sqlite
     }
+
+    /// 따옴표 안의 역슬래시가 이스케이프인지(MariaDB·MySQL 기본 설정).
+    pub fn backslash_escapes(self) -> bool {
+        self == Kind::MariaDb
+    }
+
+    /// 실행 계획을 보는 문장.
+    pub fn explain(self, sql: &str) -> String {
+        match self {
+            Kind::Sqlite => format!("EXPLAIN QUERY PLAN {sql}"),
+            Kind::Postgres | Kind::MariaDb => format!("EXPLAIN {sql}"),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

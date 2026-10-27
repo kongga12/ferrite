@@ -5,12 +5,15 @@
 //! 기다리고, UI가 `fetch`하면 다음 페이지를 보낸다(100만 행도 메모리는 받은 페이지만큼만 쓴다).
 
 pub mod config;
+pub mod export;
 mod mysql;
 mod postgres;
+pub mod result;
 pub mod secret;
+pub mod split;
 mod sqlite;
 
-use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -232,6 +235,17 @@ impl Connection {
 
     pub fn poll(&self) -> Vec<Event> {
         self.events.try_iter().collect()
+    }
+
+    /// 다음 이벤트를 `timeout`까지 기다린다(UI가 아닌 곳에서 쓴다). 작업 스레드가 끝났으면 `Disconnected`.
+    pub fn next_event(&self, timeout: Duration) -> Option<Event> {
+        match self.events.recv_timeout(timeout) {
+            Ok(event) => Some(event),
+            Err(RecvTimeoutError::Timeout) => None,
+            Err(RecvTimeoutError::Disconnected) => {
+                Some(Event::Disconnected("연결이 끝났습니다".into()))
+            }
+        }
     }
 }
 

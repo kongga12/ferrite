@@ -22,6 +22,7 @@ mod new_project;
 mod picker;
 mod quick_open;
 mod servers;
+mod sql_console;
 mod terminal_ui;
 mod theme;
 mod watcher;
