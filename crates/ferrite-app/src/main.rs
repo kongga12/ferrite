@@ -18,6 +18,7 @@ mod fonts;
 mod git_ui;
 mod lsp_hub;
 mod lsp_ui;
+mod mapper_db;
 mod new_project;
 mod picker;
 mod quick_open;
