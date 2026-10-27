@@ -59,6 +59,46 @@ impl Kind {
             _ => json!({}),
         }
     }
+
+    /// 스키마 브라우저에 더할 동의어: 사용자 동의어와 PUBLIC 동의어 중 표·뷰를 가리키는 것의
+    /// (동의어, 표 주인, 표, 열, 형식) 줄. 사용자 동의어를 먼저, 동의어마다 열 순서대로 준다.
+    /// PUBLIC 동의어는 대부분 DB 자체의 사전 뷰를 가리키므로 시스템 계정의 표는 뺀다.
+    fn synonym_sql(self) -> Option<&'static str> {
+        match self {
+            Kind::Oracle => Some(
+                "SELECT s.SYNONYM_NAME, s.TABLE_OWNER, s.TABLE_NAME, c.COLUMN_NAME, c.DATA_TYPE \
+                 FROM ALL_SYNONYMS s JOIN ALL_TAB_COLUMNS c \
+                 ON c.OWNER = s.TABLE_OWNER AND c.TABLE_NAME = s.TABLE_NAME \
+                 WHERE s.OWNER IN (USER, 'PUBLIC') AND s.DB_LINK IS NULL \
+                 AND s.TABLE_OWNER NOT IN ('SYS', 'SYSTEM', 'XDB', 'MDSYS', 'CTXSYS', 'ORDSYS', \
+                 'ORDDATA', 'OLAPSYS', 'WMSYS', 'EXFSYS', 'DBSNMP', 'OUTLN', 'APPQOSSYS', \
+                 'ORACLE_OCM', 'LBACSYS', 'DVSYS', 'OJVMSYS', 'AUDSYS', 'GSMADMIN_INTERNAL', \
+                 'MDDATA', 'SI_INFORMTN_SCHEMA') \
+                 AND s.TABLE_OWNER NOT LIKE 'APEX%' AND s.TABLE_OWNER NOT LIKE 'FLOWS%' \
+                 ORDER BY CASE s.OWNER WHEN 'PUBLIC' THEN 1 ELSE 0 END, s.SYNONYM_NAME, c.COLUMN_ID",
+            ),
+            // Tibero의 ALL_SYNONYMS는 가리키는 표를 ORG_OBJECT_OWNER·ORG_OBJECT_NAME으로 적는다.
+            Kind::Tibero => Some(
+                "SELECT s.SYNONYM_NAME, s.ORG_OBJECT_OWNER, s.ORG_OBJECT_NAME, c.COLUMN_NAME, \
+                 c.DATA_TYPE \
+                 FROM ALL_SYNONYMS s JOIN ALL_TAB_COLUMNS c \
+                 ON c.OWNER = s.ORG_OBJECT_OWNER AND c.TABLE_NAME = s.ORG_OBJECT_NAME \
+                 WHERE s.OWNER IN (USER, 'PUBLIC') \
+                 AND s.ORG_OBJECT_OWNER NOT IN ('SYS', 'SYSCAT', 'SYSGIS', 'OUTLN') \
+                 ORDER BY CASE s.OWNER WHEN 'PUBLIC' THEN 1 ELSE 0 END, s.SYNONYM_NAME, c.COLUMN_ID",
+            ),
+            // CUBRID 11.2: 주인 이름은 대문자(CURRENT_USER와 같다), 표·열 이름은 소문자로 둔다.
+            Kind::Cubrid => Some(
+                "SELECT s.synonym_name, s.target_owner_name, s.target_name, a.attr_name, \
+                 a.data_type \
+                 FROM db_synonym s JOIN db_attribute a \
+                 ON a.class_name = s.target_name AND a.owner_name = s.target_owner_name \
+                 WHERE s.synonym_owner_name = CURRENT_USER OR s.is_public_synonym = 'YES' \
+                 ORDER BY s.is_public_synonym, s.synonym_name, a.def_order",
+            ),
+            Kind::Sqlite | Kind::Postgres | Kind::MariaDb => None,
+        }
+    }
 }
 
 /// JAVA_HOME의 bin, 없으면 PATH에서 찾는다.
@@ -441,7 +481,7 @@ impl Driver for Jdbc {
     }
 
     fn schema(&mut self) -> Result<Vec<Table>, String> {
-        let response = self.call("schema", json!({}))?;
+        let response = self.call("schema", json!({ "synonyms": self.kind.synonym_sql() }))?;
         let text = |value: &Value| value.as_str().unwrap_or_default().to_owned();
         Ok(response["tables"]
             .as_array()
@@ -452,6 +492,7 @@ impl Driver for Jdbc {
                         schema: None,
                         name: text(&table["name"]),
                         view: table["view"].as_bool().unwrap_or(false),
+                        synonym: table["synonym"].as_str().map(str::to_owned),
                         columns: table["columns"]
                             .as_array()
                             .map(|columns| {

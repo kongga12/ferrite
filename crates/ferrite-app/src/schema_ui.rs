@@ -144,9 +144,15 @@ impl SchemaBrowser {
             .collect();
         if self.config.is_some() && self.loading.is_none() && self.error.is_none() {
             let views = self.tables.iter().filter(|t| t.view).count();
+            let synonyms = self.tables.iter().filter(|t| t.synonym.is_some()).count();
             ui.weak(format!(
-                "표 {}개 · 뷰 {views}개{}",
-                self.tables.len() - views,
+                "표 {}개 · 뷰 {views}개{}{}",
+                self.tables.len() - views - synonyms,
+                if synonyms > 0 {
+                    format!(" · 동의어 {synonyms}개")
+                } else {
+                    String::new()
+                },
                 if filter.is_empty() {
                     String::new()
                 } else {
@@ -159,10 +165,10 @@ impl SchemaBrowser {
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 for table in shown {
-                    let title = if table.view {
-                        format!("{} (뷰)", table.label())
-                    } else {
-                        table.label()
+                    let title = match (&table.synonym, table.view) {
+                        (Some(target), _) => format!("{} (동의어 → {target})", table.label()),
+                        (None, true) => format!("{} (뷰)", table.label()),
+                        (None, false) => table.label(),
                     };
                     // 열 이름으로 찾았으면 펼쳐 보인다.
                     let open = (!filter.is_empty()

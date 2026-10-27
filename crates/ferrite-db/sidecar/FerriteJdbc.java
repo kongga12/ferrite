@@ -153,7 +153,7 @@ public final class FerriteJdbc {
             closeResult();
         } else if ("schema".equals(method)) {
             closeResult();
-            return schema();
+            return schema((String) params.get("synonyms"));
         } else if ("table".equals(method)) {
             // 결과를 읽는 중에도 묻는다(결과를 닫지 않는다).
             return table(params);
@@ -405,9 +405,11 @@ public final class FerriteJdbc {
 
     /**
      * 사용자 스키마의 표·뷰와 열(스키마 브라우저). 열은 스키마 전체를 한 번에 읽는다(표마다 묻지 않는다).
-     * Oracle 휴지통의 표(BIN$…)는 뺀다.
+     * Oracle 휴지통의 표(BIN$…)는 뺀다. {@code synonyms}가 있으면 그 조회(동의어, 표 주인, 표, 열, 형식)로
+     * 동의어도 더한다. 같은 이름의 표나 앞서 읽은 동의어(사용자 동의어가 PUBLIC보다 먼저 온다)가 있으면
+     * 그것이 이긴다(DB가 이름을 찾는 순서와 같다).
      */
-    private Map<String, Object> schema() throws SQLException {
+    private Map<String, Object> schema(String synonyms) throws SQLException {
         DatabaseMetaData meta = conn.getMetaData();
         String user = fold(meta.getUserName(), meta.storesUpperCaseIdentifiers(), meta.storesLowerCaseIdentifiers());
         Map<String, Map<String, Object>> tables = new java.util.TreeMap<String, Map<String, Object>>();
@@ -445,9 +447,53 @@ public final class FerriteJdbc {
         } finally {
             rs.close();
         }
+        if (synonyms != null) {
+            addSynonyms(synonyms, tables);
+        }
         Map<String, Object> result = new LinkedHashMap<String, Object>();
         result.put("tables", new ArrayList<Object>(tables.values()));
         return result;
+    }
+
+    /** 동의어 조회의 줄을 동의어마다 묶어 더한다. 사전을 못 읽으면(권한 등) 동의어 없이 둔다. */
+    private void addSynonyms(String sql, Map<String, Map<String, Object>> tables) {
+        Statement st = null;
+        try {
+            st = conn.createStatement();
+            ResultSet rs = st.executeQuery(sql);
+            Map<String, Object> current = null;
+            String currentName = null;
+            boolean taken = false;
+            while (rs.next()) {
+                String name = rs.getString(1);
+                if (!name.equals(currentName)) {
+                    currentName = name;
+                    taken = !tables.containsKey(name);
+                    if (taken) {
+                        current = new LinkedHashMap<String, Object>();
+                        current.put("name", name);
+                        current.put("view", Boolean.FALSE);
+                        current.put("synonym", rs.getString(2) + "." + rs.getString(3));
+                        current.put("columns", new ArrayList<Object>());
+                        tables.put(name, current);
+                    }
+                }
+                if (!taken) {
+                    continue;
+                }
+                Map<String, Object> column = new LinkedHashMap<String, Object>();
+                column.put("name", rs.getString(4));
+                column.put("type", rs.getString(5));
+                @SuppressWarnings("unchecked")
+                List<Object> columns = (List<Object>) current.get("columns");
+                columns.add(column);
+            }
+            rs.close();
+        } catch (SQLException e) {
+            e.printStackTrace();
+        } finally {
+            closeQuietly(st);
+        }
     }
 
     /** (스키마, 표). 스키마 칸이 비고 표 이름에 점이 있으면 나눈다(CUBRID 11.2). */

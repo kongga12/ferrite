@@ -86,10 +86,10 @@ pub fn completions(
         Context::Table => tables
             .iter()
             .map(|t| {
-                let (kind, what) = if t.view {
-                    ("뷰", "뷰")
-                } else {
-                    ("표", "표")
+                let (kind, what) = match (&t.synonym, t.view) {
+                    (Some(target), _) => ("동의어", format!("동의어 → {target}")),
+                    (None, true) => ("뷰", "뷰".to_owned()),
+                    (None, false) => ("표", "표".to_owned()),
                 };
                 item(
                     t.label(),
@@ -180,6 +180,7 @@ mod tests {
             schema: None,
             name: name.into(),
             view: false,
+            synonym: None,
             columns: columns
                 .iter()
                 .map(|c| TableColumn {
@@ -226,6 +227,33 @@ mod tests {
         );
         // 스키마를 읽지 않았으면 아무것도 알리지 않는다.
         assert!(problems(MAPPER, &[], "운영").is_empty());
+    }
+
+    #[test]
+    fn 동의어로_쓴_표를_안다() {
+        // 다른 스키마의 공통코드 표를 동의어로 쓰는 매퍼(Oracle·Tibero egov 프로젝트에 흔하다).
+        let text = r#"<mapper namespace="a"><select id="code">SELECT c.CODE_NM, c.NOPE FROM COMTCCMMNCODE c WHERE c.CODE_ID = #{id}</select></mapper>"#;
+        let mut synonym = table("COMTCCMMNCODE", &["CODE_ID", "CODE_NM"]);
+        synonym.synonym = Some("COM.COMTCCMMNCODE".into());
+        let found: Vec<String> = problems(text, std::slice::from_ref(&synonym), "운영")
+            .into_iter()
+            .map(|p| p.message)
+            .collect();
+        assert_eq!(found, ["열 NOPE이(가) 표 COMTCCMMNCODE에 없습니다"]);
+        let cursor = text.find("FROM COMT").unwrap() + "FROM COMT".len();
+        let (_, items) = completions(text, cursor, std::slice::from_ref(&synonym)).unwrap();
+        assert_eq!(
+            (
+                items[0].label.as_str(),
+                items[0].detail.as_str(),
+                items[0].kind
+            ),
+            (
+                "COMTCCMMNCODE",
+                "동의어 → COM.COMTCCMMNCODE · 열 2개",
+                "동의어"
+            )
+        );
     }
 
     #[test]
