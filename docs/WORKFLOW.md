@@ -824,7 +824,18 @@
     - 창 테스트(SQLite): 스키마를 읽고 매퍼를 열면 없는 표 두 개를 알리고, `FROM em` 뒤에서 자동 완성(언어 서버 없이)으로 `emp`를 넣으면 다시 맞춰 "열 nope이(가) 표 emp에 없습니다"로 바뀐다
     - 실제 앱(Windows): CUBRID 스키마를 읽고 매퍼를 열어 없는 열 둘·없는 표 하나에 물결선과 "경고 3"을, `FROM demo_` 뒤 자동 완성에서 "demo_emp 표 · 열 4개"를 화면으로 확인했다(XML 언어 서버 없음). 임시 연결 목록과 사이드카 폴더는 지웠다.
   - 미룸: `<include refid>`로 넣는 조각을 펼쳐 읽기(조각과 문장을 따로 본다: 조각 안 `별칭.열`의 별칭은 문장에 있어 확인하지 않는다), 별칭 없는 열 이름의 검증(SELECT 목록의 별칭·함수와 가리기 어렵다), 프로젝트 전체 매퍼 검사(열린 파일만 본다)
-- [ ] 3개 OS 검증
+- [x] 3개 OS 검증(2026-10-27): CI 3개 OS 전체(실행 40461616152, main `1eb6c0d`) 통과
+  - 완료 조건 "DB에 연결해 조회·편집·커밋·롤백"(PostgreSQL·MariaDB·SQLite·Oracle·Tibero·CUBRID 6종)
+    - SQLite·PostgreSQL: 3개 OS 모두에서 공통·편집·스키마 시나리오가 돌았다. PostgreSQL은 러너의 initdb로 띄운 임시 클러스터를 쓰고, 2.8~7.3초 걸렸다(건너뛰지 않았다).
+    - MariaDB 11.4·Oracle XE 11g·CUBRID 11.2: Linux 작업의 서비스 컨테이너로 돌았다(MariaDB 0.9초, JDBC 7.6초). Windows·macOS 러너는 서비스 컨테이너를 못 띄워 건너뛴다.
+    - Tibero 6: CI에 이미지가 없다. 5-3c에서 개발 서버로 두 번 연속 통과했다.
+  - 완료 조건 "100만 행 결과를 스크롤할 때 메모리가 상한을 넘지 않는다": 3개 OS 모두에서 SQLite 100만 행을 끝까지 받는 동안 결과 버퍼가 늘 10만 행 이하이고, 마지막 행이 1,000,000번인 것을 확인했다. 확인하지 않은 것: 앞쪽을 버린 뒤 화면의 스크롤 위치를 같은 행으로 되돌리는 동작(5-2부터 남은 항목).
+  - 확인하지 않은 것: Tibero 멈춤의 KILL SESSION 대비책은 ALTER SYSTEM 권한이 있는 계정에서만 확인했다(권한이 없으면 약 60초 걸린다).
+- [ ] 5-5 동의어 지원: 스키마 브라우저와 매퍼 SQL 자동 완성·검증이 동의어로 쓴 표를 안다(3개 OS 검증 뒤에 더한 단계)
+  - 왜: 지금은 사용자 스키마의 표만 읽어, 다른 스키마의 표를 동의어로 쓰는 매퍼(Oracle·Tibero egov 프로젝트에 흔하다)에서 "없는 표" 경고가 잘못 뜨고 자동 완성·스키마 브라우저에도 그 표가 없다.
+  - 사전 이름: Oracle `ALL_SYNONYMS`(`OWNER`, `SYNONYM_NAME`, `TABLE_OWNER`, `TABLE_NAME`), Tibero `ALL_SYNONYMS`(`OWNER`, `SYNONYM_NAME`, `ORG_OBJECT_OWNER`, `ORG_OBJECT_NAME`. TiberoStudio를 분석해 확인했다). 사용자 스키마의 동의어와 `PUBLIC` 동의어를 읽고, 가리키는 표의 열을 붙인다.
+  - 할 일: 스키마 읽기에 동의어(가리키는 표와 열), 스키마 브라우저에 동의어 표시, 매퍼 자동 완성·검증이 동의어를 표로 본다. CUBRID 11.2 동의어는 있는지 확인한다. 동의어가 없는 DB(PostgreSQL·MariaDB·SQLite)는 바뀌지 않는다.
+  - 검증: Oracle XE(로컬 Docker·CI)와 Tibero 개발 서버(읽기만)에서 다른 스키마의 표를 가리키는 동의어
 
 ### Phase 6 — 데이터 사이언스
 
