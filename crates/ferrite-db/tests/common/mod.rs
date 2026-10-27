@@ -6,7 +6,7 @@
 
 use std::time::{Duration, Instant};
 
-use ferrite_db::{Cell, Column, Connection, ConnectionConfig, Event, PAGE_ROWS, Row};
+use ferrite_db::{Cell, Column, Connection, ConnectionConfig, Editable, Event, PAGE_ROWS, Row};
 
 pub struct Session {
     conn: Connection,
@@ -82,6 +82,49 @@ impl Session {
         }
         self.wait(|e| matches!(e, Event::Done { .. }));
         (columns, rows, pages)
+    }
+
+    /// 조회해 고칠 수 있는지(열 다음, 첫 페이지 전에 온다)와 모든 행을 받는다.
+    pub fn query_editable(&mut self, sql: &str) -> (Option<Editable>, Vec<Row>) {
+        self.conn.execute(sql);
+        if let Event::Error(e) = self.wait(|e| matches!(e, Event::Columns(_) | Event::Error(_))) {
+            panic!("{sql}: {e}");
+        }
+        let editable = match self.wait(|e| matches!(e, Event::Editable(_) | Event::Rows { .. })) {
+            Event::Editable(editable) => Some(editable),
+            _ => {
+                // 첫 페이지는 아래에서 다시 읽는다.
+                self.next -= 1;
+                None
+            }
+        };
+        let mut rows = Vec::new();
+        loop {
+            match self.wait(|e| matches!(e, Event::Rows { .. } | Event::Error(_))) {
+                Event::Rows { rows: page, more } => {
+                    rows.extend(page);
+                    if !more {
+                        break;
+                    }
+                    self.conn.fetch();
+                }
+                other => panic!("{sql}: {other:?}"),
+            }
+        }
+        self.wait(|e| matches!(e, Event::Done { .. }));
+        (editable, rows)
+    }
+
+    /// 파라미터를 묶어 실행하고 바뀐 행 수를 돌려준다.
+    pub fn exec_params(&mut self, sql: &str, params: Vec<Cell>) -> Result<u64, String> {
+        self.conn.execute_params(sql, params);
+        match self.wait(|e| matches!(e, Event::Done { .. } | Event::Error(_))) {
+            Event::Done {
+                affected: Some(n), ..
+            } => Ok(n),
+            Event::Error(e) => Err(e),
+            other => panic!("{sql}: {other:?}"),
+        }
     }
 
     /// 한 칸짜리 결과를 글자로.
@@ -167,6 +210,88 @@ pub fn scenario(
     assert_eq!(s.scalar("SELECT 2"), "2", "멈춘 뒤에도 쓴다");
 
     s.exec("DROP TABLE ferrite_t");
+}
+
+/// 결과 그리드 고치기: 기본 키로 찾는 UPDATE를 파라미터로 실행한다.
+pub fn edit_scenario(config: &ConnectionConfig, password: Option<String>) {
+    let (mut s, _) = Session::open(config, password);
+    s.exec("DROP TABLE IF EXISTS ferrite_e");
+    s.exec("DROP TABLE IF EXISTS ferrite_n");
+    s.exec(
+        "CREATE TABLE ferrite_e (k1 INT NOT NULL, k2 VARCHAR(10) NOT NULL, v VARCHAR(20), n INT, \
+         PRIMARY KEY (k1, k2))",
+    );
+    s.exec("INSERT INTO ferrite_e VALUES (1, 'a', '처음', 10), (1, 'b', '둘째', 20), (2, 'a', '셋째', 30)");
+    s.exec("CREATE TABLE ferrite_n (v VARCHAR(20))");
+
+    // 기본 키 열이 다 있으면 고칠 수 있고, 식 열은 못 고친다.
+    let (editable, rows) =
+        s.query_editable("SELECT k2, v, n, n + 1 AS m, k1 FROM ferrite_e ORDER BY k1, k2");
+    let editable = editable.expect("기본 키 열이 다 있으면 고칠 수 있다");
+    assert!(editable.table.ends_with("ferrite_e"), "{}", editable.table);
+    assert_eq!(editable.key().len(), 2);
+    assert!(editable.can_edit(1) && editable.can_edit(2) && !editable.can_edit(3));
+    let mut update = |column: usize, value: Cell, row: usize| {
+        let (sql, params) = editable.update(column, value, &rows[row]).unwrap();
+        s.exec_params(&sql, params)
+    };
+
+    // 따옴표·세미콜론이 든 값도 파라미터라 그대로 들어간다. 그 행(1, 'b')만 바뀐다.
+    assert_eq!(update(1, Cell::Text("it's; 값".into()), 1), Ok(1));
+    // 글자로 적은 수도 열 형식으로 들어가고, NULL로도 고친다.
+    assert_eq!(update(2, Cell::Text("7".into()), 1), Ok(1));
+    assert_eq!(update(2, Cell::Null, 0), Ok(1));
+    // 같은 값으로 고쳐도 찾은 행 1개다.
+    assert_eq!(update(1, Cell::Text("셋째".into()), 2), Ok(1));
+    let (_, after, _) = s.query("SELECT v, n FROM ferrite_e ORDER BY k1, k2");
+    let texts: Vec<Vec<String>> = after
+        .iter()
+        .map(|row| row.iter().map(ToString::to_string).collect())
+        .collect();
+    assert_eq!(texts, [["처음", "NULL"], ["it's; 값", "7"], ["셋째", "30"]]);
+
+    // 다른 곳에서 지운 행은 0행이다.
+    s.exec("DELETE FROM ferrite_e WHERE k1 = 2");
+    let (sql, params) = editable
+        .update(1, Cell::Text("x".into()), &rows[2])
+        .unwrap();
+    assert_eq!(s.exec_params(&sql, params), Ok(0));
+
+    // 트랜잭션 안에서 고치고 롤백하면 돌아온다. 틀린 값으로 실패해도 트랜잭션은 계속 쓴다.
+    s.conn().set_autocommit(false);
+    s.transaction();
+    let (sql, params) = editable
+        .update(1, Cell::Text("롤백될 값".into()), &rows[0])
+        .unwrap();
+    assert_eq!(s.exec_params(&sql, params), Ok(1));
+    let (sql, params) = editable
+        .update(2, Cell::Text("수가 아님".into()), &rows[0])
+        .unwrap();
+    let _ = s.exec_params(&sql, params);
+    assert_eq!(
+        s.scalar("SELECT COUNT(*) FROM ferrite_e"),
+        "2",
+        "트랜잭션이 살아 있다"
+    );
+    s.conn().rollback();
+    s.transaction();
+    s.conn().set_autocommit(true);
+    s.transaction();
+    assert_eq!(
+        s.scalar("SELECT v FROM ferrite_e WHERE k1 = 1 AND k2 = 'a'"),
+        "처음"
+    );
+
+    // 기본 키가 없거나, 결과에 빠졌거나, 두 표에서 온 결과는 고칠 수 없다.
+    assert!(s.query_editable("SELECT v FROM ferrite_n").0.is_none());
+    assert!(s.query_editable("SELECT k1, v FROM ferrite_e").0.is_none());
+    assert!(
+        s.query_editable("SELECT e.k1, e.k2, x.v FROM ferrite_e e, ferrite_n x")
+            .0
+            .is_none()
+    );
+    s.exec("DROP TABLE ferrite_e");
+    s.exec("DROP TABLE ferrite_n");
 }
 
 /// PostgreSQL만: 트랜잭션 안에서 조회가 실패해도 트랜잭션을 계속 쓰고, 데이터를 바꾸는 WITH도 실행한다.

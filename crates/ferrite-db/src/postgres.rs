@@ -1,10 +1,14 @@
 //! PostgreSQL(postgres, TLS 없음). 조회는 커서(`DECLARE`·`FETCH`)로 한 페이지씩 읽고, 값은 글자 결과로
 //! 받는다(어떤 타입이든 서버가 보이는 그대로 보인다). 멈춤은 취소 요청(cancel token)으로 한다.
 
+use std::collections::HashMap;
+
+use postgres::types::{ToSql, Type};
 use postgres::{Client, NoTls, SimpleQueryMessage};
 
+use crate::edit::{Editable, Target};
 use crate::{
-    Canceller, Cell, Column, ConnectionConfig, Driver, Event, Io, PAGE_ROWS, Row, is_query,
+    Canceller, Cell, Column, ConnectionConfig, Driver, Event, Io, Kind, PAGE_ROWS, Row, is_query,
 };
 
 pub(crate) struct Postgres {
@@ -15,6 +19,26 @@ pub(crate) struct Postgres {
 
 /// 커서 이름. 한 연결에서 한 번에 하나만 연다.
 const CURSOR: &str = "ferrite_cursor";
+
+/// 표(oid)의 열: 번호, 이름, 형식, 스키마, 표 이름, 기본 키인지. 보통 표와 나눈 표만 고친다.
+const TABLE_COLUMNS: &str = "SELECT a.attnum, a.attname::text, format_type(a.atttypid, a.atttypmod), \
+     n.nspname::text, c.relname::text, coalesce(a.attnum = ANY(i.indkey), false) \
+     FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
+     JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped \
+     LEFT JOIN pg_index i ON i.indrelid = c.oid AND i.indisprimary \
+     WHERE c.oid = $1 AND c.relkind IN ('r', 'p')";
+
+/// 파라미터는 모두 글자로 보내고 SQL에서 열 형식으로 바꾼다(`CAST($n AS 형식)`).
+fn text_param(cell: &Cell) -> Option<String> {
+    match cell {
+        Cell::Null => None,
+        Cell::Bytes(bytes) => Some(bytes.iter().fold(String::from("\\x"), |mut hex, b| {
+            hex.push_str(&format!("{b:02x}"));
+            hex
+        })),
+        other => Some(other.to_string()),
+    }
+}
 
 pub(crate) fn connect(
     config: &ConnectionConfig,
@@ -90,12 +114,17 @@ impl Postgres {
     /// 커서를 열어 한 페이지씩 보낸다. 트랜잭션 안에서만 커서를 쓸 수 있다.
     fn cursor(&mut self, sql: &str, io: &mut Io) -> Result<(), String> {
         self.simple(&format!("DECLARE {CURSOR} NO SCROLL CURSOR FOR {sql}"))?;
+        // 커서가 열렸으면 문장이 맞으므로, 여기서 준비해도 실패해 트랜잭션을 깨지 않는다.
+        let mut editable = self.editable(sql);
         let mut sent_columns = false;
         loop {
             let (columns, rows, _) =
                 split(self.simple(&format!("FETCH {PAGE_ROWS} FROM {CURSOR}"))?);
             if !sent_columns {
                 io.send(Event::Columns(columns.unwrap_or_default()));
+                if let Some(editable) = editable.take() {
+                    io.send(Event::Editable(editable));
+                }
                 sent_columns = true;
             }
             let more = rows.len() == PAGE_ROWS;
@@ -109,6 +138,61 @@ impl Postgres {
 }
 
 impl Postgres {
+    /// 조회가 한 표에서 왔고 그 표의 기본 키 열이 다 있으면 고칠 수 있다. 문장을 준비만 해(실행하지
+    /// 않는다) 열마다 온 표와 열 번호를 알아낸다.
+    fn editable(&mut self, sql: &str) -> Option<Editable> {
+        let statement = self.client.prepare(sql).ok()?;
+        let origins: Vec<Option<(u32, i16)>> = statement
+            .columns()
+            .iter()
+            .map(|c| Some((c.table_oid()?, c.column_id()?)))
+            .collect();
+        let table = origins.iter().flatten().next()?.0;
+        if origins.iter().flatten().any(|(t, _)| *t != table) {
+            return None;
+        }
+        let mut attributes = HashMap::new();
+        let (mut location, mut key_names) = (None, Vec::new());
+        for row in self.client.query(TABLE_COLUMNS, &[&table]).ok()? {
+            let number: i16 = row.try_get(0).ok()?;
+            let name: String = row.try_get(1).ok()?;
+            let cast: String = row.try_get(2).ok()?;
+            location = Some((
+                row.try_get::<_, String>(3).ok()?,
+                row.try_get::<_, String>(4).ok()?,
+            ));
+            if row.try_get(5).ok()? {
+                key_names.push(name.clone());
+            }
+            attributes.insert(
+                number,
+                Target {
+                    name,
+                    cast: Some(cast),
+                },
+            );
+        }
+        let (schema, table) = location?;
+        let columns = origins
+            .into_iter()
+            .map(|o| o.and_then(|(_, number)| attributes.get(&number).cloned()))
+            .collect();
+        Editable::new(Kind::Postgres, Some(&schema), &table, columns, &key_names)
+    }
+
+    fn bound(&mut self, sql: &str, params: &[Cell]) -> Result<u64, String> {
+        let statement = self
+            .client
+            .prepare_typed(sql, &vec![Type::TEXT; params.len()])
+            .map_err(|e| error(&e))?;
+        let values: Vec<Option<String>> = params.iter().map(text_param).collect();
+        let refs: Vec<&(dyn ToSql + Sync)> =
+            values.iter().map(|v| v as &(dyn ToSql + Sync)).collect();
+        self.client
+            .execute(&statement, &refs)
+            .map_err(|e| error(&e))
+    }
+
     /// 커서 없이 실행한다. 결과가 있는 문장(EXPLAIN, SHOW, RETURNING)은 한 페이지로 보낸다.
     fn plain(&mut self, sql: &str, io: &mut Io) -> Result<Option<u64>, String> {
         let (columns, rows, count) = split(self.simple(sql)?);
@@ -161,6 +245,24 @@ impl Driver for Postgres {
                 } else {
                     Err(e)
                 }
+            }
+        }
+    }
+
+    fn execute_params(&mut self, sql: &str, params: &[Cell]) -> Result<u64, String> {
+        if !self.manual {
+            return self.bound(sql, params);
+        }
+        // 트랜잭션 안이면 세이브포인트를 둔다(값이 틀려 실패해도 사용자의 트랜잭션이 "중단"되지 않게).
+        self.simple("SAVEPOINT ferrite_edit")?;
+        match self.bound(sql, params) {
+            Ok(n) => {
+                self.simple("RELEASE SAVEPOINT ferrite_edit")?;
+                Ok(n)
+            }
+            Err(e) => {
+                let _ = self.simple("ROLLBACK TO SAVEPOINT ferrite_edit");
+                Err(e)
             }
         }
     }

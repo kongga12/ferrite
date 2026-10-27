@@ -25,5 +25,11 @@ fn mariadb로_시나리오를_돌린다() {
     config.database = parts[4].into();
     let password = Some(parts[3].to_owned()).filter(|p| !p.is_empty());
     // KILL QUERY로 멈춘 SLEEP은 오류 없이 1을 돌려준다.
-    common::scenario(&config, password, "MariaDB·MySQL ", "SELECT SLEEP(30)");
+    common::scenario(
+        &config,
+        password.clone(),
+        "MariaDB·MySQL ",
+        "SELECT SLEEP(30)",
+    );
+    common::edit_scenario(&config, password);
 }

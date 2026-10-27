@@ -133,7 +133,8 @@ fn postgresql로_시나리오를_돌린다() {
     if let Ok(value) = std::env::var("FERRITE_TEST_POSTGRES") {
         let (config, password) = from_env(&value);
         common::scenario(&config, password.clone(), "PostgreSQL ", long);
-        common::postgres_extras(&config, password);
+        common::postgres_extras(&config, password.clone());
+        common::edit_scenario(&config, password);
         return;
     }
     let Some(bin) = pg_bin() else {
@@ -147,4 +148,5 @@ fn postgresql로_시나리오를_돌린다() {
     let (_cluster, config) = start_cluster(&bin);
     common::scenario(&config, None, "PostgreSQL ", long);
     common::postgres_extras(&config, None);
+    common::edit_scenario(&config, None);
 }
