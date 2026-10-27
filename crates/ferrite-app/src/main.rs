@@ -20,6 +20,7 @@ mod lsp_hub;
 mod lsp_ui;
 mod mapper_db;
 mod new_project;
+mod notebook_ui;
 mod picker;
 mod quick_open;
 mod schema_ui;

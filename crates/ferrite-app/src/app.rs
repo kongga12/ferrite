@@ -316,6 +316,8 @@ struct Document {
     git_marks: Vec<(usize, ferrite_core::git::LineChange)>,
     /// git_marks를 계산한 (버퍼 버전, 기준 내용 세대). 바뀌면 다시 계산한다.
     git_key: Option<(u64, u64)>,
+    /// .ipynb면 노트북 보기(버퍼 위에 셀을 보인다).
+    notebook: Option<crate::notebook_ui::NotebookView>,
 }
 
 impl Document {
@@ -323,6 +325,10 @@ impl Document {
         let bytes = text_file::read(&path)?;
         let content = text_file::decode(&bytes)?;
         let lang = Lang::from_path(&path);
+        let notebook = path
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("ipynb"))
+            .then(crate::notebook_ui::NotebookView::default);
         let mut doc = Self {
             path,
             buffer: Buffer::new(""),
@@ -339,6 +345,7 @@ impl Document {
             lsp: DocSync::default(),
             git_marks: Vec::new(),
             git_key: None,
+            notebook,
         };
         doc.replace_content(&content, &bytes, default_indent);
         Ok(doc)
@@ -2744,6 +2751,14 @@ impl FerriteApp {
                     }
                 });
                 ui.separator();
+            }
+            if let Some(notebook) = doc.notebook.as_mut() {
+                if notebook.ui(ui, &mut doc.buffer) {
+                    return;
+                }
+                if ui.button("노트북 보기").clicked() {
+                    notebook.show_json = false;
+                }
             }
             if let Some(find) = &mut self.find {
                 find.refresh(&doc.path, &doc.buffer);
@@ -5278,6 +5293,76 @@ mod tests {
                 "표 missing이(가) 연결 '로컬'의 스키마에 없습니다"
             ]
         );
+        drop(harness);
+        remove_project(&dir);
+    }
+
+    #[test]
+    fn 노트북을_셀로_보고_고쳐_저장하면_그_셀만_바뀐다() {
+        use egui::accesskit::Role;
+        // nbformat(Jupyter)이 쓴 모양으로 만든 노트북과, 둘째 셀만 고친 기대 결과.
+        const SAMPLE: &str = include_str!("../../ferrite-notebook/tests/fixtures/sample.ipynb");
+        const EDITED: &str =
+            include_str!("../../ferrite-notebook/tests/fixtures/sample_edited.ipynb");
+        let dir = std::env::temp_dir().join(format!("ferrite-notebook-ui-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("분석.ipynb");
+        fs::write(&path, SAMPLE).unwrap();
+        let root = dir.clone();
+        let mut harness = harness_builder()
+            .with_size(egui::vec2(1200.0, 1400.0))
+            .build_eframe(move |cc| FerriteApp::new(cc, Some(root.clone())));
+        harness.run_ok();
+        harness.state_mut().open_file(path.clone());
+        harness.run_ok();
+
+        // 셀과 저장된 출력: 글, 실행 번호, 오류(색 코드를 뺀 추적), 원본 셀.
+        harness.get_by_label("JSON 보기");
+        harness.get_by_label("코드 [1]");
+        harness.get_by_label("안녕\n둘째 줄");
+        harness.get_by_label("'결과'");
+        harness.get_by_label_contains("ZeroDivisionError: division by zero");
+        assert_eq!(
+            harness.query_all_by_role(Role::MultilineTextInput).count(),
+            5
+        );
+
+        // 둘째 셀(코드)의 글을 바꾸고 저장하면 그 셀만 달라진다(나머지는 바이트까지 그대로).
+        let cell = harness
+            .query_all_by_role(Role::MultilineTextInput)
+            .nth(1)
+            .unwrap();
+        cell.focus();
+        harness.run_ok();
+        harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+        harness.run_ok();
+        harness
+            .query_all_by_role(Role::MultilineTextInput)
+            .nth(1)
+            .unwrap()
+            .type_text("print('바뀜')");
+        harness.key_press(egui::Key::Enter);
+        harness.run_ok();
+        let index = harness.state().active.unwrap();
+        assert!(harness.state().docs[index].is_dirty());
+        assert!(harness.state_mut().save(index));
+        assert_eq!(fs::read_to_string(&path).unwrap(), EDITED);
+
+        // 셀을 더하고 JSON 보기로 바꾸면 에디터가 노트북 글을 보인다.
+        harness.get_by_label("+ 마크다운 셀").click();
+        harness.run_ok();
+        assert_eq!(
+            harness.query_all_by_role(Role::MultilineTextInput).count(),
+            6
+        );
+        harness.get_by_label("JSON 보기").click();
+        harness.run_ok();
+        harness.get_by_label("노트북 보기");
+        let text = harness.state().docs[index].buffer.text();
+        let notebook = ferrite_notebook::Notebook::parse(&text).unwrap();
+        assert_eq!(notebook.len(), 6);
+        assert_eq!(notebook.kind(2), ferrite_notebook::CellKind::Markdown);
         drop(harness);
         remove_project(&dir);
     }
