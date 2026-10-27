@@ -1,6 +1,6 @@
 //! 메인 창: 메뉴바, 도킹 창(프로젝트 트리·탭 에디터·도구 창), 상태바, 미저장 변경 확인.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -490,6 +490,8 @@ pub struct FerriteApp {
     schema: crate::schema_ui::SchemaBrowser,
     /// 스키마 브라우저가 맡긴 일. 배치를 바꾸므로 창 밖에서 처리한다.
     schema_action: Option<crate::schema_ui::Action>,
+    /// 매퍼 SQL을 스키마와 맞춰 본 문서: 경로 → (문서 버전, 스키마 세대).
+    mapper_checked: HashMap<PathBuf, (u64, u64)>,
     /// 창 배치. 그리는 동안에는 창들이 앱을 빌려 쓰므로 잠시 밖으로 꺼낸다(`ui`).
     layout: dock::Layout,
     /// 응답을 기다리는 언어 서버 요청.
@@ -600,6 +602,7 @@ impl FerriteApp {
             sql: Default::default(),
             schema: Default::default(),
             schema_action: None,
+            mapper_checked: HashMap::new(),
             layout: dock::load(layout_path().as_deref()),
             pending: std::collections::HashMap::new(),
             completion: None,
@@ -1119,10 +1122,90 @@ impl FerriteApp {
         self.send_lsp_request(kind, pos, 0);
     }
 
+    /// 매퍼 XML SQL의 DB 표·열 항목(스키마 브라우저가 읽은 스키마). 범위는 문서 글자 자리다.
+    fn mapper_completions(&self, doc: &Document) -> Vec<ferrite_lsp::features::Completion> {
+        let tables = self.schema.tables();
+        if doc.lang != Some(Lang::Xml) || tables.is_empty() {
+            return Vec::new();
+        }
+        let rope = doc.buffer.rope();
+        let cursor = rope.char_to_byte(doc.buffer.selection().head);
+        let Some((range, mut items)) =
+            crate::mapper_db::completions(&rope.to_string(), cursor, tables)
+        else {
+            return Vec::new();
+        };
+        let range = rope.byte_to_char(range.start)..rope.byte_to_char(range.end);
+        for item in &mut items {
+            item.range = Some(range.clone());
+        }
+        items
+    }
+
+    /// 열린 매퍼 XML의 SQL을 스키마 브라우저가 읽은 스키마와 맞춰 본다. 문서나 스키마가 바뀐 것만.
+    fn check_mapper_sql(&mut self) {
+        let Self {
+            docs,
+            schema,
+            mapper_checked,
+            ..
+        } = self;
+        let generation = schema.generation();
+        for doc in docs.iter_mut().filter(|d| d.lang == Some(Lang::Xml)) {
+            let key = (doc.buffer.version(), generation);
+            if mapper_checked.get(&doc.path) == Some(&key) {
+                continue;
+            }
+            mapper_checked.insert(doc.path.clone(), key);
+            let rope = doc.buffer.rope();
+            let encoding = PositionEncoding::Utf16;
+            let position = |byte: usize| {
+                ferrite_lsp::position::to_lsp(rope, rope.byte_to_char(byte), encoding)
+            };
+            let diagnostics: Vec<lsp_types::Diagnostic> = crate::mapper_db::problems(
+                &rope.to_string(),
+                schema.tables(),
+                schema.connection_name(),
+            )
+            .into_iter()
+            .map(|problem| lsp_types::Diagnostic {
+                range: lsp_types::Range::new(
+                    position(problem.range.start),
+                    position(problem.range.end),
+                ),
+                severity: Some(lsp_types::DiagnosticSeverity::WARNING),
+                source: Some("ferrite-db".into()),
+                message: problem.message,
+                ..Default::default()
+            })
+            .collect();
+            doc.lsp
+                .set_problems("ferrite-db", rope, &diagnostics, encoding);
+        }
+    }
+
     fn send_lsp_request(&mut self, kind: LspRequest, pos: usize, attempts: u8) {
         let Some(i) = self.active else {
             return;
         };
+        // 매퍼 SQL의 DB 표·열은 언어 서버를 기다리지 않고 바로 보인다(서버 응답이 오면 합친다).
+        let mut shown = false;
+        if matches!(kind, LspRequest::Completion(_)) {
+            let items = self.mapper_completions(&self.docs[i]);
+            if !items.is_empty() {
+                let doc = &self.docs[i];
+                let mut popup = CompletionPopup::new(
+                    doc.path.clone(),
+                    word_start(&doc.buffer, pos),
+                    items,
+                    false,
+                );
+                if popup.refilter(&doc.buffer) {
+                    self.completion = Some(popup);
+                    shown = true;
+                }
+            }
+        }
         let doc = &mut self.docs[i];
         let Some(lang) = doc.lang else {
             return;
@@ -1210,7 +1293,7 @@ impl FerriteApp {
                 };
                 self.pending.insert((lang, id), (pending, retry));
             }
-            None if kind.is_explicit() => {
+            None if kind.is_explicit() && !shown => {
                 self.status = "언어 서버가 준비되지 않았습니다".into();
             }
             None => {}
@@ -1263,7 +1346,8 @@ impl FerriteApp {
                 let Some(doc) = active.filter(|d| d.path == path) else {
                     return;
                 };
-                let list = parse_completion(&result, doc.buffer.rope(), encoding);
+                let mut list = parse_completion(&result, doc.buffer.rope(), encoding);
+                list.items.extend(self.mapper_completions(doc));
                 let mut popup = CompletionPopup::new(path, anchor, list.items, list.incomplete);
                 self.completion = popup.refilter(&doc.buffer).then_some(popup);
             }
@@ -2492,11 +2576,12 @@ impl FerriteApp {
             self.lsp_request(LspRequest::Definition, pos);
         }
         let lang = self.docs[i].lang;
+        // 매퍼 XML은 스키마를 읽었으면 언어 서버 없이도 DB 표·열을 자동 완성한다.
         let server_ready = lang.is_some_and(|l| {
             matches!(
                 self.hub.status(&frame.path, l),
                 Some((_, ServerState::Ready))
-            )
+            ) || (l == Lang::Xml && !self.schema.tables().is_empty())
         });
         if frame.focused
             && server_ready
@@ -2922,6 +3007,7 @@ impl eframe::App for FerriteApp {
         self.process_debug_notices();
         self.finish_server_jobs();
         self.sync_language_servers();
+        self.check_mapper_sql();
         if std::mem::take(&mut self.settings_changed) {
             let (settings, error) = load_settings();
             self.status = error.unwrap_or_else(|| "설정을 적용했습니다".into());
@@ -5108,6 +5194,90 @@ mod tests {
                 .is_some()
         });
         assert_eq!(harness.state().sql.text, "SELECT * FROM \"주문\"");
+        drop(harness);
+        remove_project(&dir);
+    }
+
+    #[test]
+    fn 매퍼_sql의_표를_자동_완성하고_스키마에_없는_표와_열을_알린다() {
+        use egui::accesskit::Role;
+        let dir = std::env::temp_dir().join(format!("ferrite-mapper-db-{}", std::process::id()));
+        let mut harness = sql_console_harness(&dir);
+        run_sql(
+            &mut harness,
+            "CREATE TABLE emp (emp_id INTEGER PRIMARY KEY, emp_nm TEXT)",
+        );
+        wait_sql(&mut harness, "표 만들기", |h| {
+            h.query_by_label_contains("CREATE TABLE emp").is_some()
+        });
+        harness.get_by_label("도구").click();
+        harness.run_ok();
+        harness.get_by_label("스키마 브라우저").click();
+        harness.run_ok();
+        harness
+            .get_by_role_and_label(Role::ComboBox, "연결")
+            .click();
+        harness.run_ok();
+        harness.get_by_role_and_label(Role::Button, "로컬").click();
+        wait_sql(&mut harness, "스키마 읽기", |h| {
+            h.query_by_label_contains("표 1개 · 뷰 0개").is_some()
+        });
+
+        // 매퍼를 열면 스키마에 없는 표를 알린다(별칭이 없는 표를 가리키면 열은 보지 않는다).
+        let mapper = dir.join("EmpMapper.xml");
+        let text = "<mapper namespace=\"egov.Emp\">\n  <select id=\"list\">SELECT e.emp_nm, e.nope FROM em e, missing m</select>\n</mapper>\n";
+        fs::write(&mapper, text).unwrap();
+        harness.state_mut().open_file(mapper);
+        harness.run_ok();
+        let messages = |h: &Harness<'_, FerriteApp>| -> Vec<String> {
+            let app = h.state();
+            app.docs[app.active.unwrap()]
+                .lsp
+                .problems
+                .iter()
+                .map(|p| p.message.clone())
+                .collect()
+        };
+        assert_eq!(
+            messages(&harness),
+            [
+                "표 em이(가) 연결 '로컬'의 스키마에 없습니다",
+                "표 missing이(가) 연결 '로컬'의 스키마에 없습니다"
+            ]
+        );
+
+        // FROM 뒤에서 자동 완성하면 스키마의 표가 나온다(언어 서버 없이). 고치면 다시 맞춰 본다.
+        let pos = text.find("FROM em").unwrap() + "FROM em".len();
+        {
+            let app = harness.state_mut();
+            let i = app.active.unwrap();
+            app.docs[i].buffer.move_to(pos, false);
+            app.lsp_request(LspRequest::Completion(None), pos);
+        }
+        harness.run_ok();
+        let selected = harness
+            .state()
+            .completion
+            .as_ref()
+            .and_then(|p| p.selected())
+            .map(|c| (c.label.clone(), c.detail.clone()));
+        assert_eq!(selected, Some(("emp".into(), "표 · 열 2개".into())));
+        harness.state_mut().accept_completion();
+        harness.run_ok();
+        let app = harness.state();
+        assert!(
+            app.docs[app.active.unwrap()]
+                .buffer
+                .text()
+                .contains("FROM emp e, missing m")
+        );
+        assert_eq!(
+            messages(&harness),
+            [
+                "열 nope이(가) 표 emp에 없습니다",
+                "표 missing이(가) 연결 '로컬'의 스키마에 없습니다"
+            ]
+        );
         drop(harness);
         remove_project(&dir);
     }

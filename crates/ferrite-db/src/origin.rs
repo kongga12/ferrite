@@ -3,6 +3,8 @@
 //! SELECT만 받아들이고, 열 이름을 그대로 쓴 항목만 그 열로 본다. 모르는 모양은 고칠 수 없다고 본다
 //! (엉뚱한 열·행을 고치는 것보다 읽기 전용이 낫다).
 
+use crate::lex::{Token, lex};
+
 /// 식별자. 따옴표로 감쌌으면 대소문자를 그대로 둔다.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Ident {
@@ -45,15 +47,6 @@ impl Fold {
             Fold::None => text.to_owned(),
         }
     }
-}
-
-#[derive(Clone, Debug, PartialEq)]
-enum Token {
-    Word(String),
-    Quoted(String),
-    Symbol(char),
-    /// 글자·수 등 값.
-    Value,
 }
 
 /// 표 이름 뒤에 와도 되는 낱말.
@@ -100,53 +93,12 @@ fn is_keyword(word: &str) -> bool {
     KEYWORDS.iter().any(|k| k.eq_ignore_ascii_case(word))
 }
 
+/// 따옴표·주석이 다 닫힌 SQL의 낱말들(덜 친 SQL은 받지 않는다).
 fn tokenize(sql: &str) -> Option<Vec<Token>> {
-    let mut tokens = Vec::new();
-    let mut chars = sql.char_indices().peekable();
-    while let Some((at, c)) = chars.next() {
-        let rest = &sql[at..];
-        if c.is_whitespace() {
-            continue;
-        }
-        if rest.starts_with("--") {
-            while chars.next_if(|&(_, c)| c != '\n').is_some() {}
-        } else if rest.starts_with("/*") {
-            let end = rest.find("*/")?;
-            while chars.next_if(|&(i, _)| i < at + end + 2).is_some() {}
-        } else if c == '\'' || c == '"' {
-            // 같은 따옴표 두 개는 그 따옴표 하나다.
-            let mut text = String::new();
-            loop {
-                let (_, next) = chars.next()?;
-                if next == c && chars.next_if(|&(_, n)| n == c).is_none() {
-                    break;
-                }
-                text.push(next);
-            }
-            tokens.push(if c == '"' {
-                Token::Quoted(text)
-            } else {
-                Token::Value
-            });
-        } else if c.is_alphabetic() || c == '_' {
-            let mut word = String::from(c);
-            while let Some((_, n)) =
-                chars.next_if(|&(_, n)| n.is_alphanumeric() || matches!(n, '_' | '$' | '#'))
-            {
-                word.push(n);
-            }
-            tokens.push(Token::Word(word));
-        } else if c.is_ascii_digit() {
-            while chars
-                .next_if(|&(_, n)| n.is_alphanumeric() || n == '.')
-                .is_some()
-            {}
-            tokens.push(Token::Value);
-        } else {
-            tokens.push(Token::Symbol(c));
-        }
-    }
-    Some(tokens)
+    let lexed = lex(sql);
+    lexed
+        .complete
+        .then(|| lexed.tokens.into_iter().map(|(token, _)| token).collect())
 }
 
 fn ident(token: &Token) -> Option<Ident> {

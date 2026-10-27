@@ -20,11 +20,28 @@ pub struct SchemaBrowser {
     tables: Vec<Table>,
     error: Option<String>,
     filter: String,
+    /// 표 목록이 바뀔 때마다 는다(매퍼 SQL 검사를 다시 한다).
+    generation: u64,
 }
 
 impl SchemaBrowser {
+    /// 읽은 표와 뷰(매퍼 SQL 자동 완성·검증이 쓴다). 읽지 않았으면 비어 있다.
+    pub fn tables(&self) -> &[Table] {
+        &self.tables
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// 스키마를 읽은 연결 이름.
+    pub fn connection_name(&self) -> &str {
+        self.config.as_ref().map_or("", |c| c.name.as_str())
+    }
+
     fn load(&mut self, config: ConnectionConfig, db: &DbWindow, ctx: &egui::Context) {
         self.tables.clear();
+        self.generation += 1;
         self.error = None;
         match db.password(&config.id) {
             Ok(password) => {
@@ -45,7 +62,10 @@ impl SchemaBrowser {
         };
         for event in connection.poll() {
             match event {
-                Event::Schema(tables) => self.tables = tables,
+                Event::Schema(tables) => {
+                    self.tables = tables;
+                    self.generation += 1;
+                }
                 Event::Error(e) | Event::Disconnected(e) => self.error = Some(e),
                 _ => continue,
             }

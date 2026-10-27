@@ -264,6 +264,169 @@ fn scan_substitutions(span: Range<usize>, text: &str, mapper: &mut Mapper) {
     }
 }
 
+/// 문장(또는 `<sql>` 조각) 하나의 SQL. DB 표·열 자동 완성과 검증에 쓴다(앱이 DB 스키마와 맞춘다).
+/// 태그·주석을 뺀 글 조각을 빈칸 하나로 이어 붙이고, `#{…}`·`${…}`(iBatis `#…#`·`$…$`)는 같은 길이의
+/// `?`와 빈칸으로 가린다(값이나 실행할 때 정해지는 글이지 이름이 아니다). `<where>`·`<set>`·
+/// `<trim prefix>`가 실행할 때 넣는 낱말도 넣는다(문서에는 없는 글이다).
+#[derive(Clone, Debug)]
+pub struct StatementSql {
+    /// 요소 전체의 바이트 범위.
+    pub element: Range<usize>,
+    pub sql: String,
+    /// 글 조각마다 (SQL 안 시작, 문서 안 시작, 길이).
+    pieces: Vec<(usize, usize, usize)>,
+}
+
+impl StatementSql {
+    /// SQL 안 자리 → 문서 자리. 넣은 낱말 위면 None.
+    pub fn document_offset(&self, at: usize) -> Option<usize> {
+        self.pieces
+            .iter()
+            .find(|(sql, _, len)| (*sql..=sql + len).contains(&at))
+            .map(|(sql, doc, _)| doc + (at - sql))
+    }
+
+    /// 문서 자리 → SQL 안 자리. 태그 안이면 None.
+    pub fn sql_offset(&self, at: usize) -> Option<usize> {
+        self.pieces
+            .iter()
+            .find(|(_, doc, len)| (*doc..=doc + len).contains(&at))
+            .map(|(sql, doc, _)| sql + (at - doc))
+    }
+
+    fn push_word(&mut self, word: &str) {
+        let word = word.trim();
+        if !word.is_empty() {
+            self.sql.push(' ');
+            self.sql.push_str(word);
+        }
+    }
+}
+
+/// 매퍼의 문장·`<sql>` 조각마다 SQL. 매퍼가 아니면 빈 목록.
+pub fn statement_sql(text: &str) -> Vec<StatementSql> {
+    let mut parser = Parser::new();
+    if parser
+        .set_language(&tree_sitter_xml::LANGUAGE_XML.into())
+        .is_err()
+    {
+        return Vec::new();
+    }
+    let Some(tree) = parser.parse(text, None) else {
+        return Vec::new();
+    };
+    let Some(root) = children(tree.root_node()).find(|n| n.kind() == "element") else {
+        return Vec::new();
+    };
+    let dialect = match tag_of(root).and_then(|tag| tag_name(tag, text)) {
+        Some("mapper") => Dialect::MyBatis,
+        Some("sqlMap") => Dialect::IBatis,
+        _ => return Vec::new(),
+    };
+    let mut found = Vec::new();
+    collect_statements(root, text, dialect, &mut found);
+    found
+}
+
+fn collect_statements(node: Node<'_>, text: &str, dialect: Dialect, found: &mut Vec<StatementSql>) {
+    let statements: &[&str] = match dialect {
+        Dialect::MyBatis => &MYBATIS_STATEMENTS,
+        Dialect::IBatis => &IBATIS_STATEMENTS,
+    };
+    for child in children(node) {
+        let name = (child.kind() == "element")
+            .then(|| tag_of(child).and_then(|tag| tag_name(tag, text)))
+            .flatten();
+        if name.is_some_and(|name| name == "sql" || statements.contains(&name)) {
+            let mut sql = StatementSql {
+                element: child.byte_range(),
+                sql: String::new(),
+                pieces: Vec::new(),
+            };
+            append_body(child, text, dialect, &mut sql);
+            found.push(sql);
+        } else {
+            collect_statements(child, text, dialect, found);
+        }
+    }
+}
+
+fn append_body(node: Node<'_>, text: &str, dialect: Dialect, sql: &mut StatementSql) {
+    for child in children(node) {
+        match child.kind() {
+            "Comment" | "STag" | "ETag" | "EmptyElemTag" => {}
+            "CharData" | "CData" => {
+                let range = child.byte_range();
+                let Some(chunk) = text.get(range.clone()) else {
+                    continue;
+                };
+                sql.sql.push(' ');
+                sql.pieces.push((sql.sql.len(), range.start, chunk.len()));
+                sql.sql.push_str(&mask(chunk, dialect));
+            }
+            "element" => {
+                let tag = tag_of(child);
+                let name = tag.and_then(|tag| tag_name(tag, text));
+                let attr = |key: &str| {
+                    tag.and_then(|tag| {
+                        attributes(tag, text)
+                            .find(|(name, _, _)| *name == key)
+                            .map(|(_, value, _)| value)
+                    })
+                };
+                let (prefix, suffix) = match name {
+                    Some("where") => (Some("WHERE"), None),
+                    Some("set") => (Some("SET"), None),
+                    Some("trim") => (attr("prefix"), attr("suffix")),
+                    _ => (None, None),
+                };
+                sql.push_word(prefix.unwrap_or_default());
+                append_body(child, text, dialect, sql);
+                sql.push_word(suffix.unwrap_or_default());
+            }
+            _ => append_body(child, text, dialect, sql),
+        }
+    }
+}
+
+/// `#{…}`·`${…}`(iBatis `#…#`·`$…$`)를 같은 바이트 길이의 `?`와 빈칸으로 가린다.
+fn mask(chunk: &str, dialect: Dialect) -> String {
+    let bytes = chunk.as_bytes();
+    let mut out = String::with_capacity(chunk.len());
+    let mut i = 0;
+    while i < chunk.len() {
+        let marker = bytes[i];
+        let end = match (dialect, marker) {
+            (Dialect::MyBatis, b'#' | b'$') if bytes.get(i + 1) == Some(&b'{') => {
+                chunk[i + 2..].find('}').map(|end| i + 3 + end)
+            }
+            (Dialect::IBatis, b'#' | b'$') => {
+                let name = bytes[i + 1..]
+                    .iter()
+                    .take_while(|b| {
+                        b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'[' | b']' | b':')
+                    })
+                    .count();
+                (name > 0 && bytes.get(i + 1 + name) == Some(&marker)).then_some(i + 2 + name)
+            }
+            _ => None,
+        };
+        match end {
+            Some(end) => {
+                out.push('?');
+                out.extend(std::iter::repeat_n(' ', end - i - 1));
+                i = end;
+            }
+            None => {
+                let c = chunk[i..].chars().next().unwrap_or(' ');
+                out.push(c);
+                i += c.len_utf8();
+            }
+        }
+    }
+    out
+}
+
 /// 프로젝트의 매퍼 모음. 다른 파일의 `<sql>`·resultMap을 참조할 수 있어 진단에 필요하다.
 #[derive(Default)]
 pub struct Index {
@@ -653,6 +816,48 @@ fn open_element<'t>(before: &'t str, names: &[&str]) -> Option<StartTag<'t>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn 문장마다_sql을_꺼내고_치환을_가린다() {
+        let text = r#"<mapper namespace="a">
+  <sql id="cols">e.id, e.name</sql>
+  <select id="list">
+    SELECT <include refid="cols"/> FROM emp e
+    <!-- FROM 주석 -->
+    <where><if test="name != null">AND e.name = #{name}</if></where>
+    <![CDATA[ AND e.id < 10 ]]> ORDER BY ${sort}
+  </select>
+</mapper>"#;
+        let found = statement_sql(text);
+        assert_eq!(found.len(), 2);
+        assert_eq!(found[0].sql.trim(), "e.id, e.name");
+        let select = &found[1];
+        let squash = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert_eq!(
+            squash(&select.sql),
+            "SELECT FROM emp e WHERE AND e.name = ? AND e.id < 10 ORDER BY ?"
+        );
+        // 문서 자리와 SQL 자리를 오간다. 태그 안은 SQL이 아니다.
+        let doc = text.find("FROM emp").unwrap();
+        let at = select.sql_offset(doc).unwrap();
+        assert!(select.sql[at..].starts_with("FROM emp"));
+        assert_eq!(select.document_offset(at), Some(doc));
+        assert!(select.sql_offset(text.find("refid").unwrap()).is_none());
+        // 치환은 같은 길이로 가린다.
+        let param = text.find("#{name}").unwrap();
+        let at = select.sql_offset(param).unwrap();
+        assert_eq!(&select.sql[at..at + 7], "?      ");
+        assert!(select.element.contains(&param));
+        assert!(statement_sql("<beans/>").is_empty());
+        // iBatis
+        let ibatis = statement_sql(
+            r#"<sqlMap><select id="a">SELECT * FROM t WHERE id = #id# AND x = $x$</select></sqlMap>"#,
+        );
+        assert_eq!(
+            squash(&ibatis[0].sql),
+            "SELECT * FROM t WHERE id = ? AND x = ?"
+        );
+    }
 
     const MYBATIS: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
