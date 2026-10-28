@@ -898,9 +898,72 @@
 ### Phase 7 — 확장·배포
 
 - WASM 플러그인 API(wasmtime): 명령, 패널, 언어 설정 확장
+  - 언어 설정 확장은 코드 없이 파일만 담은 확장도 받는다: TextMate 문법(`.tmLanguage.json`), 언어 설정(주석 기호·괄호 짝), 파일 확장자. tree-sitter 문법이 없는 형식(장비 스크립트, 사내 설정 언어 등)을 이것으로 강조한다. 널리 쓰는 편집기 확장의 문법 묶음과 같은 구조라 그대로 가져올 수 있다.
 - 패키징(cargo-packager): Windows MSI/NSIS, macOS dmg, Linux deb/AppImage
 - 코드 서명과 공증: Windows Authenticode, macOS notarization
 - 자동 업데이트: 서명된 릴리스 매니페스트 검증
+
+### Phase 8 — 웹·API 개발 도구
+
+**목표**: egov 화면(JSP + jQuery)의 스크립트를 언어 서버로 고치고, 컨트롤러 URL을 편집기에서 바로 호출해 본다.
+- 상용 IDE 둘(웹용·C/C++용)의 번들 기능을 살폈더니(2026-10) 둘 다 HTTP 요청 파일, 엔드포인트 목록, 기호 개요를 기본으로 싣는다. Ferrite에는 아직 없다.
+
+- JS·TS·HTML·CSS·JSON 언어 서버: 언어 서버 매니저에 npm 설치 방식(전용 폴더에 버전 고정 `npm install`)을 더해 등록한다. Node가 필요하다(php-debug와 같다). JSON은 스키마 검사(`package.json` 등)가 붙는다.
+- 기호 개요·기호 찾기: LSP `textDocument/documentSymbol`(개요 창, 지금 파일)과 `workspace/symbol`(기호 찾기 창, 프로젝트)
+- 엔드포인트 목록: 2b-6에서 미룬 것이다. 기호 찾기 창에 Spring Boot LS의 `@/` 기호를 보이고, Spring Boot LS가 없는 egov 3.x(XML 설정) 프로젝트는 egov 서버가 `@RequestMapping` 계열을 모아 같은 꼴로 낸다. 누르면 컨트롤러 메서드로 간다.
+- HTTP 요청 파일(`.http`)
+  - 널리 쓰는 형식: `###`로 요청을 나누고, 요청 줄·헤더·본문, `{{변수}}`. 환경 파일로 개발·운영 서버 주소를 바꾼다. 비밀 값은 OS 키체인이나 git에서 뺀 개인 파일에 둔다.
+  - 요청 옆 [▶]로 보내고 응답(상태·헤더·본문·걸린 시간)을 창에 보인다. JSON은 들여 쓰고, 본문 문자 집합(UTF-8·EUC-KR)은 응답 헤더대로 푼다.
+  - 쿠키를 세션 동안 유지한다. egov 로그인 요청 뒤 `.do` 요청을 이어 보낼 수 있다.
+  - 엔드포인트 목록에서 그 URL의 요청 틀을 만든다.
+  - 회사망은 언어 서버 매니저와 같이 OS 인증서 저장소와 `HTTPS_PROXY`를 따른다. 개발 서버의 자체 서명 인증서는 그 요청에 명시했을 때만 받는다.
+- 브라우저 JS 디버그: 오픈소스 JS 디버그 어댑터(DAP 서버, MIT)를 어댑터 목록에 넣는다. Chromium 계열 브라우저를 띄우거나 이미 뜬 브라우저에 붙어, 화면 URL의 스크립트를 프로젝트 파일(`src/main/webapp` 등)과 맞춰 중단점을 건다.
+
+**완료 조건**: egov 표본 프로젝트에서 (1) jQuery를 쓰는 `.js` 파일의 자동완성·정의 이동이 되고, (2) 엔드포인트 목록에서 고른 URL로 `.http` 요청을 만들어 로그인 쿠키를 유지한 채 응답을 보고, (3) JSP 화면 스크립트의 중단점에서 멈춘다. 3개 OS.
+
+**진행 단계**:
+- [ ] 8-1 JS·TS·HTML·CSS·JSON 언어 서버 등록(npm 설치 방식) — 작음~중간
+- [ ] 8-2 기호 개요·기호 찾기, 엔드포인트 목록 — 중간
+- [ ] 8-3 HTTP 요청 파일 실행과 응답 보기 — 중간
+- [ ] 8-4 브라우저 JS 디버그 — 중간
+- [ ] 3개 OS 검증
+
+### Phase 9 — 테스트·보안 점검
+
+**목표**: 테스트 결과, 정적 분석 결과, 취약한 라이브러리를 편집기 안에서 보고 그 줄로 간다. 공공 사업의 보안약점 진단과 취약 라이브러리 점검에 대비한다.
+
+- 테스트 러너: 실행 구성(4-1)의 테스트를 돌린 뒤 보고서를 읽어 결과 트리(통과·실패·건너뜀, 걸린 시간)로 보인다.
+  - 공통 형식은 JUnit XML이다: Maven(`target/surefire-reports`), Gradle(`build/test-results`), pytest(`--junitxml`), CTest(`--output-junit`). Go는 `go test -json`을 읽는다.
+  - 실패를 누르면 그 테스트와 스택의 줄로 간다. 실패한 것만 다시 돌린다(Maven `-Dtest=`, pytest 노드 id 등).
+- 정적 분석 결과 보기(SARIF 2.1.0): 외부 도구(SpotBugs·PMD·Semgrep·clang 정적 분석기 등)가 낸 `.sarif`를 열어 문제 창에 넣는다. 도구를 돌리는 일은 실행 구성에 맡긴다.
+- 의존성 취약점 검사: `pom.xml`·`build.gradle`·`package-lock.json`·`requirements.txt`·`Cargo.lock`의 라이브러리 버전을 공개 취약점 DB(OSV)와 견주고, 고친 버전을 알린다.
+  - Maven은 전이 의존을 `mvn dependency:list`로 푼다. egov는 전이로 들어오는 로깅·Spring 라이브러리가 많다.
+  - 결과는 문제 창과 그 의존성 줄의 경고로 보인다.
+  - 인터넷이 막힌 PC는 생태계별 DB 묶음 파일을 다른 PC에서 받아 와 쓴다(언어 서버의 "파일에서…"와 같다).
+
+**완료 조건**: egov 표본 프로젝트에서 `mvn test` 결과가 트리로 보이고 실패 테스트의 줄로 간다. SpotBugs가 낸 SARIF가 문제 창에 뜬다. 알려진 취약 버전(예: log4j 2.14.1)을 쓰는 pom에 경고가 뜨고, 오프라인 DB로도 같다. 3개 OS.
+
+**진행 단계**:
+- [ ] 9-1 테스트 러너(JUnit XML·`go test -json` 결과 트리) — 중간
+- [ ] 9-2 SARIF 결과 가져오기 — 작음
+- [ ] 9-3 의존성 취약점 검사(OSV, 오프라인 DB) — 중간
+- [ ] 3개 OS 검증
+
+### 백로그 — Phase 미정
+
+작거나 급하지 않아 Phase에 넣지 않은 것이다. 필요해지면 가까운 Phase의 조각으로 옮긴다.
+
+| 기능 | 내용 | 크기 |
+|---|---|---|
+| EditorConfig | `.editorconfig`의 들여쓰기·줄바꿈·끝 공백·마지막 줄바꿈을 따른다. `charset`은 latin1·UTF-8·UTF-16만 정의되어 있어, CP949 감지·보존은 지금대로 둔다. | 작음 |
+| 단축키 설정·Eclipse 배치 | `settings.toml`에서 단축키를 바꾼다. egov 개발환경(Eclipse)에서 넘어온 사용자를 위해 Eclipse 단축키 배치를 고를 수 있게 한다. | 중간 |
+| 사용자 정의 DAP 어댑터 | `debug.toml`에 어댑터 실행 명령과 연결(표준 입출력·TCP)을 직접 적어 목록 밖 어댑터(장비 제조사 디버거 등)를 붙인다. 제조사가 DAP 어댑터를 함께 내주는 경우가 늘고 있다. | 작음 |
+| 저장 시 작업 | 저장한 파일이 패턴에 맞으면 명령(포매터, Sass 컴파일 등)을 돌린다. `.ferrite/run.toml`과 같은 틀이다. | 작음 |
+| TODO 목록 | `TODO`·`FIXME` 주석을 파일에서 찾기(3-1)로 모아 창에 보인다. | 작음 |
+| Handlebars 강조 | egov 코드 생성 템플릿(`.ferrite/templates/code/`)을 고칠 때 쓴다. | 작음 |
+| AI 에이전트 연동 | 개방 표준 둘. MCP 서버: 열린 파일·진단·디버거 상태를 외부 코딩 에이전트에 도구로 내준다. ACP(Agent Client Protocol) 클라이언트: 에이전트 프로세스를 띄워 패널에서 대화하고, 제안한 편집을 diff로 받는다. | 큼 |
+
+- 살폈지만 넣지 않은 것: 임베디드(MCU 플래시·시리얼 모니터·장비 설정 파일), 프레임워크별 지원(React·Vue·Angular 등, JS·TS 언어 서버로 기본은 된다), 린터 개별 연동(언어 서버나 저장 시 작업으로 된다), 원격 개발·컨테이너·SFTP 배포, 로컬 AI 완성 모델, 계정 기반 설정 동기화. egov 개발과 거리가 멀거나 크기에 비해 쓰임이 적다.
 
 ## 3. Phase별 3-OS 검증 체크리스트 (수동)
 
@@ -925,3 +988,4 @@ Phase 0 ─► Phase 1 ─┬─► Phase 2 ─┬─► Phase 2b (egov 언어 �
 - Phase 2b·2c(egov 지원)는 egov 개발에 바로 쓰려면 가장 먼저 필요한 기능이다. Phase 3·4보다 앞당긴다.
 - Phase 2c와 Phase 5(DB)의 JDBC 사이드카는 Phase 2와 병행할 수 있다.
 - Phase 7의 패키징 스크립트는 언제든 앞당길 수 있다. 사내 배포가 필요해지는 시점에 진행한다.
+- Phase 8은 Phase 2(언어 서버)·2b(egov 색인)·4(DAP)에, Phase 9는 Phase 4(실행 구성)에 기댄다. Phase 6·7과는 상관없어 앞당길 수 있다.
