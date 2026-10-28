@@ -5,7 +5,7 @@ Rust로 작성한 크로스플랫폼(Windows / macOS / Linux) 경량 IDE.
 
 - 개발 워크플로우와 로드맵: [docs/WORKFLOW.md](docs/WORKFLOW.md)
 
-## 현재 상태: Phase 2·2b·2c·3·4·5·6 완료 (LSP 연동, egov 언어 지원·개발도구, 프로젝트 도구, 실행·디버그, DB 도구, 데이터 사이언스, 3개 OS 검증), Phase 7 진행 중 (확장·배포)
+## 현재 상태: Phase 2·2b·2c·3·4·5·6·7 완료 (LSP 연동, egov 언어 지원·개발도구, 프로젝트 도구, 실행·디버그, DB 도구, 데이터 사이언스, 확장·배포, 3개 OS 검증). 코드 서명·공증은 인증서가 생기면 한다
 
 - 설치 파일: 패키징 워크플로(`Package`)가 Windows(NSIS·MSI)·macOS(dmg)·Linux(deb·AppImage) 설치 파일을 만든다. 아직 서명하지 않아 Windows SmartScreen 경고([추가 정보] → [실행])와 macOS Gatekeeper 차단(오른쪽 단추 → [열기])이 뜬다.
 - WASM 플러그인: 설정 폴더의 `ferrite/plugins/<이름>/`에 `plugin.toml`과 `.wasm`을 넣으면 [플러그인] 메뉴에 명령이, 플러그인 창에 패널이 생긴다. 플러그인은 앱이 넘긴 문서만 보고 파일·네트워크는 못 쓴다. 예제는 `examples/plugins/text-stats`(Rust).
