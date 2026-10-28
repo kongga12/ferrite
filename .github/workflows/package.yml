@@ -86,6 +86,109 @@ jobs:
           cargo packager --release -p ferrite-app --formats ${{ matrix.formats }} \
             --out-dir "$GITHUB_WORKSPACE/target/packages" \
             --binaries-dir "$GITHUB_WORKSPACE/target/release"
+      # 만든 설치 파일을 그 자리에서 설치 → 실행(`--version`) → 제거하고, 남은 것이 없는지 본다. 창을 띄우는
+      # 것은 보지 못한다(러너에 화면이 없다).
+      - name: 설치 시험(Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $out = "$env:GITHUB_WORKSPACE\target\packages"
+          function Check-Version($exe) {
+            $log = "$env:RUNNER_TEMP\version.txt"
+            $p = Start-Process $exe -ArgumentList '--version' -Wait -PassThru -NoNewWindow -RedirectStandardOutput $log
+            $v = (Get-Content $log -Raw).Trim()
+            if ($p.ExitCode -ne 0 -or $v -notmatch '^ferrite \d+\.\d+\.\d+$') { throw "실행 실패: $exe → '$v' (종료 $($p.ExitCode))" }
+            "실행: $v"
+          }
+          function Uninstall-Entries($root) {
+            Get-ChildItem "$root\Software\Microsoft\Windows\CurrentVersion\Uninstall" -ErrorAction SilentlyContinue |
+              Get-ItemProperty | Where-Object DisplayName -eq 'Ferrite'
+          }
+
+          # NSIS: 사용자별 설치(%LOCALAPPDATA%\Ferrite)
+          $setup = (Get-ChildItem $out -Filter '*-setup.exe')[0].FullName
+          $p = Start-Process $setup -ArgumentList '/S' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "NSIS 설치 실패: $($p.ExitCode)" }
+          $dir = "$env:LOCALAPPDATA\Ferrite"
+          Check-Version "$dir\ferrite.exe"
+          if (-not (Uninstall-Entries 'HKCU:')) { throw 'NSIS: 프로그램 추가/제거 항목이 없다' }
+          # 제거 프로그램은 임시 폴더에 자신을 복사해 돌고 바로 끝나므로 파일이 없어질 때까지 기다린다.
+          Start-Process "$dir\uninstall.exe" -ArgumentList '/S' -Wait
+          for ($i = 0; $i -lt 60 -and (Test-Path $dir); $i++) { Start-Sleep 1 }
+          $left = @()
+          if (Test-Path $dir) { $left += Get-ChildItem $dir -Recurse | ForEach-Object FullName }
+          if (Test-Path 'HKCU:\Software\Cheolho Choo') { $left += 'HKCU:\Software\Cheolho Choo' }
+          if (Uninstall-Entries 'HKCU:') { $left += '프로그램 추가/제거 항목' }
+          $lnk = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Ferrite.lnk"
+          if (Test-Path $lnk) { $left += $lnk }
+          if ($left) { throw "NSIS 제거 뒤 남은 것: $($left -join ', ')" }
+          'NSIS: 설치·실행·제거 통과'
+
+          # MSI: 시스템 전체 설치(러너는 관리자)
+          $msi = (Get-ChildItem $out -Filter '*.msi')[0].FullName
+          $p = Start-Process msiexec -ArgumentList "/i `"$msi`" /qn /l*v `"$env:RUNNER_TEMP\msi-install.log`"" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { Get-Content "$env:RUNNER_TEMP\msi-install.log" -Tail 40; throw "MSI 설치 실패: $($p.ExitCode)" }
+          $exe = (Get-ChildItem $env:ProgramFiles, ${env:ProgramFiles(x86)} -Filter ferrite.exe -Recurse -Depth 2 -ErrorAction SilentlyContinue)[0].FullName
+          if (-not $exe) { throw 'MSI: 설치한 ferrite.exe를 찾지 못했다' }
+          Check-Version $exe
+          $p = Start-Process msiexec -ArgumentList "/x `"$msi`" /qn" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "MSI 제거 실패: $($p.ExitCode)" }
+          $left = @()
+          if (Test-Path (Split-Path $exe)) { $left += Split-Path $exe }
+          if (Uninstall-Entries 'HKLM:') { $left += '프로그램 추가/제거 항목' }
+          if ($left) { throw "MSI 제거 뒤 남은 것: $($left -join ', ')" }
+          'MSI: 설치·실행·제거 통과'
+      - name: 설치 시험(macOS)
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          check() {
+            v=$("$1" --version)
+            echo "실행: $v"
+            [[ "$v" =~ ^ferrite\ [0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::실행 실패: $1 → $v"; exit 1; }
+          }
+          # dmg: 열어 .app을 복사해 실행하고 지운다(dmg는 그 밖에 설치하는 것이 없다).
+          mnt=$(mktemp -d); dest=$(mktemp -d)
+          hdiutil attach target/packages/*.dmg -nobrowse -readonly -mountpoint "$mnt"
+          cp -R "$mnt"/*.app "$dest/"
+          hdiutil detach "$mnt"
+          check "$dest"/*.app/Contents/MacOS/ferrite
+          rm -rf "$dest"
+          echo 'dmg: 실행 통과'
+          # 업데이트로 받는 .app.tar.gz(서명하는 `v*` 태그에서만 만든다)
+          if compgen -G 'target/packages/*.app.tar.gz' > /dev/null; then
+            tgz=$(mktemp -d)
+            tar -xzf target/packages/*.app.tar.gz -C "$tgz"
+            check "$tgz"/*.app/Contents/MacOS/ferrite
+            rm -rf "$tgz"
+            echo 'app.tar.gz: 실행 통과'
+          fi
+      - name: 설치 시험(Linux)
+        if: runner.os == 'Linux'
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: 1
+        run: |
+          set -euo pipefail
+          check() {
+            v=$("$@" --version)
+            echo "실행: $v"
+            [[ "$v" =~ ^ferrite\ [0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::실행 실패: $* → $v"; exit 1; }
+          }
+          # deb: apt로 설치해 적은 의존이 풀리는지도 본다.
+          deb=$(ls "$GITHUB_WORKSPACE"/target/packages/*.deb)
+          pkg=$(dpkg-deb -f "$deb" Package)
+          sudo apt-get install -y "$deb"
+          check ferrite
+          dpkg -L "$pkg" > "$RUNNER_TEMP/files.txt"
+          sudo apt-get purge -y "$pkg"
+          left=$(while read -r f; do [ -f "$f" ] && echo "$f" || true; done < "$RUNNER_TEMP/files.txt")
+          [ -z "$left" ] || { echo "::error::deb 제거 뒤 남은 파일: $left"; exit 1; }
+          echo 'deb: 설치·실행·제거 통과'
+          appimage=$(ls "$GITHUB_WORKSPACE"/target/packages/*.AppImage)
+          chmod +x "$appimage"
+          check "$appimage"
+          echo 'AppImage: 실행 통과'
       - uses: actions/upload-artifact@v4
         with:
           name: ferrite-packages-${{ runner.os }}

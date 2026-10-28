@@ -57,6 +57,14 @@ icons = ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/
 [package.metadata.packager.nsis]
 installer-icon = "icons/icon.ico"
 languages = ["Korean", "English"]
+# 템플릿은 설치 위치를 기억하는 레지스트리 키(HKCU\Software\<제작자>\Ferrite)를 제거할 때 남긴다.
+# 제거가 끝나면 지운다(업데이트 설치는 이 키를 다시 쓴다).
+preinstall-section = '''
+Function un.onUninstSuccess
+  DeleteRegKey SHCTX "${MANUPRODUCTKEY}"
+  DeleteRegKey /ifempty SHCTX "Software\${MANUFACTURER}"
+FunctionEnd
+'''
 
 [package.metadata.packager.macos]
 minimum-system-version = "11.0"
