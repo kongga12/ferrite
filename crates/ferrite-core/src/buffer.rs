@@ -192,6 +192,57 @@ impl Buffer {
         self.line_start(line) + col.min(self.line_len(line))
     }
 
+    /// 커서 바로 뒤(없으면 바로 앞)의 괄호와 그 짝의 문자 위치. 선택 중이면 없다. 짝은 같은 종류의
+    /// 괄호만 세어 찾고, 앞뒤로 `MAX_BRACKET_SCAN` 글자까지만 본다.
+    // ponytail: 문자열·주석 안의 괄호도 센다. 틀리게 짝짓는 일이 잦으면 강조 분류로 건너뛴다.
+    pub fn bracket_pair(&self, pairs: &[(char, char)]) -> Option<(usize, usize)> {
+        if !self.selection.is_empty() {
+            return None;
+        }
+        let head = self.selection.head;
+        let at = |pos: usize| (pos < self.rope.len_chars()).then(|| self.rope.char(pos));
+        [Some(head), head.checked_sub(1)]
+            .into_iter()
+            .flatten()
+            .find_map(|pos| {
+                let c = at(pos)?;
+                let &(open, close) = pairs.iter().find(|(o, cl)| c == *o || c == *cl)?;
+                self.bracket_match(pos, open, close, c == open)
+                    .map(|m| (pos, m))
+            })
+    }
+
+    fn bracket_match(&self, pos: usize, open: char, close: char, forward: bool) -> Option<usize> {
+        let mut depth = 0usize;
+        if forward {
+            let chars = self.rope.chars_at(pos + 1).take(MAX_BRACKET_SCAN);
+            for (i, c) in chars.enumerate() {
+                if c == open {
+                    depth += 1;
+                } else if c == close {
+                    if depth == 0 {
+                        return Some(pos + 1 + i);
+                    }
+                    depth -= 1;
+                }
+            }
+        } else {
+            let mut chars = self.rope.chars_at(pos);
+            for i in 1..=MAX_BRACKET_SCAN.min(pos) {
+                let c = chars.prev()?;
+                if c == close {
+                    depth += 1;
+                } else if c == open {
+                    if depth == 0 {
+                        return Some(pos - i);
+                    }
+                    depth -= 1;
+                }
+            }
+        }
+        None
+    }
+
     pub fn selected_text(&self) -> String {
         self.rope.slice(self.selection.range()).to_string()
     }
@@ -766,9 +817,29 @@ pub fn detect_indent(rope: &Rope, default: Indent) -> Indent {
         .map_or(default, |n| Indent::Spaces(n as u8))
 }
 
+/// 괄호 짝을 찾을 때 앞뒤로 보는 글자 수의 상한(그릴 때마다 찾는다).
+const MAX_BRACKET_SCAN: usize = 20_000;
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn 커서_옆_괄호의_짝을_찾는다() {
+        let pairs = [('(', ')'), ('{', '}')];
+        let text = "f(a, (b)) { x }";
+        // 커서 바로 뒤의 여는 괄호, 바로 앞의 닫는 괄호, 중첩
+        assert_eq!(buf(text, 1, 1).bracket_pair(&pairs), Some((1, 8)));
+        assert_eq!(buf(text, 9, 9).bracket_pair(&pairs), Some((8, 1)));
+        assert_eq!(buf(text, 5, 5).bracket_pair(&pairs), Some((5, 7)));
+        assert_eq!(buf(text, 10, 10).bracket_pair(&pairs), Some((10, 14)));
+        // 괄호 옆이 아니거나, 짝이 없거나, 선택 중이거나, 모르는 괄호
+        assert_eq!(buf(text, 3, 3).bracket_pair(&pairs), None);
+        assert_eq!(buf("((a)", 0, 0).bracket_pair(&pairs), None);
+        assert_eq!(buf(text, 1, 2).bracket_pair(&pairs), None);
+        assert_eq!(buf("[a]", 0, 0).bracket_pair(&pairs), None);
+        assert_eq!(buf("", 0, 0).bracket_pair(&pairs), None);
+    }
 
     fn buf(text: &str, anchor: usize, head: usize) -> Buffer {
         let mut b = Buffer::new(text);

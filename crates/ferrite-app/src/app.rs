@@ -292,12 +292,18 @@ fn apply_settings(ctx: &egui::Context, settings: &Settings) {
 
 /// 문서 경로를 바꾼다(이름 바꾸기, 다른 이름으로 저장). 언어 서버에서는 옛 경로를 닫고
 /// 다음 동기화 때 새 경로로 다시 연다.
-fn move_document(hub: &mut LspHub, doc: &mut Document, path: PathBuf) {
+fn move_document(
+    hub: &mut LspHub,
+    languages: &ferrite_textmate::Registry,
+    doc: &mut Document,
+    path: PathBuf,
+) {
     if let Some(lang) = doc.lang {
         hub.closed(&doc.path, lang);
     }
     doc.lsp = DocSync::default();
     doc.set_path(path);
+    doc.set_extension(languages);
 }
 
 struct Document {
@@ -326,6 +332,9 @@ struct Document {
     git_key: Option<(u64, u64)>,
     /// .ipynb면 노트북 보기(버퍼 위에 셀을 보인다).
     notebook: Option<crate::notebook_ui::NotebookView>,
+    /// tree-sitter 언어가 없는 파일의 언어 확장(플러그인 폴더)과 그 TextMate 강조.
+    ext: Option<std::sync::Arc<ferrite_textmate::Language>>,
+    textmate: Option<ferrite_textmate::TextMateSyntax>,
 }
 
 impl Document {
@@ -354,6 +363,8 @@ impl Document {
             git_marks: Vec::new(),
             git_key: None,
             notebook,
+            ext: None,
+            textmate: None,
         };
         doc.replace_content(&content, &bytes, default_indent);
         Ok(doc)
@@ -378,6 +389,29 @@ impl Document {
         self.disk_hash = text_file::content_hash(bytes);
         self.external_change = false;
         self.lsp.content_replaced();
+        self.reset_textmate();
+    }
+
+    /// 언어 확장을 붙인다(tree-sitter 언어가 없는 파일만).
+    fn set_extension(&mut self, languages: &ferrite_textmate::Registry) {
+        self.ext = self
+            .lang
+            .is_none()
+            .then(|| languages.language_for(&self.path))
+            .flatten();
+        self.reset_textmate();
+    }
+
+    /// 언어 확장의 강조를 처음부터 다시 만든다. 큰 파일은 tree-sitter처럼 강조하지 않는다.
+    fn reset_textmate(&mut self) {
+        self.textmate = self
+            .ext
+            .as_ref()
+            .and_then(|e| e.grammar())
+            .filter(|_| self.buffer.rope().len_bytes() <= MAX_SYNTAX_BYTES)
+            .map(ferrite_textmate::TextMateSyntax::new);
+        self.buffer
+            .set_track_syntax_edits(self.syntax.is_some() || self.textmate.is_some());
     }
 
     fn reload(&mut self, default_indent: Indent) -> Result<(), TextFileError> {
@@ -766,7 +800,7 @@ impl FerriteApp {
                     } else {
                         path.join(rest)
                     };
-                    move_document(&mut self.hub, doc, moved);
+                    move_document(&mut self.hub, self.plugins.languages(), doc, moved);
                 }
             }
             self.status = format!("이름을 바꿨습니다: {}", path.display());
@@ -883,7 +917,12 @@ impl FerriteApp {
         match doc.save() {
             Ok(()) => {
                 // 이제 파일이 있으니 실제 경로로 확정하고 언어도 다시 고른다.
-                move_document(&mut self.hub, doc, real_path(&target));
+                move_document(
+                    &mut self.hub,
+                    self.plugins.languages(),
+                    doc,
+                    real_path(&target),
+                );
                 self.invalidate_tree(target.parent());
                 self.status = format!("저장됨: {}", target.display());
             }
@@ -962,7 +1001,8 @@ impl FerriteApp {
             return;
         }
         match Document::open(path.clone(), self.settings.default_indent()) {
-            Ok(doc) => {
+            Ok(mut doc) => {
+                doc.set_extension(self.plugins.languages());
                 self.docs.push(doc);
                 self.active = Some(self.docs.len() - 1);
                 // 거터 변경 표시의 기준(인덱스 내용)을 바로 읽는다.
@@ -2327,7 +2367,12 @@ impl FerriteApp {
                 dock::show(&mut self.layout, Pane::Plugins);
             }
             MenuChoice::Window => dock::show(&mut self.layout, Pane::Plugins),
-            MenuChoice::Reload => self.status = self.plugins.reload(),
+            MenuChoice::Reload => {
+                self.status = self.plugins.reload();
+                for doc in &mut self.docs {
+                    doc.set_extension(self.plugins.languages());
+                }
+            }
         }
     }
 
@@ -2562,10 +2607,18 @@ impl FerriteApp {
                         Indent::Tabs => "탭".to_owned(),
                         Indent::Spaces(n) => format!("공백: {n}"),
                     });
-                    ui.label(match (doc.lang, &doc.syntax) {
-                        (Some(lang), Some(_)) => lang.name().to_owned(),
-                        (Some(lang), None) => format!("{} (대용량: 구문 강조 꺼짐)", lang.name()),
-                        (None, _) => "일반 텍스트".to_owned(),
+                    ui.label(match (doc.lang, &doc.syntax, &doc.ext) {
+                        (Some(lang), Some(_), _) => lang.name().to_owned(),
+                        (Some(lang), None, _) => {
+                            format!("{} (대용량: 구문 강조 꺼짐)", lang.name())
+                        }
+                        (None, _, Some(ext))
+                            if doc.textmate.is_none() && ext.grammar().is_some() =>
+                        {
+                            format!("{} (대용량: 구문 강조 꺼짐)", ext.name)
+                        }
+                        (None, _, Some(ext)) => ext.name.clone(),
+                        (None, _, None) => "일반 텍스트".to_owned(),
                     });
                     let (line, col) = doc.buffer.pos_to_line_col(doc.buffer.selection().head);
                     ui.label(format!("줄 {}, 열 {}", line + 1, col + 1));
@@ -2874,7 +2927,16 @@ impl FerriteApp {
             let opts = EditorOptions {
                 tab_size: self.settings.tab_size,
                 indent: doc.indent,
-                comment_token: doc.lang.and_then(Lang::line_comment),
+                comment_token: doc
+                    .lang
+                    .and_then(Lang::line_comment)
+                    .or_else(|| doc.ext.as_ref()?.line_comment.as_deref()),
+                brackets: doc
+                    .ext
+                    .as_ref()
+                    .map(|e| e.brackets.as_slice())
+                    .filter(|b| !b.is_empty())
+                    .unwrap_or(&editor_view::DEFAULT_BRACKETS),
                 search_matches: self.find.as_ref().map_or(&[], |f| f.matches()),
                 problems: &doc.lsp.problems,
                 hover: self
@@ -2894,8 +2956,16 @@ impl FerriteApp {
             if std::mem::take(&mut self.focus_editor) {
                 ui.memory_mut(|m| m.request_focus(id));
             }
-            let styler = doc.syntax.as_mut().map(|s| s as &mut dyn Styler);
+            let styler: Option<&mut dyn Styler> = match (&mut doc.syntax, &mut doc.textmate) {
+                (Some(s), _) => Some(s),
+                (None, Some(t)) => Some(t),
+                (None, None) => None,
+            };
             let output = editor_view::show(ui, id, &mut doc.buffer, &mut doc.view, &opts, styler);
+            // 언어 확장 강조가 앞 줄을 다 세지 못했으면 다음 프레임에 이어 센다.
+            if doc.textmate.as_ref().is_some_and(|t| t.is_pending()) {
+                ui.ctx().request_repaint();
+            }
             let focused = output.response.has_focus();
             if let Some(tab) = active_tab {
                 output.response.labelled_by(tab);
@@ -3020,7 +3090,10 @@ fn plugin_doc(docs: &[Document], active: Option<usize>) -> Option<&Document> {
 fn plugin_snapshot(docs: &[Document], active: Option<usize>) -> Option<crate::plugin_ui::Snapshot> {
     plugin_doc(docs, active).map(|d| crate::plugin_ui::Snapshot {
         path: d.path.clone(),
-        language: d.lang.map(Lang::name),
+        language: d
+            .lang
+            .map(|l| l.name().to_owned())
+            .or_else(|| d.ext.as_ref().map(|e| e.name.clone())),
         text: d.buffer.text(),
         selection: d.buffer.selected_text(),
     })
@@ -5683,6 +5756,68 @@ mod tests {
         assert_eq!(harness.state().docs[0].buffer.text(), "HELLO WORLD\nhello");
         // 문서가 바뀌면 패널을 다시 그린다(찾을 글은 플러그인에 남는다)
         harness.get_by_label("'hello': 1곳");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn 언어_확장으로_강조하고_주석_기호를_쓴다() {
+        let dir = std::env::temp_dir().join(format!("ferrite-lang-ext-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let (project, plugins) = (dir.join("project"), dir.join("plugins"));
+        let ext = plugins.join("foo-lang");
+        fs::create_dir_all(ext.join("syntaxes")).unwrap();
+        fs::create_dir_all(&project).unwrap();
+        fs::write(project.join("a.foo"), "foo (bar)\n").unwrap();
+        fs::write(
+            ext.join("package.json"),
+            r#"{"contributes": {
+                "languages": [{"id": "foo", "aliases": ["Foo 언어"], "extensions": [".foo"],
+                               "configuration": "./language-configuration.json"}],
+                "grammars": [{"language": "foo", "scopeName": "source.foo",
+                              "path": "./syntaxes/foo.tmLanguage.json"}]}}"#,
+        )
+        .unwrap();
+        fs::write(
+            ext.join("language-configuration.json"),
+            "{ // 주석\n \"comments\": { \"lineComment\": \"#\" }, \"brackets\": [[\"(\", \")\"],] }",
+        )
+        .unwrap();
+        fs::write(
+            ext.join("syntaxes/foo.tmLanguage.json"),
+            r#"{"scopeName": "source.foo", "patterns": [{"match": "\\bfoo\\b", "name": "keyword.foo"}]}"#,
+        )
+        .unwrap();
+        let mut harness = harness_builder()
+            .with_size(egui::vec2(1200.0, 800.0))
+            .build_eframe(|cc| {
+                let mut app = FerriteApp::new(cc, Some(project.clone()));
+                app.plugins = crate::plugin_ui::Plugins::load(Some(plugins.clone()));
+                app
+            });
+        harness.get_by_label("a.foo").click();
+        harness.run();
+        harness.get_by_label("Foo 언어"); // 상태 표시줄
+        let doc = &mut harness.state_mut().docs[0];
+        let rope = doc.buffer.rope().clone();
+        let lines = doc.textmate.as_mut().unwrap().highlight_lines(&rope, 0..1);
+        assert_eq!(lines[0], [(0..3, ferrite_core::syntax::Highlight::Keyword)]);
+
+        // 줄 주석은 언어 설정의 기호로
+        let editor = harness.get_by_role(egui::accesskit::Role::MultilineTextInput);
+        editor.focus();
+        harness.run();
+        harness.key_press_modifiers(Modifiers::COMMAND, Key::Slash);
+        harness.run();
+        assert_eq!(harness.state().docs[0].buffer.text(), "# foo (bar)\n");
+
+        // 확장을 지우고 다시 읽으면 일반 텍스트로 돌아간다
+        fs::remove_dir_all(&ext).unwrap();
+        harness
+            .state_mut()
+            .on_plugin_menu(crate::plugin_ui::MenuChoice::Reload);
+        harness.run();
+        assert!(harness.state().docs[0].textmate.is_none());
+        harness.get_by_label("일반 텍스트");
         fs::remove_dir_all(&dir).unwrap();
     }
 

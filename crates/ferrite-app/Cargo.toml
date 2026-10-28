@@ -25,6 +25,7 @@ ferrite-notebook.workspace = true
 ferrite-term.workspace = true
 ferrite-update.workspace = true
 ferrite-plugin.workspace = true
+ferrite-textmate.workspace = true
 # 노트북 그림 출력(PNG). eframe이 이미 쓰는 판이다.
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 ropey.workspace = true

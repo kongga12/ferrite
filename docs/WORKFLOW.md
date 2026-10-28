@@ -993,6 +993,29 @@
     - 창 테스트: 메뉴로 선택 영역 바꾸기와 상태 표시줄 알림, [문서 통계 창]의 통계, 입력칸에 쳐서 찾은 수, 패널 버튼으로 선택 영역 바꾸기, 문서가 바뀐 뒤 다시 그리기
     - 실제 앱(Windows, 릴리스 빌드): 설정 폴더에 예제를 넣고 [플러그인] 메뉴의 하위 메뉴, 낱말을 골라 [선택 영역을 대문자로], [문서 통계 창]의 통계, 입력칸에 쳐서 찾은 수, [글자 수 알리기]의 상태 표시줄 알림을 화면으로 확인했다. 확인 뒤 설정 폴더를 지웠다.
 - [ ] 7-5 언어 설정 확장(코드 없는 확장: TextMate 문법·주석 기호·괄호 짝·확장자)
+  - 결정(사용자): 토크나이저는 직접 만들고 정규식은 onig 6.5.3(Oniguruma, 문법이 기대하는 그대로), 형식은 널리 쓰는 편집기 확장 폴더 그대로, 언어 설정은 주석과 괄호 짝 강조까지(자동 닫기는 하지 않는다).
+    - onig는 bindgen(libclang)이 필요한 기본 기능을 빼고, 함께 든 바인딩으로 C 소스만 cc로 빌드한다(tree-sitter와 같다).
+  - 새 크레이트 `ferrite-textmate`
+    - 확장 폴더: 플러그인 폴더(`ferrite/plugins/<이름>/`)의 `package.json`. `contributes.languages`(id, aliases, extensions, filenames, configuration)와 `contributes.grammars`(language, scopeName, path)를 읽는다. 확장의 코드(JS)는 쓰지 않는다. VS Code 확장(.vsix를 푼 `extension` 폴더)을 고치지 않고 넣을 수 있다.
+    - 언어 설정(`language-configuration.json`, JSONC: 주석·끝 쉼표를 뺀다): `comments.lineComment`(글 또는 `{comment}`), `brackets`의 한 글자 짝
+    - 문법은 JSON(`.tmLanguage.json`)만 읽는다. plist(`.tmLanguage`)·YAML은 오류로 알린다. 폴더 밖 경로는 받지 않는다.
+    - 같은 언어 id는 먼저 읽은 것에 확장자·파일 이름을 더한다. 파일은 파일 이름, 그다음 가장 긴 확장자로 고른다. tree-sitter 내장 언어가 먼저다(언어 확장은 내장 언어가 없는 파일만).
+    - 문법은 그 언어 파일을 처음 열 때 규칙으로 옮긴다. 다른 문법을 부르는 문법(마크다운은 수십 개)은 옮기는 데 시간이 걸린다.
+  - 토크나이저(VS Code의 TextMate 엔진과 같은 규칙)
+    - match, begin/end, begin/while, include(저장소, `$self`, `$base`, `source.x`, `source.x#이름`), captures(begin·end·while), contentName, applyEndPatternLast, end·while의 뒤 참조(`\1`, begin에서 찾은 글을 이스케이프해 채운다)
+    - `\G`는 닻 자리(바로 앞 begin이 끝난 자리, begin이 줄 끝까지 맞았으면 그 안의 줄 처음)에서만 맞는다. 줄 끝에서도 한 번 더 찾는다(줄바꿈까지 맞은 begin 뒤의 빈 begin).
+    - 빈 매치가 되풀이되지 않게 막고, 한 줄에서 5000번 넘게 찾으면 그 줄은 그만 센다. 1만 바이트 넘는 줄은 강조하지 않고 쌓임만 넘긴다.
+    - 쓰지 않는 것: 주입(injections), 캡처 안의 patterns, `\A`
+    - 줄마다 시작할 때의 규칙 쌓임을 기억하고 편집한 줄부터 다시 센다. 보이는 줄 앞을 세는 데 한 번에 30ms까지 쓰고, 넘으면 다음 프레임에 이어 센다(그동안 그 줄은 강조 없음).
+    - 범위 이름 → 강조 분류: comment, string, constant·support.constant, keyword(operator 빼고)·storage·variable.language·markup.heading, entity.name.function·support.function, entity.name.type/class·support.type/class, entity.name.tag, entity.other.attribute-name·속성 변수. 앱 테마 색을 그대로 쓴다.
+  - 앱: 언어 확장 파일은 TextMate로 강조하고, 상태 표시줄에 언어 이름, 줄 주석(Ctrl+/)은 확장의 기호. [플러그인 다시 읽기]가 언어 확장도 다시 읽고 열린 문서에 다시 붙인다. 읽지 못한 것은 플러그인 창에 보인다.
+  - 괄호 짝 강조(모든 언어): 커서 바로 뒤(없으면 앞)의 괄호와 그 짝의 배경을 칠한다. 언어 확장은 설정의 brackets, 그 밖에는 `()[]{}`. 앞뒤 2만 글자까지 찾고, 문자열·주석 안의 괄호도 센다.
+  - 검증
+    - 단위: 범위 분류, match·캡처·begin/end·저장소, 뒤 참조(정규식 글자 이스케이프 포함), while, applyEndPatternLast, 다른 문법과 돌아 부르는 저장소, `\G` 닻(줄 처음 포함), 빈 매치·잘못된 정규식, 펜스 코드 블록(마크다운 모양), 편집한 줄부터 다시 세기, 긴 줄, 시간 예산을 넘기면 이어 세기, JSONC, 확장 폴더 읽기(언어 고르기, 설정, 같은 id 합치기, 오류)
+    - 괄호 짝: 앞·뒤 괄호, 중첩, 짝 없음, 선택 중, 모르는 괄호
+    - 창 테스트: 언어 확장 파일을 열어 상태 표시줄 이름과 강조, Ctrl+/의 주석 기호, 확장을 지우고 다시 읽으면 일반 텍스트
+    - 실제 문법(로컬 VS Code에 든 내장 확장, 저장소에 넣지 않음): 75개 언어를 125ms에 읽었다(plist 문법 하나만 오류). Batch·셸·Lua·Ruby·PowerShell·Perl·F#·Swift·C#·Docker·Makefile·마크다운(펜스 안 Rust 포함) 예제가 맞게 칠해졌다. 1MB 셸 스크립트를 처음부터 다 세는 데 약 1.2초라 시간 예산으로 나눠 센다.
+    - 실제 앱(Windows, 릴리스 빌드): VS Code의 셸 스크립트 확장 폴더를 플러그인 폴더에 그대로 넣고 `.sh`를 열어 강조(주석·키워드·문자열), 상태 표시줄의 "Shell Script", 커서 옆 `(`와 짝 `)`의 강조를 화면으로 확인했다. 확인 뒤 설정 폴더를 지웠다.
 - [ ] 3개 OS 검증
 
 ### Phase 8 — 웹·API 개발 도구

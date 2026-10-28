@@ -10,7 +10,7 @@ use ferrite_plugin::{Action, Editor, Event, Plugin, Widget};
 /// 플러그인에 넘길 활성 에디터(앱이 만든다).
 pub struct Snapshot {
     pub path: PathBuf,
-    pub language: Option<&'static str>,
+    pub language: Option<String>,
     pub text: String,
     pub selection: String,
 }
@@ -19,7 +19,7 @@ impl Snapshot {
     fn editor(&self) -> Editor<'_> {
         Editor {
             path: &self.path,
-            language: self.language,
+            language: self.language.as_deref(),
             text: &self.text,
             selection: &self.selection,
         }
@@ -43,6 +43,8 @@ pub enum MenuChoice {
 pub struct Plugins {
     root: Option<PathBuf>,
     plugins: Vec<Plugin>,
+    /// 같은 폴더의 언어 확장(package.json).
+    languages: ferrite_textmate::Registry,
     errors: Vec<String>,
     /// 플러그인 창의 패널(플러그인 번호, 패널 id).
     panel: Option<PanelKey>,
@@ -72,6 +74,12 @@ impl Plugins {
             Some(root) => ferrite_plugin::load_all(root),
             None => Default::default(),
         };
+        let (languages, errors) = match &self.root {
+            Some(root) => ferrite_textmate::Registry::load(root),
+            None => Default::default(),
+        };
+        self.languages = languages;
+        self.errors.extend(errors);
         self.widgets.clear();
         self.panel_error = None;
         self.drawn = None;
@@ -80,13 +88,19 @@ impl Plugins {
             .iter()
             .enumerate()
             .find_map(|(i, p)| p.manifest.panels.first().map(|panel| (i, panel.id.clone())));
+        let read = format!(
+            "플러그인 {}개, 언어 확장 {}개를 읽었습니다",
+            self.plugins.len(),
+            self.languages.len()
+        );
         match self.errors.len() {
-            0 => format!("플러그인 {}개를 읽었습니다", self.plugins.len()),
-            n => format!(
-                "플러그인 {}개를 읽었습니다. {n}개는 읽지 못했습니다(플러그인 창)",
-                self.plugins.len()
-            ),
+            0 => read,
+            n => format!("{read}. 읽지 못한 것 {n}개(플러그인 창)"),
         }
+    }
+
+    pub fn languages(&self) -> &ferrite_textmate::Registry {
+        &self.languages
     }
 
     pub fn name(&self, plugin: usize) -> &str {
