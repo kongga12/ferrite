@@ -1,0 +1,18 @@
+[package]
+name = "ferrite-plugin"
+description = "Ferrite WASM 플러그인: 매니페스트 읽기, wasmi로 플러그인 실행(명령·패널)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+toml = "1.1.8"
+# 기본 기능에서 WAT 글 형식(wat)과 memory64를 뺀다. 플러그인은 .wasm만 받는다.
+wasmi = { version = "2.0.0", default-features = false, features = ["std", "validate", "stable", "auto-dispatch"] }
+
+[dev-dependencies]
+# 테스트는 작은 시험 플러그인을 WAT 글로 쓴다(기본 기능의 wat).
+wasmi = "2.0.0"

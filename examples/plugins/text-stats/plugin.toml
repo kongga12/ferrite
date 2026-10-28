@@ -1,0 +1,21 @@
+# Ferrite 플러그인 매니페스트. 이 파일과 빌드한 text_stats.wasm을 설정 폴더의
+# ferrite/plugins/text-stats/ 에 넣는다(Windows %APPDATA%, macOS ~/Library/Application Support,
+# Linux ~/.config).
+api = 1
+id = "text-stats"
+name = "문서 통계"
+version = "0.1.0"
+description = "선택 영역을 대문자로 바꾸고, 문서의 줄·낱말·글자 수를 보인다(예제)."
+wasm = "text_stats.wasm"
+
+[[commands]]
+id = "upper"
+title = "선택 영역을 대문자로"
+
+[[commands]]
+id = "count"
+title = "글자 수 알리기"
+
+[[panels]]
+id = "stats"
+title = "문서 통계"

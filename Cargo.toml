@@ -18,6 +18,7 @@ ferrite-dap = { path = "crates/ferrite-dap" }
 ferrite-db = { path = "crates/ferrite-db" }
 ferrite-notebook = { path = "crates/ferrite-notebook" }
 ferrite-update = { path = "crates/ferrite-update" }
+ferrite-plugin = { path = "crates/ferrite-plugin" }
 eframe = "0.37"
 egui_kittest = { version = "0.37", features = ["eframe"] }
 encoding_rs = "0.8"

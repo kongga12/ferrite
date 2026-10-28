@@ -1,0 +1,22 @@
+[package]
+name = "text-stats"
+description = "Ferrite 예제 플러그인: 명령(선택 영역을 대문자로, 글자 수 알리기)과 패널(문서 통계)"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+# Ferrite 작업 공간과 따로 wasm32로 빌드한다.
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true

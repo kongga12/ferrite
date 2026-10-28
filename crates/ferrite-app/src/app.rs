@@ -545,6 +545,8 @@ pub struct FerriteApp {
     settings_changed: bool,
     /// 자동 업데이트(새 판 확인, 받기, 닫을 때 설치).
     updater: crate::update_ui::Updater,
+    /// WASM 플러그인(메뉴 명령, 플러그인 창).
+    plugins: crate::plugin_ui::Plugins,
     /// 감시를 시작하지 못한 환경(권한 등)에서는 없다. 그래도 편집은 된다.
     watcher: Option<FsWatcher>,
 }
@@ -606,6 +608,7 @@ impl FerriteApp {
             settings,
             settings_changed: false,
             updater: Default::default(),
+            plugins: crate::plugin_ui::Plugins::load(crate::plugin_ui::plugins_dir()),
             watcher: FsWatcher::new(cc.egui_ctx.clone()).ok(),
             name_prompt: None,
             confirm_delete: None,
@@ -2303,8 +2306,62 @@ impl FerriteApp {
                         dock::show(&mut self.layout, Pane::Sql);
                     }
                 });
+                ui.menu_button("플러그인", |ui| {
+                    if let Some(choice) = self.plugins.menu_ui(ui) {
+                        self.on_plugin_menu(choice);
+                    }
+                });
             });
         });
+    }
+
+    fn on_plugin_menu(&mut self, choice: crate::plugin_ui::MenuChoice) {
+        use crate::plugin_ui::MenuChoice;
+        match choice {
+            MenuChoice::Command(plugin, id) => {
+                let snapshot = plugin_snapshot(&self.docs, self.active);
+                self.plugins.run_command(plugin, &id, snapshot.as_ref());
+            }
+            MenuChoice::Panel(plugin, id) => {
+                self.plugins.select(plugin, &id);
+                dock::show(&mut self.layout, Pane::Plugins);
+            }
+            MenuChoice::Window => dock::show(&mut self.layout, Pane::Plugins),
+            MenuChoice::Reload => self.status = self.plugins.reload(),
+        }
+    }
+
+    /// 플러그인이 시킨 일을 한다. 창 배치를 바꾸므로 창을 다 그린 뒤에 부른다.
+    fn apply_plugin_actions(&mut self) {
+        use ferrite_plugin::Action;
+        for (plugin, action) in self.plugins.take_actions() {
+            let name = self.plugins.name(plugin).to_owned();
+            match action {
+                Action::ReplaceSelection { text } => {
+                    let doc = self
+                        .active
+                        .and_then(|i| self.docs.get_mut(i))
+                        .filter(|d| d.notebook.is_none());
+                    match doc {
+                        Some(doc) => {
+                            doc.buffer.insert(&text, Instant::now());
+                            doc.view.reveal_cursor();
+                            self.focus_editor = true;
+                        }
+                        None => self.status = format!("{name}: 바꿀 문서가 없습니다"),
+                    }
+                }
+                Action::Message { text } => self.status = format!("{name}: {text}"),
+                Action::ShowPanel { panel } => {
+                    if self.plugins.select(plugin, &panel) {
+                        dock::show(&mut self.layout, Pane::Plugins);
+                    } else {
+                        self.status = format!("{name}: 없는 패널입니다: {panel}");
+                    }
+                }
+                Action::Unknown => {}
+            }
+        }
     }
 
     /// 언어 서버 설치·삭제를 시작한다. 지울 때는 실행 중인 서버를 먼저 내린다(Windows는
@@ -2955,6 +3012,20 @@ impl FerriteApp {
     }
 }
 
+/// 플러그인에 넘기는 활성 문서. 노트북은 버퍼가 JSON이라 넘기지 않는다.
+fn plugin_doc(docs: &[Document], active: Option<usize>) -> Option<&Document> {
+    docs.get(active?).filter(|d| d.notebook.is_none())
+}
+
+fn plugin_snapshot(docs: &[Document], active: Option<usize>) -> Option<crate::plugin_ui::Snapshot> {
+    plugin_doc(docs, active).map(|d| crate::plugin_ui::Snapshot {
+        path: d.path.clone(),
+        language: d.lang.map(Lang::name),
+        text: d.buffer.text(),
+        selection: d.buffer.selected_text(),
+    })
+}
+
 /// 창마다 앱의 해당 화면을 그린다. 그리는 동안 배치는 앱 밖에 있으므로 여기서 `layout`을 바꾸면
 /// 사라진다(배치를 바꾸는 일은 단축키·메뉴·응답 처리처럼 창 밖에서 한다).
 struct Dock<'a>(&'a mut FerriteApp);
@@ -2988,6 +3059,12 @@ impl egui_tiles::Behavior<Pane> for Dock<'_> {
                 if let Some(action) = app.schema.ui(ui, &app.db) {
                     app.schema_action = Some(action);
                 }
+            }
+            Pane::Plugins => {
+                let key =
+                    plugin_doc(&app.docs, app.active).map(|d| (d.path.clone(), d.buffer.version()));
+                app.plugins
+                    .panel_ui(ui, key, || plugin_snapshot(&app.docs, app.active));
             }
         });
         egui_tiles::UiResponse::None
@@ -3080,6 +3157,7 @@ impl eframe::App for FerriteApp {
         );
         layout.ui(&mut Dock(self), ui);
         self.layout = layout;
+        self.apply_plugin_actions();
         if let Some(path) = self.quick_open.ui(ui.ctx()) {
             self.open_file(path);
             self.focus_editor = true;
@@ -5509,6 +5587,103 @@ mod tests {
         wait_until(&mut harness, "오류", |h| {
             h.query_by_label_contains("404").is_some()
         });
+    }
+
+    /// 예제 플러그인을 wasm32로 빌드해 `root/text-stats/`에 둔다. wasm32 타깃이 없으면 로컬에서는
+    /// false(건너뜀)이고 CI에서는 실패한다.
+    fn install_example_plugin(root: &Path) -> bool {
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/plugins/text-stats");
+        let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+        // 바깥 cargo test가 작업 공간 target을 잠그고 있으므로 예제 폴더의 target에 빌드한다.
+        let built = std::process::Command::new(cargo)
+            .args([
+                "build",
+                "--release",
+                "--target",
+                "wasm32-unknown-unknown",
+                "--target-dir",
+            ])
+            .arg(src.join("target"))
+            .arg("--manifest-path")
+            .arg(src.join("Cargo.toml"))
+            .status()
+            .is_ok_and(|s| s.success());
+        if !built {
+            assert!(
+                std::env::var_os("CI").is_none(),
+                "CI에서는 예제 플러그인을 빌드해야 한다"
+            );
+            eprintln!("wasm32-unknown-unknown 타깃이 없어 건너뜀");
+            return false;
+        }
+        let dir = root.join("text-stats");
+        fs::create_dir_all(&dir).unwrap();
+        fs::copy(src.join("plugin.toml"), dir.join("plugin.toml")).unwrap();
+        fs::copy(
+            src.join("target/wasm32-unknown-unknown/release/text_stats.wasm"),
+            dir.join("text_stats.wasm"),
+        )
+        .unwrap();
+        true
+    }
+
+    #[test]
+    fn 예제_플러그인의_명령과_패널을_쓴다() {
+        use egui::accesskit::Role;
+        let dir = std::env::temp_dir().join(format!("ferrite-plugin-app-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let (project, plugins) = (dir.join("project"), dir.join("plugins"));
+        fs::create_dir_all(&project).unwrap();
+        fs::write(project.join("a.txt"), "hello world\nhello").unwrap();
+        if !install_example_plugin(&plugins) {
+            return;
+        }
+        let mut harness = harness_builder()
+            .with_size(egui::vec2(1200.0, 800.0))
+            .build_eframe(|cc| {
+                let mut app = FerriteApp::new(cc, Some(project.clone()));
+                app.plugins = crate::plugin_ui::Plugins::load(Some(plugins.clone()));
+                app
+            });
+        assert_eq!(harness.state().plugins.name(0), "문서 통계");
+        harness.get_by_label("a.txt").click();
+        harness.run();
+        harness.state_mut().docs[0]
+            .buffer
+            .set_selection(Selection { anchor: 0, head: 5 });
+        let menu = |h: &mut Harness<'_, FerriteApp>, item: &str| {
+            h.get_by_label("플러그인").click();
+            h.run();
+            h.get_by_label("문서 통계").click();
+            h.run();
+            h.get_by_label(item).click();
+            h.run();
+        };
+
+        // 명령: 선택 영역 바꾸기와 상태 표시줄 알림
+        menu(&mut harness, "선택 영역을 대문자로");
+        assert_eq!(harness.state().docs[0].buffer.text(), "HELLO world\nhello");
+        menu(&mut harness, "글자 수 알리기");
+        assert_eq!(harness.state().status, "문서 통계: 줄 2 · 낱말 3 · 글자 17");
+
+        // 패널: 플러그인 창에 그리고, 입력과 버튼을 플러그인에 보낸다
+        menu(&mut harness, "문서 통계 창");
+        harness.get_by_label("줄 2 · 낱말 3 · 글자 17");
+        let input = harness.get_by_role(Role::TextInput);
+        input.focus();
+        input.type_text("hello");
+        harness.run();
+        harness.get_by_label("'hello': 1곳");
+        harness.state_mut().docs[0].buffer.set_selection(Selection {
+            anchor: 6,
+            head: 11,
+        });
+        harness.get_by_label("선택 영역을 대문자로").click();
+        harness.run();
+        assert_eq!(harness.state().docs[0].buffer.text(), "HELLO WORLD\nhello");
+        // 문서가 바뀌면 패널을 다시 그린다(찾을 글은 플러그인에 남는다)
+        harness.get_by_label("'hello': 1곳");
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

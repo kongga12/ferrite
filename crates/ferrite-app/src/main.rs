@@ -23,6 +23,7 @@ mod mapper_db;
 mod new_project;
 mod notebook_ui;
 mod picker;
+mod plugin_ui;
 mod quick_open;
 mod schema_ui;
 mod servers;
