@@ -4,6 +4,7 @@
 
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write};
+use std::ops::Range;
 use std::path::Path;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{Receiver, channel};
@@ -47,8 +48,40 @@ pub enum Event {
         execution_count: Option<u64>,
         status: Status,
     },
+    /// `frames`의 답: 커널의 DataFrame 목록.
+    Frames {
+        id: u64,
+        result: Result<Vec<FrameInfo>, String>,
+    },
+    /// `page`의 답.
+    Page {
+        id: u64,
+        result: Result<Page, String>,
+    },
     /// 사이드카가 끝났다(띄우지 못한 것도). 다시 쓰려면 새로 띄운다.
     Ended(String),
+}
+
+/// 커널 이름공간의 DataFrame 하나.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FrameInfo {
+    pub name: String,
+    pub rows: usize,
+    pub columns: usize,
+}
+
+/// DataFrame의 행 한 묶음(정렬했으면 정렬한 순서로).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Page {
+    /// 지금 DataFrame의 전체 행 수(받는 사이에 바뀌었을 수 있다).
+    pub rows: usize,
+    pub columns: Vec<String>,
+    /// 열마다 pandas 형식 이름(int64, object, datetime64[ns] 등).
+    pub dtypes: Vec<String>,
+    /// 행마다 색인을 글로.
+    pub index: Vec<String>,
+    /// 행마다 칸 값(JSON: 수, 글, null, 날짜는 ISO 글).
+    pub data: Vec<Vec<Value>>,
 }
 
 pub struct Kernel {
@@ -162,6 +195,32 @@ impl Kernel {
         self.send(json!({ "method": "interrupt" }));
     }
 
+    /// 커널의 DataFrame 목록을 묻는다(번호·출력·기록을 남기지 않는 조용한 실행). 답은 `Frames`로 온다.
+    /// 실행 중인 셀이 있으면 그 뒤에 답한다.
+    pub fn frames(&mut self) -> u64 {
+        self.request(json!({ "kind": "frames" }))
+    }
+
+    /// DataFrame `name`의 `rows` 행을 묻는다. `sort`: (열 자리, 오름차순)으로 정렬한 순서에서 자른다.
+    /// 답은 `Page`로 온다.
+    pub fn page(&mut self, name: &str, rows: Range<usize>, sort: Option<(usize, bool)>) -> u64 {
+        self.request(json!({
+            "kind": "page",
+            "name": name,
+            "start": rows.start,
+            "stop": rows.end,
+            "sort": sort.map(|(column, _)| column),
+            "ascending": sort.is_none_or(|(_, ascending)| ascending),
+        }))
+    }
+
+    fn request(&mut self, mut params: Value) -> u64 {
+        self.next_id += 1;
+        params["id"] = json!(self.next_id);
+        self.send(json!({ "method": "data", "params": params }));
+        self.next_id
+    }
+
     /// 온 이벤트 하나(기다리지 않는다).
     pub fn try_event(&self) -> Option<Event> {
         self.events.try_recv().ok()
@@ -221,7 +280,65 @@ fn event(message: &Value) -> Option<Event> {
                 _ => Status::Error,
             },
         },
+        "value" => {
+            let value = match (message["value"].clone(), message["error"].as_str()) {
+                (_, Some(error)) => Err(error.to_owned()),
+                (value, None) => Ok(value),
+            };
+            match message["kind"].as_str()? {
+                "frames" => Event::Frames {
+                    id,
+                    result: value.and_then(|v| frames(&v)),
+                },
+                "page" => Event::Page {
+                    id,
+                    result: value.and_then(|v| page(&v)),
+                },
+                _ => return None,
+            }
+        }
         _ => return None,
+    })
+}
+
+fn frames(value: &Value) -> Result<Vec<FrameInfo>, String> {
+    let list = value.as_array().ok_or("DataFrame 목록이 아닙니다")?;
+    Ok(list
+        .iter()
+        .filter_map(|frame| {
+            Some(FrameInfo {
+                name: frame["name"].as_str()?.to_owned(),
+                rows: frame["rows"].as_u64()? as usize,
+                columns: frame["columns"].as_u64()? as usize,
+            })
+        })
+        .collect())
+}
+
+fn page(value: &Value) -> Result<Page, String> {
+    let strings = |name: &str| -> Vec<String> {
+        value[name]
+            .as_array()
+            .map(|items| {
+                items
+                    .iter()
+                    .map(|item| item.as_str().unwrap_or_default().to_owned())
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let data = value["data"]
+        .as_array()
+        .ok_or("DataFrame 페이지가 아닙니다")?
+        .iter()
+        .map(|row| row.as_array().cloned().unwrap_or_default())
+        .collect();
+    Ok(Page {
+        rows: value["rows"].as_u64().unwrap_or_default() as usize,
+        columns: strings("columns"),
+        dtypes: strings("dtypes"),
+        index: strings("index"),
+        data,
     })
 }
 
@@ -270,6 +387,27 @@ mod tests {
             matches!(event(&started), Some(Event::Started { missing: Some(m), .. }) if m == "ir")
         );
         assert_eq!(event(&json!({"event": "모름"})), None);
+        let frames = json!({"event": "value", "id": 4, "kind": "frames",
+            "value": [{"name": "df", "rows": 3, "columns": 2}]});
+        assert_eq!(
+            event(&frames),
+            Some(Event::Frames {
+                id: 4,
+                result: Ok(vec![FrameInfo {
+                    name: "df".into(),
+                    rows: 3,
+                    columns: 2
+                }])
+            })
+        );
+        let failed = json!({"event": "value", "id": 5, "kind": "page", "error": "KeyError: 'x'"});
+        assert_eq!(
+            event(&failed),
+            Some(Event::Page {
+                id: 5,
+                result: Err("KeyError: 'x'".into())
+            })
+        );
         let missing = json!({"event": "error", "kind": "missing", "message": "No module"});
         assert!(describe_error(&missing, "py").contains("\"py\" -m pip install ipykernel"));
     }

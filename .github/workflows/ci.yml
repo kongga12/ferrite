@@ -77,8 +77,8 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: '3.13'
-      - name: DAP·노트북 시험용 debugpy·ipykernel 설치
-        run: python -m pip install --disable-pip-version-check debugpy==1.8.22 ipykernel==7.4.0
+      - name: DAP·노트북 시험용 debugpy·ipykernel·pandas 설치
+        run: python -m pip install --disable-pip-version-check debugpy==1.8.22 ipykernel==7.4.0 pandas==3.1.0
       # 시험은 [받기]와 같은 판을 로컬 Maven 저장소에서 찾는다(Maven이 저장소의 체크섬을 확인한다).
       # jar만 받는다: ojdbc6 POM의 의존(xdb 등)은 Maven Central에 없다.
       - name: JDBC 시험용 드라이버 받기
@@ -115,8 +115,8 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: '3.13'
-      - name: DAP·노트북 시험용 debugpy·ipykernel 설치
-        run: python -m pip install --disable-pip-version-check debugpy==1.8.22 ipykernel==7.4.0
+      - name: DAP·노트북 시험용 debugpy·ipykernel·pandas 설치
+        run: python -m pip install --disable-pip-version-check debugpy==1.8.22 ipykernel==7.4.0 pandas==3.1.0
       # DB 시험의 임시 PostgreSQL 클러스터용. Ubuntu·Windows 러너에는 깔려 있고 macOS에는 없다.
       - name: PostgreSQL 설치(macOS)
         if: runner.os == 'macOS'
