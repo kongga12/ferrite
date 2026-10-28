@@ -41,6 +41,12 @@ use eframe::egui;
 const WINDOW_ICON: &[u8] = include_bytes!("../icons/128x128@2x.png");
 
 fn main() -> eframe::Result {
+    // `ferrite --version`: 판만 찍고 끝낸다(설치 시험이 설치한 실행 파일이 뜨는지 본다). 릴리스 빌드의
+    // Windows는 콘솔이 없는 프로그램이라 파이프로 받을 때만 보인다.
+    if std::env::args_os().nth(1).as_deref() == Some("--version".as_ref()) {
+        println!("ferrite {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
     // `ferrite --egov-ls`: 창을 띄우지 않고 egov 언어 서버로 동작한다(Ferrite가 스스로를 띄운다).
     if std::env::args_os().nth(1).as_deref() == Some(ferrite_lsp::catalog::EGOV_LS_FLAG.as_ref()) {
         return ferrite_egov::run_stdio().map_err(|e| eframe::Error::AppCreation(Box::new(e)));
