@@ -1,3 +1,4 @@
 /target
+/examples/plugins/*/target
 # 참고 자료(eGovFrame 배포본 등 대용량 외부 파일). 저장소에 넣지 않는다.
 /ref
