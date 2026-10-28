@@ -247,6 +247,14 @@ pub(crate) fn real_path(path: &Path) -> PathBuf {
     real
 }
 
+/// 업데이트 정보(latest.json) 주소: 설정(사내 미러) 또는 공식 릴리스.
+fn update_url(settings: &Settings) -> String {
+    match settings.update_url.trim() {
+        "" => ferrite_update::MANIFEST_URL.to_owned(),
+        url => url.to_owned(),
+    }
+}
+
 /// 설정 파일을 읽는다. 없으면 기본값, 잘못되었으면 기본값과 오류 메시지.
 fn load_settings() -> (Settings, Option<String>) {
     let Some(path) = settings_path() else {
@@ -535,6 +543,8 @@ pub struct FerriteApp {
     settings: Settings,
     /// 설정 파일을 저장해 다음 프레임에 다시 적용해야 한다.
     settings_changed: bool,
+    /// 자동 업데이트(새 판 확인, 받기, 닫을 때 설치).
+    updater: crate::update_ui::Updater,
     /// 감시를 시작하지 못한 환경(권한 등)에서는 없다. 그래도 편집은 된다.
     watcher: Option<FsWatcher>,
 }
@@ -595,6 +605,7 @@ impl FerriteApp {
             focus_editor: false,
             settings,
             settings_changed: false,
+            updater: Default::default(),
             watcher: FsWatcher::new(cc.egui_ctx.clone()).ok(),
             name_prompt: None,
             confirm_delete: None,
@@ -629,6 +640,11 @@ impl FerriteApp {
         }
         if let Some(file) = file {
             app.open_file(file);
+        }
+        // 테스트는 밖에 묻지 않는다.
+        if app.settings.update_check && !cfg!(test) {
+            app.updater
+                .check(&update_url(&app.settings), false, &cc.egui_ctx);
         }
         app
     }
@@ -2248,6 +2264,10 @@ impl FerriteApp {
                         ui.close();
                         self.servers.show();
                     }
+                    if ui.button("업데이트 확인…").clicked() {
+                        ui.close();
+                        self.updater.check(&update_url(&self.settings), true, &ctx);
+                    }
                     if ui.button("egov CRUD 코드 생성…").clicked() {
                         ui.close();
                         let root = self.tree.as_ref().map(|t| t.root().to_path_buf());
@@ -2398,6 +2418,7 @@ impl FerriteApp {
         let mut install = None;
         egui::Panel::bottom("status_bar").show(ui, |ui| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                self.updater.status_ui(ui);
                 if let Some(doc) = self.active.map(|i| &mut self.docs[i]) {
                     let count = |s| doc.lsp.problems.iter().filter(|p| p.severity == s).count();
                     let (errors, warnings) = (count(Severity::Error), count(Severity::Warning));
@@ -3008,6 +3029,7 @@ impl egui_tiles::Behavior<Pane> for Dock<'_> {
 
 impl eframe::App for FerriteApp {
     fn on_exit(&mut self) {
+        self.updater.on_exit();
         if let Some(path) = layout_path()
             && let Err(e) = dock::save(&path, &self.layout)
         {
@@ -3023,6 +3045,7 @@ impl eframe::App for FerriteApp {
         self.finish_server_jobs();
         self.sync_language_servers();
         self.check_mapper_sql();
+        self.updater.poll();
         if std::mem::take(&mut self.settings_changed) {
             let (settings, error) = load_settings();
             self.status = error.unwrap_or_else(|| "설정을 적용했습니다".into());
@@ -3063,6 +3086,9 @@ impl eframe::App for FerriteApp {
         }
         self.breakpoint_condition_dialog(ui.ctx());
         self.pending_close_dialog(ui.ctx());
+        if self.updater.window(&ctx) {
+            ctx.send_viewport_cmd(ViewportCommand::Close);
+        }
         self.name_prompt_dialog(ui.ctx());
         self.delete_dialog(ui.ctx());
         if let Some(action) = self.servers.ui(&ctx) {
@@ -5404,6 +5430,85 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(25));
         }
         harness.run_ok();
+    }
+
+    /// 경로마다 정한 본문을 돌려주는 로컬 HTTP 서버. 주소(`http://127.0.0.1:포트`)를 돌려준다.
+    fn http_server(routes: Vec<(&'static str, String)>) -> String {
+        use std::io::{BufRead, BufReader, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut request = String::new();
+                let _ = reader.read_line(&mut request);
+                loop {
+                    let mut header = String::new();
+                    if reader.read_line(&mut header).unwrap_or(0) <= 2 {
+                        break;
+                    }
+                }
+                let path = request.split_whitespace().nth(1).unwrap_or("/");
+                let (status, body) = routes
+                    .iter()
+                    .find(|(p, _)| *p == path)
+                    .map_or(("404 Not Found", ""), |(_, b)| ("200 OK", b.as_str()));
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+        });
+        address
+    }
+
+    #[test]
+    fn 업데이트_확인은_새_판과_최신_판과_오류를_알린다() {
+        let platform = ferrite_update::platform();
+        // MSI는 Ferrite가 직접 바꾸지 않으므로 내려받기 페이지만 보인다.
+        let newer = format!(
+            r#"{{"version": "99.0.0", "notes": "고친 것들", "platforms": {{"{platform}": {{
+                "url": "https://example.invalid/Ferrite.msi", "signature": "c2ln", "format": "msi"}}}}}}"#
+        );
+        let same = format!(r#"{{"version": "{}"}}"#, env!("CARGO_PKG_VERSION"));
+        let base = http_server(vec![("/newer.json", newer), ("/same.json", same)]);
+        let mut harness = harness_builder()
+            .with_size(egui::vec2(1200.0, 800.0))
+            .build_eframe(|cc| FerriteApp::new(cc, None));
+        harness.run_ok();
+        harness.get_by_label("파일");
+
+        let ctx = harness.ctx.clone();
+        harness
+            .state_mut()
+            .updater
+            .check(&format!("{base}/newer.json"), true, &ctx);
+        wait_until(&mut harness, "새 판 알림", |h| {
+            h.query_by_label_contains("새 판 99.0.0이 있습니다")
+                .is_some()
+        });
+        harness.get_by_label("고친 것들");
+        harness.get_by_label("내려받기 페이지 열기");
+        harness.get_by_label("새 판 99.0.0"); // 상태 표시줄
+
+        harness
+            .state_mut()
+            .updater
+            .check(&format!("{base}/same.json"), true, &ctx);
+        wait_until(&mut harness, "최신 판", |h| {
+            h.query_by_label_contains("최신 판입니다").is_some()
+        });
+        assert!(harness.query_by_label("새 판 99.0.0").is_none());
+
+        harness
+            .state_mut()
+            .updater
+            .check(&format!("{base}/none.json"), true, &ctx);
+        wait_until(&mut harness, "오류", |h| {
+            h.query_by_label_contains("404").is_some()
+        });
     }
 
     #[test]

@@ -1,11 +1,13 @@
 name: Package
 
-# 설치 파일을 만든다(cargo-packager, 서명 없음). 수동 실행, `v*` 태그, 패키징 설정을 바꾼 PR에서
-# 돈다. 만든 파일은 Actions 아티팩트로 올린다(릴리스는 만들지 않는다). 설정은
-# crates/ferrite-app/Cargo.toml의 [package.metadata.packager]에 있다.
+# 설치 파일을 만든다(cargo-packager). 수동 실행, 패키징 설정을 바꾼 PR, `v*` 태그에서 돈다. 설정은
+# crates/ferrite-app/Cargo.toml의 [package.metadata.packager]에 있다. OS 코드 서명은 하지 않는다.
 #   Windows: NSIS(사용자별 설치, 관리자 권한 없음)·MSI(WiX)
 #   macOS: .app·.dmg(러너 아키텍처, 지금은 arm64)
 #   Linux: .deb·AppImage
+# `v*` 태그에서는 설치 파일마다 업데이트 서명(.sig, 비밀 값 FERRITE_UPDATER_KEY·_PASSWORD)을 만들고,
+# GitHub 릴리스를 만들어 설치 파일과 latest.json(앱의 자동 업데이트가 읽는다)을 올린다.
+# 그 밖에는 아티팩트로만 올린다.
 on:
   workflow_dispatch:
   push:
@@ -13,6 +15,7 @@ on:
   pull_request:
     paths:
       - .github/workflows/package.yml
+      - .github/scripts/latest_json.py
       - crates/ferrite-app/Cargo.toml
       - crates/ferrite-app/icons/**
 
@@ -39,7 +42,9 @@ jobs:
               target/packages/*.msi
           - os: macos-latest
             formats: app,dmg
-            files: target/packages/*.dmg
+            files: |
+              target/packages/*.dmg
+              target/packages/*.app.tar.gz
           - os: ubuntu-latest
             formats: deb,appimage
             files: |
@@ -65,12 +70,56 @@ jobs:
         env:
           # 러너에 FUSE가 없어 linuxdeploy(AppImage)를 풀어서 돌린다.
           APPIMAGE_EXTRACT_AND_RUN: 1
-        run: >
-          cargo packager --release -p ferrite-app --formats ${{ matrix.formats }}
-          --out-dir "$GITHUB_WORKSPACE/target/packages"
-          --binaries-dir "$GITHUB_WORKSPACE/target/release"
+          UPDATER_KEY: ${{ secrets.FERRITE_UPDATER_KEY }}
+          UPDATER_KEY_PASSWORD: ${{ secrets.FERRITE_UPDATER_KEY_PASSWORD }}
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            if [ -z "$UPDATER_KEY" ]; then
+              echo "::error::릴리스에는 업데이트 서명 키(비밀 값 FERRITE_UPDATER_KEY)가 필요합니다"
+              exit 1
+            fi
+            # cargo-packager가 읽는 환경 변수. 설치 파일마다 .sig를 만든다. 키는 base64 한 줄이므로
+            # 비밀 값을 넣을 때 붙은 줄바꿈을 지운다.
+            export CARGO_PACKAGER_SIGN_PRIVATE_KEY="$(printf %s "$UPDATER_KEY" | tr -d '\r\n')"
+            export CARGO_PACKAGER_SIGN_PRIVATE_KEY_PASSWORD="$UPDATER_KEY_PASSWORD"
+          fi
+          cargo packager --release -p ferrite-app --formats ${{ matrix.formats }} \
+            --out-dir "$GITHUB_WORKSPACE/target/packages" \
+            --binaries-dir "$GITHUB_WORKSPACE/target/release"
       - uses: actions/upload-artifact@v4
         with:
           name: ferrite-packages-${{ runner.os }}
-          path: ${{ matrix.files }}
+          path: |
+            ${{ matrix.files }}
+            target/packages/*.sig
           if-no-files-found: error
+
+  release:
+    name: release
+    needs: package
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: 태그와 앱 판이 같은지 확인
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "ferrite-app") | .version')
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::태그($GITHUB_REF_NAME)와 앱 판(v$version)이 다릅니다"
+            exit 1
+          fi
+      - name: latest.json 만들기
+        run: python3 .github/scripts/latest_json.py dist "$GITHUB_REF_NAME" "$GITHUB_REPOSITORY" > dist/latest.json
+      - name: 릴리스 만들기
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --title "Ferrite ${GITHUB_REF_NAME#v}" --generate-notes --verify-tag
