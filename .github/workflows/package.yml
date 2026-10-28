@@ -1,0 +1,76 @@
+name: Package
+
+# 설치 파일을 만든다(cargo-packager, 서명 없음). 수동 실행, `v*` 태그, 패키징 설정을 바꾼 PR에서
+# 돈다. 만든 파일은 Actions 아티팩트로 올린다(릴리스는 만들지 않는다). 설정은
+# crates/ferrite-app/Cargo.toml의 [package.metadata.packager]에 있다.
+#   Windows: NSIS(사용자별 설치, 관리자 권한 없음)·MSI(WiX)
+#   macOS: .app·.dmg(러너 아키텍처, 지금은 arm64)
+#   Linux: .deb·AppImage
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+  pull_request:
+    paths:
+      - .github/workflows/package.yml
+      - crates/ferrite-app/Cargo.toml
+      - crates/ferrite-app/icons/**
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  RUST_BACKTRACE: 1
+  CARGO_PACKAGER_VERSION: 0.11.8
+
+jobs:
+  package:
+    name: package (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            formats: nsis,wix
+            files: |
+              target/packages/*.exe
+              target/packages/*.msi
+          - os: macos-latest
+            formats: app,dmg
+            files: target/packages/*.dmg
+          - os: ubuntu-latest
+            formats: deb,appimage
+            files: |
+              target/packages/*.deb
+              target/packages/*.AppImage
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Linux 빌드 의존성 설치
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libxkbcommon-dev libwayland-dev \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
+      # 판을 고정한다. rust-cache가 ~/.cargo/bin을 남기므로 다음 실행에서는 다시 빌드하지 않는다.
+      - name: cargo-packager 설치
+        run: cargo install cargo-packager --locked --version ${{ env.CARGO_PACKAGER_VERSION }}
+      # cargo-packager는 설정 파일 폴더로 옮겨 가 돌므로 경로는 절대 경로로 준다. NSIS·WiX·linuxdeploy는
+      # cargo-packager가 받아 쓴다(고정한 판과 해시는 cargo-packager 소스에 있다).
+      - name: 설치 파일 만들기
+        shell: bash
+        env:
+          # 러너에 FUSE가 없어 linuxdeploy(AppImage)를 풀어서 돌린다.
+          APPIMAGE_EXTRACT_AND_RUN: 1
+        run: >
+          cargo packager --release -p ferrite-app --formats ${{ matrix.formats }}
+          --out-dir "$GITHUB_WORKSPACE/target/packages"
+          --binaries-dir "$GITHUB_WORKSPACE/target/release"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ferrite-packages-${{ runner.os }}
+          path: ${{ matrix.files }}
+          if-no-files-found: error

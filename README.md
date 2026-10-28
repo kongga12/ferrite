@@ -5,7 +5,9 @@ Rust로 작성한 크로스플랫폼(Windows / macOS / Linux) 경량 IDE.
 
 - 개발 워크플로우와 로드맵: [docs/WORKFLOW.md](docs/WORKFLOW.md)
 
-## 현재 상태: Phase 2·2b·2c·3·4·5·6 완료 (LSP 연동, egov 언어 지원·개발도구, 프로젝트 도구, 실행·디버그, DB 도구, 데이터 사이언스, 3개 OS 검증)
+## 현재 상태: Phase 2·2b·2c·3·4·5·6 완료 (LSP 연동, egov 언어 지원·개발도구, 프로젝트 도구, 실행·디버그, DB 도구, 데이터 사이언스, 3개 OS 검증), Phase 7 진행 중 (확장·배포)
+
+- 설치 파일: 패키징 워크플로(`Package`)가 Windows(NSIS·MSI)·macOS(dmg)·Linux(deb·AppImage) 설치 파일을 만든다. 아직 서명하지 않아 Windows SmartScreen 경고([추가 정보] → [실행])와 macOS Gatekeeper 차단(오른쪽 단추 → [열기])이 뜬다.
 
 - 폴더 열기, 지연 로딩 프로젝트 트리(파일 감시로 자동 갱신), 탭 에디터
 - 실행(`Ctrl+F5`): Maven(egov `tomcat7:run`·`spring-boot:run`)·Gradle·cargo·go·CMake·Python·Composer 구성을 자동으로 찾고, `.ferrite/run.toml`에 직접 적은 구성과 함께 터미널 탭에서 돌린다.

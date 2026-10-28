@@ -921,6 +921,35 @@
 - 코드 서명과 공증: Windows Authenticode, macOS notarization
 - 자동 업데이트: 서명된 릴리스 매니페스트 검증
 
+**완료 조건**: 3개 OS 설치 파일로 설치해 실행되고, 제거하면 설치한 것이 남지 않는다. 앱이 서명된 매니페스트로 새 판을 알아보고 받아 바꾼다. 예제 WASM 플러그인이 명령과 패널을 더한다. 3개 OS. 코드 서명·공증은 인증서가 있을 때만 한다.
+
+**진행 단계**:
+- [x] 7-1 설치 파일 패키징
+  - 도구: cargo-packager 0.11.8. 설정은 `crates/ferrite-app/Cargo.toml`의 `[package.metadata.packager]`에 둔다.
+    - 제품 정보: 이름 Ferrite, 식별자 `io.github.kongga12.ferrite`, 분류 개발 도구
+    - 설명은 영어로 둔다. WiX(MSI)의 기본 코드 페이지(1252)가 한글을 받지 못한다.
+    - Windows: NSIS(사용자별 설치, 관리자 권한 없음. 설치 화면은 OS 언어를 따르고, 없으면 한국어)와 MSI(WiX 3.11, 시스템 전체 설치)
+    - macOS: .app·.dmg(최소 11.0, 러너 아키텍처 arm64)
+    - Linux: .deb·AppImage. 그래픽(wgpu)·키보드(xkbcommon)·파일 대화상자(xdg-portal)는 실행 중에 라이브러리를 불러와 링크로 드러나지 않으므로 deb 의존을 직접 적었다(xkbcommon, Vulkan 또는 EGL, 한글 글꼴).
+  - 워크플로 `.github/workflows/package.yml`: 수동 실행, `v*` 태그, 패키징 설정(워크플로·앱 Cargo.toml·아이콘)을 바꾼 PR에서 3개 OS로 돈다. 만든 파일은 Actions 아티팩트로 올리고 릴리스는 만들지 않는다. NSIS·WiX·linuxdeploy는 cargo-packager가 받는다(판과 해시는 cargo-packager가 고정). 러너에 FUSE가 없어 AppImage 도구는 풀어서 돌린다(`APPIMAGE_EXTRACT_AND_RUN`).
+  - 앱 아이콘: `crates/ferrite-app/icons/`(PNG 32·128·256·512, Windows `.ico`). 창 아이콘으로도 쓴다. macOS `.icns`는 cargo-packager가 PNG로 만든다.
+  - 서명하지 않는다. Windows는 SmartScreen이 경고하고([추가 정보] → [실행]), macOS는 Gatekeeper가 막는다(Finder에서 오른쪽 단추 → [열기]).
+  - 알려진 한계
+    - Windows 설치 폴더(`%LOCALAPPDATA%\Ferrite`)는 앱 데이터 폴더(`%LOCALAPPDATA%\ferrite`: 언어 서버·템플릿·JDBC)와 같은 폴더다(대소문자를 가리지 않는다). 제거 프로그램은 설치한 파일만 지우고 폴더는 비었을 때만 지우므로 앱 데이터는 남는다.
+    - NSIS 템플릿이 제거할 때 `HKCU\Software\<배포자>\Ferrite` 키를 남긴다(그 안의 값 하나만 지운다).
+  - 미룸: 실행 파일 자체 아이콘(Windows 리소스. 지금은 시작 메뉴 바로 가기가 기본 아이콘이다), macOS 유니버설(x86_64) 빌드
+  - 검증
+    - 단위: 창 아이콘 PNG를 읽는다(256×256)
+    - CI: 패키징 워크플로(실행 40609803473)가 3개 OS에서 설치 파일 6개를 만들었다: NSIS `ferrite_0.1.0_x64-setup.exe`(11.3MB), MSI `ferrite_0.1.0_x64_en-US.msi`(14.5MB), `Ferrite_0.1.0_aarch64.dmg`, `ferrite_0.1.0_amd64.deb`, `ferrite_0.1.0_x86_64.AppImage`
+    - 실제 설치(Windows): CI가 만든 NSIS 설치 파일을 받아 조용히 설치(`/S /NS`)했다. 설치 폴더(`ferrite.exe`·`uninstall.exe`), 제거 등록 정보(이름·판·배포자·아이콘), 시작 메뉴 바로 가기를 확인했다. 설치한 앱을 실행해 창과 제목 표시줄 아이콘을 화면으로 확인했다. 조용히 제거하면 설치 폴더·제거 등록 정보·시작 메뉴가 지워지고, 위의 레지스트리 키만 남아 손으로 지웠다.
+    - 확인하지 못한 것: MSI 설치(관리자 권한), dmg·deb·AppImage 설치와 실행
+- [ ] 7-2 코드 서명·공증(인증서가 생기면)
+  - cargo-packager가 읽는 것: macOS는 환경 변수 `APPLE_CERTIFICATE`(p12를 base64로)·`APPLE_CERTIFICATE_PASSWORD`와 설정 `macos.signing-identity`. Windows는 설정 `windows.certificate-thumbprint`(인증서 저장소에 넣은 인증서) 또는 `windows.sign-command`(직접 서명 명령).
+  - 인증서와 비밀번호는 사용자가 GitHub 비밀 값에 넣는다. 인증서 없이 시험할 수 없는 CI 단계는 미리 넣지 않았다.
+- [ ] 7-3 자동 업데이트(서명된 릴리스 매니페스트)
+- [ ] 7-4 WASM 플러그인 API(명령·패널·언어 설정 확장)
+- [ ] 3개 OS 검증
+
 ### Phase 8 — 웹·API 개발 도구
 
 **목표**: egov 화면(JSP + jQuery)의 스크립트를 언어 서버로 고치고, 컨트롤러 URL을 편집기에서 바로 호출해 본다.
