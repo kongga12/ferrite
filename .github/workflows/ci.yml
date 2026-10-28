@@ -126,6 +126,13 @@ jobs:
         run: brew install postgresql@17
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+      # npm으로 설치하는 웹 언어 서버: TypeScript 7 실행 파일과 Node로 도는 HTML·CSS·JSON 서버가 3개 OS에서
+      # 뜨고 진단을 주는지 본다(내려받기 시험은 기본으로 돌지 않아 따로 부른다).
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+      - name: 웹 언어 서버 설치 시험(npm)
+        run: cargo test -p ferrite-lsp --test download npm -- --ignored --nocapture
       - run: cargo build --release
       - name: 실행 파일 업로드 (OS별 수동 검증용)
         uses: actions/upload-artifact@v4

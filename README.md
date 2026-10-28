@@ -24,7 +24,7 @@ Rust로 작성한 크로스플랫폼(Windows / macOS / Linux) 경량 IDE.
 - 파일로 이동(`Ctrl+P`): 파일 이름 퍼지 검색. 파일에서 찾기(`Ctrl+Shift+F`): 프로젝트 전체 검색(대소문자·단어·정규식·파일 패턴, UTF-8·CP949 파일). 둘 다 `.gitignore`를 따른다.
 - 트리 우클릭: 새 파일·새 폴더·이름 바꾸기·휴지통으로 삭제
 - 가상화 코드 에디터: 100MB 파일도 스크롤·입력 1ms 미만, 줄 번호, 한글 IME 조합 표시
-- 언어 서버(LSP): rust-analyzer로 검증했다. gopls·clangd·basedpyright·phpactor·lemminx(XML)·jdt.ls(Java)도 연결한다.
+- 언어 서버(LSP): rust-analyzer로 검증했다. gopls·clangd·basedpyright·phpactor·lemminx(XML)·jdt.ls(Java)도 연결한다. JS·TS는 TypeScript 7, HTML·CSS·JSON은 vscode-langservers-extracted를 npm으로 설치한다(npm 필요, HTML·CSS·JSON은 Node 필요).
   - Java: jdt.ls를 Lombok 에이전트와 함께 띄운다. 서버 실행에 Java 21 이상이 필요하다(JAVA_HOME 또는 PATH). 프로젝트는 Java 8·11이어도 된다.
   - Spring: Spring Boot LS를 설치하면 jdt.ls와 함께 붙는다. Java 진단을 보태고, `application.properties`·`yml`을 검사한다.
   - egov(내장, 설치 불필요): MyBatis·iBatis 매퍼에서 SQL Injection 위험(`${}`, `$prop$`), 정의 안 된 refid·resultMap, 중복 id를 진단한다.
@@ -53,7 +53,7 @@ Rust로 작성한 크로스플랫폼(Windows / macOS / Linux) 경량 IDE.
 - 공통컴포넌트 추가(`도구 > 공통컴포넌트 추가`): 공식 개발환경(eGovFrameDev 3.x·4.x)의 공통컴포넌트 플러그인에서 목록을 가져와, 고른 컴포넌트를 의존 컴포넌트와 함께 프로젝트에 넣는다.
   - 미리 보기로 바뀔 파일을 먼저 보여 준다. 내용이 다른 기존 파일은 건너뛰거나 `.bak`으로 백업하고 바꾼다. `pom.xml`은 덮어쓰지 않고 빠진 의존성을 알린다.
   - 프로젝트 DB에 돌릴 테이블 생성·기초 자료 스크립트를 순서대로 알린다.
-- 구문 강조(tree-sitter): Rust, Python, Go, C/C++, PHP, Java, SQL, TOML, JSON, YAML, XML, HTML, JSP(HTML + 스크립틀릿 Java + EL), JavaScript, CSS, Properties
+- 구문 강조(tree-sitter): Rust, Python, Go, C/C++, PHP, Java, SQL, TOML, JSON, YAML, XML, HTML, JSP(HTML + 스크립틀릿 Java + EL), JavaScript, TypeScript·TSX, CSS, Properties
 - UTF-8(BOM 포함)·CP949 인코딩과 CRLF 감지·보존, 들여쓰기 방식 감지
 - 원자적 저장, 미저장 변경 확인(탭 닫기, 창 종료), 외부 변경 시 다시 불러오기·충돌 안내
 - 명령줄: `ferrite <폴더>` 또는 `ferrite <파일>`

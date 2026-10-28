@@ -205,7 +205,14 @@ impl ServerManager {
                                 ui.end_row();
                             }
                             ui.strong(server.name);
-                            ui.label(server.languages.join(", "));
+                            // JSX 판(`typescriptreact` 등)은 본 언어에 딸린 것이라 빼고 보인다(칸이 넓어진다).
+                            let languages: Vec<_> = server
+                                .languages
+                                .iter()
+                                .filter(|l| !l.ends_with("react"))
+                                .copied()
+                                .collect();
+                            ui.label(languages.join(", "));
                             self.status_cell(ui, server, status);
                             ui.horizontal(|ui| {
                                 if !self.jobs.contains_key(server.name)
@@ -317,6 +324,8 @@ pub fn install_hint(server: &Server) -> String {
         }
         Source::Go(_) => "go 필요".into(),
         Source::Pip(_) => "python 필요".into(),
+        // 묶음을 같이 쓰는 서버(HTML·CSS·JSON)는 처음 설치하는 것이 받고 나머지는 금방 끝난다.
+        Source::Npm { .. } => "npm 필요".into(),
         Source::Builtin(_) => String::new(),
     }
 }

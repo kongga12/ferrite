@@ -1052,7 +1052,22 @@
 **완료 조건**: egov 표본 프로젝트에서 (1) jQuery를 쓰는 `.js` 파일의 자동완성·정의 이동이 되고, (2) 엔드포인트 목록에서 고른 URL로 `.http` 요청을 만들어 로그인 쿠키를 유지한 채 응답을 보고, (3) JSP 화면 스크립트의 중단점에서 멈춘다. 3개 OS.
 
 **진행 단계**:
-- [ ] 8-1 JS·TS·HTML·CSS·JSON 언어 서버 등록(npm 설치 방식) — 작음~중간
+- [x] 8-1 JS·TS·HTML·CSS·JSON 언어 서버 등록(npm 설치 방식) — 작음~중간
+  - 결정(사용자): JS·TS는 TypeScript 7 네이티브(Go로 다시 쓴 공식 컴파일러, LSP 내장), `.ts`·`.tsx`는 tree-sitter-typescript 0.23.2로 강조, 실제 앱 확인용 npm 내려받기 허용
+  - npm 설치 방식(`Source::Npm`): 서버 폴더의 판 폴더에 `npm install <꾸러미>@<판> --omit=dev --ignore-scripts`. 무결성은 npm이 레지스트리 해시로 검증한다. 실행 대상 경로의 `{platform}`·`{arch}`·`{exe}`는 이 플랫폼의 Node 이름으로 바꾼다.
+    - TypeScript 7.0.2: 꾸러미의 `bin/tsc`는 OS별 실행 파일을 자식으로 띄우는 Node 스크립트라(Windows에서 끄면 자식이 남는다) `@typescript/typescript-<플랫폼>-<CPU>/lib/tsc`를 `--lsp --stdio`로 바로 띄운다. 실행할 때 Node가 필요 없다. JS·TS·JSX·TSX를 맡는다.
+    - HTML·CSS·JSON: vscode-langservers-extracted 4.10.0(MIT)을 Node로 띄운다. 설치의 대부분(85MB 중 65MB)이 HTML 서버가 쓰는 TypeScript 4라 세 서버가 한 폴더를 같이 쓴다. 서버마다 설치 기록을 따로 두고, 마지막 서버를 지울 때 폴더를 지운다.
+    - npm 설치와 공용 폴더 지우기는 하나씩 한다. 같은 판이 이미 있는 공용 폴더에는 npm을 다시 돌리지 않는다. 실제 앱에서 셋을 연달아 눌렀을 때 npm 둘이 같은 폴더에 겹쳐 실패하던 것을 이렇게 고쳤다.
+  - 진단을 묻는 방식(LSP 3.17 pull): TypeScript 7은 진단을 보내 주지 않고 묻기(`textDocument/diagnostic`)만 받는다.
+    - 클라이언트가 이 방식을 안다고 알리고, `diagnosticProvider`를 알린 서버에만 문서의 LSP 판마다 한 번 묻는다. 준비되기 전에 연 문서는 준비된 뒤 묻는다. `workspace/diagnostic/refresh`를 받으면 다시 묻는다.
+    - 물어서 받은 진단과 보내 준 진단은 서버 안에서도 따로 둔다(한 서버가 둘을 섞어 써도 서로 덮지 않는다).
+  - `workspace/configuration`에는 항목마다 빈 객체로 답한다(VS Code와 같다). null로 답하면 CSS 서버가 검사하다 죽어 진단이 오지 않았다.
+  - 언어 서버 창: JSX 판 언어 ID(`…react`)는 빼고 보이고, 새 서버 이름은 짧게 둔다(`vscode-html` 등). 칸이 넓어져 1000px 창에서 버튼이 밖으로 밀리던 것을 고쳤다.
+  - 검증
+    - 단위: npm 실행 대상 이름 바꾸기, 공용 폴더 설치 기록·지우기, 물어서 받은 진단 읽기, TypeScript·TSX 강조(TS 규칙 + JS·JSX 규칙)
+    - 실제 설치(내려받기 시험, 기본으로는 돌지 않는다. CI 3개 OS 전체 작업이 Node 22로 따로 돌린다): TypeScript 7을 받아 Node 없이 띄우고 물어서 타입 오류를 받는다. HTML·CSS·JSON을 함께 설치해 한 폴더를 같이 쓰고, CSS·JSON 진단을 받고, 하나를 지워도 나머지가 남는다.
+    - 실제 앱(Windows, 릴리스 빌드): 언어 서버 창에서 넷을 연달아 설치하고, `.ts`의 타입 오류 물결선과 상태 표시줄(`typescript: 준비됨`, 오류 1), `.js`의 `document.getElem` 자동완성(`getElementById` 등), CSS·JSON 진단을 화면으로 확인했다. 확인 뒤 설치 폴더와 설정 폴더를 지웠다.
+  - 남은 것: JSON 스키마 검사(`package.json` 등 스키마를 서버에 알리기), egov 화면의 jQuery 자동완성(Phase 완료 조건에서 확인)
 - [ ] 8-2 기호 개요·기호 찾기, 엔드포인트 목록 — 중간
 - [ ] 8-3 HTTP 요청 파일 실행과 응답 보기 — 중간
 - [ ] 8-4 브라우저 JS 디버그 — 중간

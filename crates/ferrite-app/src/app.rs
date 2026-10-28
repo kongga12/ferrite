@@ -1249,7 +1249,7 @@ impl FerriteApp {
             })
             .collect();
             doc.lsp
-                .set_problems("ferrite-db", rope, &diagnostics, encoding);
+                .set_problems("ferrite-db", false, rope, &diagnostics, encoding);
         }
     }
 
@@ -2449,12 +2449,14 @@ impl FerriteApp {
                 HubUpdate::Diagnostics {
                     path,
                     server,
+                    pulled,
                     diagnostics,
                     encoding,
                 } => {
                     if let Some(doc) = self.docs.iter_mut().find(|d| d.path == path) {
                         let rope = doc.buffer.rope();
-                        doc.lsp.set_problems(server, rope, &diagnostics, encoding);
+                        doc.lsp
+                            .set_problems(server, pulled, rope, &diagnostics, encoding);
                     }
                 }
                 HubUpdate::Message(message) => self.status = message,

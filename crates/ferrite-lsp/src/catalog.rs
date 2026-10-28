@@ -38,6 +38,15 @@ pub enum Source {
     Release(&'static [Asset]),
     /// `go install <모듈>@<버전>`. 무결성은 Go 체크섬 DB(sum.golang.org)가 검증한다.
     Go(&'static str),
+    /// 전용 폴더에 `npm install <패키지>@<버전>`(설치 스크립트는 돌리지 않는다). 무결성은 npm이
+    /// 레지스트리의 해시로 검증한다. `bin`은 설치 폴더 기준 실행 대상이고 `{platform}`·`{arch}`·`{exe}`를
+    /// 이 플랫폼의 Node 이름(`win32`·`x64`)과 실행 파일 꼬리로 바꾼다. `folder`가 있으면 같은 패키지를 쓰는
+    /// 서버들이 그 폴더 하나에 설치한다(HTML·CSS·JSON 서버 묶음).
+    Npm {
+        package: &'static str,
+        bin: &'static str,
+        folder: Option<&'static str>,
+    },
     /// 전용 가상환경에 `pip install <패키지>==<버전>`.
     // ponytail: 버전만 고정하고 해시는 고정하지 않는다(의존 휠이 플랫폼마다 달라서).
     // 필요하면 --require-hashes와 플랫폼별 해시 목록으로.
@@ -45,6 +54,11 @@ pub enum Source {
     /// Ferrite 실행 파일에 들어 있다. `ferrite <플래그>`로 띄우므로 설치하지 않는다.
     Builtin(&'static str),
 }
+
+/// HTML·CSS·JSON 언어 서버 묶음(npm 꾸러미 하나, MIT). 셋이 한 설치 폴더를 같이 쓴다. HTML 서버가
+/// 쓰는 TypeScript 4가 설치의 대부분(85MB 중 65MB)이라 따로 설치하면 세 배가 된다.
+const WEB_SERVERS: &str = "vscode-langservers-extracted";
+const WEB_SERVERS_VERSION: &str = "4.10.0";
 
 /// Ferrite 실행 파일을 egov 언어 서버로 띄우는 플래그.
 pub const EGOV_LS_FLAG: &str = "--egov-ls";
@@ -267,6 +281,66 @@ pub const SERVERS: &[Server] = &[
         args: &["--stdio"],
         launch: Launch::Binary,
         source: Source::Pip("basedpyright"),
+    },
+    Server {
+        // TypeScript 7(Go로 다시 쓴 공식 컴파일러)에 든 언어 서버. JS도 맡는다. npm 꾸러미의 bin은 이
+        // 실행 파일을 자식으로 띄우는 Node 스크립트라(끌 때 자식이 남는다) 실행 파일을 바로 띄운다.
+        name: "typescript",
+        languages: &[
+            "typescript",
+            "typescriptreact",
+            "javascript",
+            "javascriptreact",
+        ],
+        version: "7.0.2",
+        // 직접 설치했다면 TypeScript 7 미리보기(`@typescript/native-preview`)의 실행 파일.
+        program: "tsgo",
+        args: &["--lsp", "--stdio"],
+        launch: Launch::Binary,
+        source: Source::Npm {
+            package: "typescript",
+            bin: "node_modules/@typescript/typescript-{platform}-{arch}/lib/tsc{exe}",
+            folder: None,
+        },
+    },
+    Server {
+        name: "vscode-html",
+        languages: &["html"],
+        version: WEB_SERVERS_VERSION,
+        program: "vscode-html-language-server",
+        args: &["--stdio"],
+        launch: Launch::Runtime("node"),
+        source: Source::Npm {
+            package: WEB_SERVERS,
+            bin: "node_modules/vscode-langservers-extracted/bin/vscode-html-language-server",
+            folder: Some(WEB_SERVERS),
+        },
+    },
+    Server {
+        name: "vscode-css",
+        languages: &["css"],
+        version: WEB_SERVERS_VERSION,
+        program: "vscode-css-language-server",
+        args: &["--stdio"],
+        launch: Launch::Runtime("node"),
+        source: Source::Npm {
+            package: WEB_SERVERS,
+            bin: "node_modules/vscode-langservers-extracted/bin/vscode-css-language-server",
+            folder: Some(WEB_SERVERS),
+        },
+    },
+    Server {
+        name: "vscode-json",
+        languages: &["json"],
+        version: WEB_SERVERS_VERSION,
+        program: "vscode-json-language-server",
+        args: &["--stdio"],
+        launch: Launch::Runtime("node"),
+        source: Source::Npm {
+            package: WEB_SERVERS,
+            bin: "node_modules/vscode-langservers-extracted/bin/vscode-json-language-server",
+            folder: Some(WEB_SERVERS),
+        },
     },
     Server {
         name: "jdtls",

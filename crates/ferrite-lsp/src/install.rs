@@ -98,7 +98,7 @@ pub fn assets(server: &Server) -> Vec<&'static Asset> {
 pub fn installable(server: &Server) -> bool {
     match server.source {
         Source::Release(_) => !assets(server).is_empty(),
-        Source::Go(_) | Source::Pip(_) => true,
+        Source::Go(_) | Source::Pip(_) | Source::Npm { .. } => true,
         Source::Builtin(_) => false,
     }
 }
@@ -113,10 +113,11 @@ fn builtin_exe() -> Option<PathBuf> {
 
 /// 설치본. 고정 버전을 먼저, 없으면 예전 버전(Ferrite를 올린 뒤 아직 업데이트하지 않은 것).
 pub fn installed(root: &Path, server: &Server) -> Option<Installed> {
-    let base = root.join(server.name);
+    let base = root.join(folder(server));
+    let record = record(server);
     let read = |version: &str| {
         let dir = base.join(version);
-        let bin = dir.join(fs::read_to_string(dir.join(RECORD)).ok()?.trim());
+        let bin = dir.join(fs::read_to_string(dir.join(&record)).ok()?.trim());
         bin.is_file().then(|| Installed {
             version: version.to_owned(),
             dir,
@@ -285,6 +286,31 @@ fn install_with(
                 &format!("{}{}", server.program, std::env::consts::EXE_SUFFIX),
             )
         }
+        Source::Npm {
+            package,
+            bin,
+            folder,
+        } => {
+            let npm = find_program("npm").ok_or(InstallError::MissingTool("npm"))?;
+            // 같은 폴더에 npm 둘이 함께 설치하면 서로의 파일을 지워 실패한다(HTML·CSS·JSON을 연달아 누를 때).
+            let _one_at_a_time = lock(&NPM);
+            // 같이 쓰는 폴더는 다른 서버의 설치를 지우지 않는다. 같은 판이 이미 있으면 기록만 더한다.
+            let dir = if folder.is_some() {
+                let dir = version_dir(root, server);
+                fs::create_dir_all(&dir)?;
+                dir
+            } else {
+                fresh_version_dir(root, server)?
+            };
+            if folder.is_none() || npm_version(&dir, package).as_deref() != Some(server.version) {
+                run(Command::new(npm)
+                    .args(["install", "--prefix"])
+                    .arg(&dir)
+                    .args(["--no-audit", "--no-fund", "--omit=dev", "--ignore-scripts"])
+                    .arg(format!("{package}@{}", server.version)))?;
+            }
+            finish(root, server, &dir, &npm_bin(bin))
+        }
         Source::Pip(package) => {
             let python = python().ok_or(InstallError::MissingTool("python"))?;
             // 가상환경은 옮기면 깨지므로 처음부터 최종 위치에 만든다.
@@ -345,7 +371,30 @@ pub fn install_from_files(
 pub fn uninstall(root: &Path, server: &Server) -> io::Result<()> {
     // 작업 폴더는 캐시라 지우는 데 실패해도 상관없다.
     let _ = fs::remove_dir_all(root.join(WORKSPACES).join(server.name));
-    match fs::remove_dir_all(root.join(server.name)) {
+    let base = root.join(folder(server));
+    if folder(server) != server.name {
+        // 같이 쓰는 폴더: 이 서버의 기록만 지우고, 기록이 하나도 남지 않은 버전 폴더를 지운다. 다른 서버가
+        // 그 폴더에 설치하는 중이면 끝나기를 기다린다.
+        let _one_at_a_time = lock(&NPM);
+        let entries = match fs::read_dir(&base) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(e),
+        };
+        for dir in entries.flatten().map(|e| e.path()).filter(|p| p.is_dir()) {
+            let _ = fs::remove_file(dir.join(record(server)));
+            let left = fs::read_dir(&dir)?
+                .flatten()
+                .any(|e| e.file_name().to_string_lossy().starts_with(RECORD));
+            if !left {
+                fs::remove_dir_all(&dir)?;
+            }
+        }
+        // 비었을 때만 지워진다.
+        let _ = fs::remove_dir(&base);
+        return Ok(());
+    }
+    match fs::remove_dir_all(base) {
         Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
         _ => Ok(()),
     }
@@ -480,7 +529,64 @@ fn verify(file: &Path, expected_size: u64, sha256: &str) -> Result<(), InstallEr
 }
 
 fn version_dir(root: &Path, server: &Server) -> PathBuf {
-    root.join(server.name).join(server.version)
+    root.join(folder(server)).join(server.version)
+}
+
+/// 설치 폴더 이름(`<root>/<이름>/<버전>/`). 같은 npm 꾸러미를 쓰는 서버들은 한 폴더를 같이 쓴다.
+fn folder(server: &Server) -> &'static str {
+    match server.source {
+        Source::Npm {
+            folder: Some(folder),
+            ..
+        } => folder,
+        _ => server.name,
+    }
+}
+
+/// 설치 기록 파일 이름. 폴더를 같이 쓰면 서버마다 따로 둔다.
+fn record(server: &Server) -> String {
+    if folder(server) == server.name {
+        RECORD.to_owned()
+    } else {
+        format!("{RECORD}-{}", server.name)
+    }
+}
+
+/// npm 설치와 같이 쓰는 폴더 지우기를 하나씩 한다.
+static NPM: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn lock(mutex: &std::sync::Mutex<()>) -> std::sync::MutexGuard<'_, ()> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// 설치 폴더의 npm 꾸러미 판(`node_modules/<꾸러미>/package.json`).
+fn npm_version(dir: &Path, package: &str) -> Option<String> {
+    let text =
+        fs::read_to_string(dir.join("node_modules").join(package).join("package.json")).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&text).ok()?;
+    Some(json.get("version")?.as_str()?.to_owned())
+}
+
+/// npm 꾸러미의 실행 대상 경로: `{platform}`·`{arch}`는 Node의 이름(`win32`·`darwin`, `x64`·`arm64`)으로,
+/// `{exe}`는 실행 파일 꼬리로 바꾼다.
+fn npm_bin(template: &str) -> String {
+    let platform = match std::env::consts::OS {
+        "windows" => "win32",
+        "macos" => "darwin",
+        os => os,
+    };
+    let arch = match std::env::consts::ARCH {
+        "x86_64" => "x64",
+        "aarch64" => "arm64",
+        "x86" => "ia32",
+        arch => arch,
+    };
+    template
+        .replace("{platform}", platform)
+        .replace("{arch}", arch)
+        .replace("{exe}", std::env::consts::EXE_SUFFIX)
 }
 
 /// 같은 버전의 이전(실패한) 설치 흔적을 지우고 빈 폴더를 만든다.
@@ -515,9 +621,9 @@ fn finish(root: &Path, server: &Server, dir: &Path, bin: &str) -> Result<(), Ins
             fs::set_permissions(&path, fs::Permissions::from_mode(0o755))?;
         }
     }
-    fs::write(dir.join(RECORD), &bin)?;
+    fs::write(dir.join(record(server)), &bin)?;
     // 실행 중인 예전 버전은 Windows에서 지워지지 않는다. 다음 설치 때 다시 치운다.
-    for entry in fs::read_dir(root.join(server.name))?.flatten() {
+    for entry in fs::read_dir(root.join(folder(server)))?.flatten() {
         if entry.file_name() != server.version && entry.path().is_dir() {
             let _ = fs::remove_dir_all(entry.path());
         }
@@ -692,6 +798,54 @@ mod tests {
             Some("spring-boot")
         );
         assert!(for_language("toml").is_none());
+    }
+
+    #[test]
+    fn npm_실행_대상은_이_플랫폼_이름으로_바꾼다() {
+        let bin = npm_bin("node_modules/@x/x-{platform}-{arch}/lib/tsc{exe}");
+        let want = match (std::env::consts::OS, std::env::consts::ARCH) {
+            ("windows", "x86_64") => "node_modules/@x/x-win32-x64/lib/tsc.exe",
+            ("macos", "aarch64") => "node_modules/@x/x-darwin-arm64/lib/tsc",
+            ("linux", "x86_64") => "node_modules/@x/x-linux-x64/lib/tsc",
+            _ => return,
+        };
+        assert_eq!(bin, want);
+        let ts = for_language("typescript").expect("TypeScript 서버");
+        assert_eq!(for_language("javascript").map(|s| s.name), Some(ts.name));
+        assert!(matches!(ts.source, Source::Npm { folder: None, .. }));
+    }
+
+    #[test]
+    fn 같은_꾸러미의_서버들은_한_폴더를_같이_쓰고_마지막에_지운다() {
+        let root = temp_root("npm-shared");
+        let [html, css] = ["html", "css"].map(|l| for_language(l).expect("서버"));
+        assert_eq!(folder(html), folder(css));
+        // npm 설치 뒤의 모습: 같은 버전 폴더에 서버마다 실행 대상과 기록.
+        let dir = version_dir(&root, html);
+        for server in [html, css] {
+            let Source::Npm { bin, .. } = server.source else {
+                unreachable!()
+            };
+            let bin = npm_bin(bin);
+            fs::create_dir_all(dir.join(&bin).parent().unwrap()).unwrap();
+            fs::write(dir.join(&bin), "//").unwrap();
+            fs::write(dir.join(record(server)), &bin).unwrap();
+        }
+        assert!(installed(&root, html).is_some() && installed(&root, css).is_some());
+        assert_ne!(
+            installed(&root, html).unwrap().bin,
+            installed(&root, css).unwrap().bin
+        );
+        uninstall(&root, html).unwrap();
+        assert!(installed(&root, html).is_none());
+        assert!(installed(&root, css).is_some(), "다른 서버의 설치는 남는다");
+        uninstall(&root, css).unwrap();
+        assert!(
+            !root.join(folder(css)).exists(),
+            "마지막 서버를 지우면 폴더도 지운다"
+        );
+        uninstall(&root, css).unwrap();
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
