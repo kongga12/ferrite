@@ -6,6 +6,7 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use ferrite_notebook::kernel::{Event, FrameInfo, Kernel, Status};
+use ferrite_notebook::{Notebook, Output};
 use serde_json::Value;
 
 /// `modules`를 가져올 수 있는 PATH의 Python.
@@ -143,11 +144,34 @@ fn 커널로_셀을_실행하고_멈춘다() {
     assert_eq!(kinds, ["display_data", "clear", "stream"]);
     assert_eq!(outputs(&events)[0]["data"]["text/html"], "<b>굵게</b>");
 
+    // 그림 출력(PNG): base64 글로 오고, 노트북에 넣으면 그림 출력으로 읽힌다.
+    const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+    let id = kernel.execute(&format!(
+        "import base64\nfrom IPython.display import Image, display\n\
+         display(Image(data=base64.b64decode('{PNG}')))"
+    ));
+    let (events, _, status) = run(&mut kernel, id, |_, _| {});
+    assert_eq!(status, Status::Ok);
+    let image = outputs(&events)[0].clone();
+    assert_eq!(image["output_type"], "display_data");
+    let sent = image["data"]["image/png"].as_str().unwrap();
+    assert_eq!(sent.split_whitespace().collect::<String>(), PNG);
+    let mut notebook = Notebook::parse(
+        r#"{"cells": [{"cell_type": "code", "execution_count": null, "metadata": {},
+            "outputs": [], "source": []}], "metadata": {}, "nbformat": 4, "nbformat_minor": 4}"#,
+    )
+    .unwrap();
+    notebook.push_output(0, image);
+    let Output::Data { data, .. } = &notebook.outputs(0)[0] else {
+        panic!("그림 출력이 아닙니다");
+    };
+    assert!(data.iter().any(|(mime, _)| mime == "image/png"));
+
     // 오류가 나면 줄 서 있던 실행은 하지 않는다.
     let failing = kernel.execute("x = 41\n1/0");
     let skipped = kernel.execute("print('돌면 안 된다')");
     let (events, count, status) = run(&mut kernel, failing, |_, _| {});
-    assert_eq!((count, status), (Some(3), Status::Error));
+    assert_eq!((count, status), (Some(4), Status::Error));
     assert_eq!(outputs(&events)[0]["ename"], "ZeroDivisionError");
     let (events, count, status) = run(&mut kernel, skipped, |_, _| {});
     assert_eq!((count, status), (None, Status::Aborted));
