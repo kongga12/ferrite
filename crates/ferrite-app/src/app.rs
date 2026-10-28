@@ -679,6 +679,9 @@ impl FerriteApp {
             app.open_file(file);
         }
         // 테스트는 밖에 묻지 않는다.
+        if !cfg!(test) {
+            crate::update_ui::clean_downloads();
+        }
         if app.settings.update_check && !cfg!(test) {
             app.updater
                 .check(&update_url(&app.settings), false, &cc.egui_ctx);

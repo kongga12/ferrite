@@ -155,12 +155,15 @@ jobs:
           hdiutil detach "$mnt"
           check "$dest"/*.app/Contents/MacOS/ferrite
           rm -rf "$dest"
-          # 업데이트로 받는 .app.tar.gz
-          tgz=$(mktemp -d)
-          tar -xzf target/packages/*.app.tar.gz -C "$tgz"
-          check "$tgz"/*.app/Contents/MacOS/ferrite
-          rm -rf "$tgz"
-          echo 'dmg·app.tar.gz: 실행 통과'
+          echo 'dmg: 실행 통과'
+          # 업데이트로 받는 .app.tar.gz(서명하는 `v*` 태그에서만 만든다)
+          if compgen -G 'target/packages/*.app.tar.gz' > /dev/null; then
+            tgz=$(mktemp -d)
+            tar -xzf target/packages/*.app.tar.gz -C "$tgz"
+            check "$tgz"/*.app/Contents/MacOS/ferrite
+            rm -rf "$tgz"
+            echo 'app.tar.gz: 실행 통과'
+          fi
       - name: 설치 시험(Linux)
         if: runner.os == 'Linux'
         env:

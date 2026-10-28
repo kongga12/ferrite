@@ -146,7 +146,7 @@ impl Updater {
             .filter(|n| !n.is_empty())
             .unwrap_or("ferrite-update")
             .to_owned();
-        let dest = std::env::temp_dir().join("ferrite-update").join(name);
+        let dest = download_dir().join(name);
         self.state = State::Downloading {
             release,
             installer,
@@ -290,6 +290,17 @@ impl Updater {
             );
         }
     }
+}
+
+/// 받은 설치 파일을 두는 곳.
+fn download_dir() -> PathBuf {
+    std::env::temp_dir().join("ferrite-update")
+}
+
+/// 지난번에 받은 설치 파일을 지운다. 설치 파일은 앱이 끝난 뒤에 돌기 때문에 그때는 지우지 못한다.
+/// 막 업데이트하고 다시 뜬 때에는 설치 파일이 아직 돌고 있어 못 지울 수 있다(다음 시작에 지운다).
+pub fn clean_downloads() {
+    let _ = std::fs::remove_dir_all(download_dir());
 }
 
 /// 릴리스 노트(길면 스크롤).
