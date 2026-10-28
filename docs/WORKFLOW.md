@@ -947,6 +947,30 @@
   - cargo-packager가 읽는 것: macOS는 환경 변수 `APPLE_CERTIFICATE`(p12를 base64로)·`APPLE_CERTIFICATE_PASSWORD`와 설정 `macos.signing-identity`. Windows는 설정 `windows.certificate-thumbprint`(인증서 저장소에 넣은 인증서) 또는 `windows.sign-command`(직접 서명 명령).
   - 인증서와 비밀번호는 사용자가 GitHub 비밀 값에 넣는다. 인증서 없이 시험할 수 없는 CI 단계는 미리 넣지 않았다.
 - [ ] 7-3 자동 업데이트(서명된 릴리스 매니페스트)
+  - 방식(사용자 결정): 직접 작게 만든다. 공식 업데이터 크레이트(cargo-packager-updater)는 reqwest·tokio를 끌고 오고, 이미 쓰는 ureq와 HTTP 클라이언트가 둘이 된다.
+    - 새 크레이트 `ferrite-update`. 매니페스트(`latest.json`)와 서명 형식은 cargo-packager 업데이터와 같다.
+    - 서명 검증은 minisign-verify(의존 없는 작은 크레이트, 새로 받음), 받기는 언어 서버 받기와 같은 ureq 설정(OS 인증서 저장소)이다.
+    - 매니페스트: `version`, `notes`, 플랫폼(`windows-x86_64`, `linux-x86_64`, `macos-aarch64`)마다 `url`·`signature`(`.sig` 내용)·`format`
+    - 판 비교: `x.y.z` 숫자, 앞의 `v`와 `-beta` 같은 꼬리는 무시한다.
+    - 검증: 공개 키와 서명은 minisign 글을 base64로 감싼 것이다(cargo-packager 형식). 서명이 맞지 않으면 파일을 쓰지 않는다. 매니페스트 자체에는 서명이 없다. 바꾼 사람은 서명된 다른 판을 가리키게 할 수 있을 뿐이다.
+    - 설치: NSIS로 설치한 Windows(실행 파일 옆에 `uninstall.exe`)는 받아 둔 설치 파일을 앱이 끝날 때 수동 모드(`/P /R`)로 돌린다. 진행 창만 보이고, 끝나면 다시 띄운다. AppImage(`APPIMAGE`)는 같은 폴더에 쓴 뒤 이름을 바꿔 파일을 바꾼다. MSI·dmg·deb·개발 빌드는 내려받기 페이지를 연다.
+  - 앱
+    - 시작할 때 따로 스레드에서 한 번 묻는다(설정 `update_check`, 기본 켬). 새 판이 있을 때만 상태 표시줄에 [새 판 x.y.z]가 보인다. 망이 막혀 있으면 조용히 넘어간다. [도구 > 업데이트 확인…]은 창을 열어 최신 판·오류도 보인다.
+    - 업데이트 창: 판, 릴리스 노트, [받아 설치](진행 막대) 또는 [내려받기 페이지 열기]. 받으면 NSIS는 "닫으면 설치" → [지금 닫고 설치](저장하지 않은 변경은 평소처럼 묻는다). AppImage는 "다시 시작하면 새 판"이다.
+    - 설정 `update_url`: 비우면 공식 릴리스(`releases/latest/download/latest.json`). 사내 미러를 쓸 때만 바꾼다.
+    - 공개 키: `crates/ferrite-app/updater.pub`(`cargo packager signer generate`가 만든 `.pub`). 비밀 키와 비밀번호는 사용자가 GitHub 비밀 값 `FERRITE_UPDATER_KEY`·`FERRITE_UPDATER_KEY_PASSWORD`에만 넣는다.
+  - 릴리스(사용자 결정: 태그로 GitHub 릴리스)
+    - 패키징 워크플로가 `v*` 태그에서 설치 파일마다 `.sig`를 만든다(키가 없으면 실패).
+    - 이어서 `release` 작업이 태그와 앱 판이 같은지 보고, `.github/scripts/latest_json.py`로 `latest.json`을 만든다. NSIS·AppImage는 서명이 꼭 있어야 하고, dmg는 링크로만 쓴다.
+    - 그다음 GitHub 릴리스(자동 릴리스 노트)를 만들어 모두 올린다. 공개는 태그를 올리는 사용자가 정한다.
+  - 검증
+    - 단위: 판 비교, 매니페스트 읽기(플랫폼 없음은 링크만), 서명(맞음·바뀐 파일·잘못된 서명·잘못된 키), 설치 방식 고르기, AppImage 바꾸기
+    - 시험용 키·서명은 내려받기 없이 만들었다. 순수 Python Ed25519(RFC 8032 참조 구현, 시험 벡터로 확인)와 minisign 형식(BLAKE2b-512 해시 서명과 신뢰 주석 전역 서명)이다(`crates/ferrite-update/tests/fixtures`).
+    - 로컬 HTTP 서버: 매니페스트 확인, 받기와 진행, 같은 판이면 없음, 바뀐 파일은 쓰지 않음, 매니페스트 없음은 오류
+    - 창 테스트: [업데이트 확인]으로 새 판(노트, MSI라 내려받기 페이지), 상태 표시줄 알림, 최신 판, 404 오류
+    - `latest.json` 스크립트: 가짜 설치 파일로 세 플랫폼 항목, NSIS 서명이 없으면 실패
+    - 앱에 넣은 공개 키를 읽을 수 있는지(테스트)
+    - 남은 것: 첫 `v*` 태그 릴리스와, 그 릴리스로 실제 NSIS·AppImage 업데이트
 - [ ] 7-4 WASM 플러그인 API(명령·패널·언어 설정 확장)
 - [ ] 3개 OS 검증
 

@@ -29,6 +29,7 @@ mod servers;
 mod sql_console;
 mod terminal_ui;
 mod theme;
+mod update_ui;
 mod watcher;
 
 #[cfg(test)]

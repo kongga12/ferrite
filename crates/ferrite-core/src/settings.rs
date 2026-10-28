@@ -19,6 +19,12 @@ tab_size = 4
 # 파일에서 들여쓰기 방식을 알아내지 못했을 때 쓸 기본값
 use_tabs = false
 indent_size = 4
+
+# 시작할 때 새 판이 있는지 확인한다. 망이 막혀 있으면 조용히 넘어간다.
+update_check = true
+
+# 업데이트 정보(latest.json) 주소. 비우면 공식 릴리스. 사내 미러를 쓸 때만 바꾼다.
+update_url = ""
 "#;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
@@ -38,6 +44,8 @@ pub struct Settings {
     pub tab_size: usize,
     pub use_tabs: bool,
     pub indent_size: u8,
+    pub update_check: bool,
+    pub update_url: String,
 }
 
 impl Default for Settings {
@@ -48,6 +56,8 @@ impl Default for Settings {
             tab_size: 4,
             use_tabs: false,
             indent_size: 4,
+            update_check: true,
+            update_url: String::new(),
         }
     }
 }
