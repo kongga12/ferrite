@@ -1,0 +1,15 @@
+[package]
+name = "ferrite-textmate"
+description = "Ferrite 언어 확장: 편집기 확장 폴더(package.json·language-configuration.json) 읽기, TextMate 문법 강조"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+ferrite-core.workspace = true
+# bindgen(libclang)이 필요한 generate 기능을 빼고, 함께 든 바인딩으로 C 소스만 빌드한다.
+ropey.workspace = true
+onig = { version = "6.5.3", default-features = false }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"

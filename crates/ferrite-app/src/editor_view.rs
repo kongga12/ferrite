@@ -58,10 +58,15 @@ impl EditorState {
     }
 }
 
+/// 언어 설정이 없을 때 짝을 강조하는 괄호.
+pub const DEFAULT_BRACKETS: [(char, char); 3] = [('(', ')'), ('[', ']'), ('{', '}')];
+
 pub struct EditorOptions<'a> {
     pub tab_size: usize,
     pub indent: Indent,
     pub comment_token: Option<&'a str>,
+    /// 커서 옆 괄호와 그 짝을 강조할 괄호 짝.
+    pub brackets: &'a [(char, char)],
     /// 찾기 결과(문자 범위, 시작 순 정렬). 배경을 칠한다.
     pub search_matches: &'a [Range<usize>],
     /// 언어 서버 진단(시작 순 정렬). 물결 밑줄과 말풍선으로 보여 준다.
@@ -609,6 +614,11 @@ fn paint(
     let selection = buffer.selection();
     let sel = selection.range();
     let (cursor_line, cursor_col) = buffer.pos_to_line_col(selection.head);
+    let bracket_fill = Color32::from_rgba_unmultiplied(128, 128, 128, 80);
+    let brackets: Vec<Range<usize>> = buffer
+        .bracket_pair(opts.brackets)
+        .map(|(a, b)| vec![a..a + 1, b..b + 1])
+        .unwrap_or_default();
 
     for (i, line) in lines.clone().enumerate() {
         let y = geom.line_y(line);
@@ -658,6 +668,9 @@ fn paint(
         let first_match = matches.partition_point(|m| m.end <= start);
         for m in matches[first_match..].iter().take_while(|m| m.start <= end) {
             fill(m, match_fill);
+        }
+        for b in &brackets {
+            fill(b, bracket_fill);
         }
         fill(&sel, visuals.selection.bg_fill);
         let x = |pos: usize| {

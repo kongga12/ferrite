@@ -31,16 +31,27 @@ pub fn highlight_color(kind: Highlight, dark: bool) -> Color32 {
     Color32::from_rgb(r, g, b)
 }
 
+impl Styler for ferrite_textmate::TextMateSyntax {
+    fn styles(&mut self, buffer: &mut Buffer, lines: Range<usize>, dark: bool) -> LineStyles {
+        self.update(buffer);
+        colored(self.highlight_lines(buffer.rope(), lines), dark)
+    }
+}
+
+fn colored(lines: ferrite_core::syntax::LineHighlights, dark: bool) -> LineStyles {
+    lines
+        .into_iter()
+        .map(|row| {
+            row.into_iter()
+                .map(|(range, kind)| (range, highlight_color(kind, dark)))
+                .collect()
+        })
+        .collect()
+}
+
 impl Styler for Syntax {
     fn styles(&mut self, buffer: &mut Buffer, lines: Range<usize>, dark: bool) -> LineStyles {
         self.update(buffer);
-        self.highlight_lines(buffer.rope(), lines)
-            .into_iter()
-            .map(|row| {
-                row.into_iter()
-                    .map(|(range, kind)| (range, highlight_color(kind, dark)))
-                    .collect()
-            })
-            .collect()
+        colored(self.highlight_lines(buffer.rope(), lines), dark)
     }
 }

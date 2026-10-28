@@ -9,6 +9,7 @@ Rust로 작성한 크로스플랫폼(Windows / macOS / Linux) 경량 IDE.
 
 - 설치 파일: 패키징 워크플로(`Package`)가 Windows(NSIS·MSI)·macOS(dmg)·Linux(deb·AppImage) 설치 파일을 만든다. 아직 서명하지 않아 Windows SmartScreen 경고([추가 정보] → [실행])와 macOS Gatekeeper 차단(오른쪽 단추 → [열기])이 뜬다.
 - WASM 플러그인: 설정 폴더의 `ferrite/plugins/<이름>/`에 `plugin.toml`과 `.wasm`을 넣으면 [플러그인] 메뉴에 명령이, 플러그인 창에 패널이 생긴다. 플러그인은 앱이 넘긴 문서만 보고 파일·네트워크는 못 쓴다. 예제는 `examples/plugins/text-stats`(Rust).
+- 언어 확장: 널리 쓰는 편집기 확장 폴더(`package.json`, `language-configuration.json`, `.tmLanguage.json`)를 플러그인 폴더에 그대로 넣으면 tree-sitter 문법이 없는 형식을 TextMate 문법으로 강조하고, 줄 주석 기호와 괄호 짝을 쓴다. 커서 옆 괄호의 짝은 모든 언어에서 강조한다.
 
 - 폴더 열기, 지연 로딩 프로젝트 트리(파일 감시로 자동 갱신), 탭 에디터
 - 실행(`Ctrl+F5`): Maven(egov `tomcat7:run`·`spring-boot:run`)·Gradle·cargo·go·CMake·Python·Composer 구성을 자동으로 찾고, `.ferrite/run.toml`에 직접 적은 구성과 함께 터미널 탭에서 돌린다.
