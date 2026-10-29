@@ -596,6 +596,10 @@ pub struct FerriteApp {
     /// HTTP 요청 파일 실행과 응답 창. 창을 다 그린 뒤에 할 요청 일.
     http: crate::http_ui::HttpPanel,
     http_task: Option<crate::http_ui::Task>,
+    /// jsconfig.json을 만들자고 할지 본 문서와 그 결과(화면 폴더). 문서가 바뀌면 다시 본다.
+    jsconfig: Option<(PathBuf, Option<&'static str>)>,
+    /// jsconfig.json 제안을 닫은 프로젝트 루트(앱이 켜진 동안).
+    jsconfig_dismissed: std::collections::HashSet<PathBuf>,
     /// 감시를 시작하지 못한 환경(권한 등)에서는 없다. 그래도 편집은 된다.
     watcher: Option<FsWatcher>,
 }
@@ -663,6 +667,8 @@ impl FerriteApp {
             endpoints: Default::default(),
             http: Default::default(),
             http_task: None,
+            jsconfig: None,
+            jsconfig_dismissed: Default::default(),
             watcher: FsWatcher::new(cc.egui_ctx.clone()).ok(),
             name_prompt: None,
             confirm_delete: None,
@@ -2439,6 +2445,32 @@ impl FerriteApp {
         }
     }
 
+    /// 프로젝트 루트에 jsconfig.json을 만들고, JS 언어 서버를 내려 새 설정으로 다시 띄우게 한다.
+    fn create_jsconfig(&mut self) {
+        let (Some(root), Some((_, Some(dir)))) = (
+            self.tree.as_ref().map(|t| t.root().to_path_buf()),
+            self.jsconfig.take(),
+        ) else {
+            return;
+        };
+        let path = root.join("jsconfig.json");
+        if path.exists() {
+            self.status = format!("이미 있습니다: {}", path.display());
+            return;
+        }
+        match text_file::write_atomic(&path, ferrite_core::web::jsconfig_text(dir).as_bytes()) {
+            Ok(()) => {
+                self.status = format!(
+                    "jsconfig.json을 만들었습니다({dir}의 스크립트). JS 언어 서버를 다시 띄웁니다"
+                );
+                if let Some(server) = ferrite_lsp::catalog::for_language("javascript") {
+                    self.hub.stop(server.name);
+                }
+            }
+            Err(e) => self.status = format!("jsconfig.json을 만들지 못했습니다: {e}"),
+        }
+    }
+
     /// HTTP 요청 일을 한다. 응답 창을 앞으로 가져오므로 창을 다 그린 뒤에 부른다.
     fn apply_http_task(&mut self, ctx: &egui::Context) {
         match self.http_task.take() {
@@ -3028,6 +3060,7 @@ impl FerriteApp {
         let mut active_tab = None;
         let mut gutter_click = None;
         let mut run_request = None;
+        let mut jsconfig_action = None;
         ui.scope(|ui| {
             egui::ScrollArea::horizontal()
                 .id_salt("tabs")
@@ -3069,6 +3102,38 @@ impl FerriteApp {
                     }
                 });
                 ui.separator();
+            }
+            // JS 언어 서버가 jQuery 같은 전역 라이브러리를 모르는 웹 프로젝트면 jsconfig.json을 만들자고 한다.
+            if let Some(root) = self.tree.as_ref().map(|t| t.root()) {
+                if self.jsconfig.as_ref().is_none_or(|(path, _)| *path != doc.path) {
+                    self.jsconfig = Some((
+                        doc.path.clone(),
+                        ferrite_core::web::jsconfig_target(root, &doc.path),
+                    ));
+                }
+                if let Some((_, Some(dir))) = &self.jsconfig
+                    && !self.jsconfig_dismissed.contains(root)
+                {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.colored_label(
+                            ui.visuals().warn_fg_color,
+                            "jsconfig.json이 없어 JS 언어 서버가 다른 스크립트의 전역 함수와 jQuery 같은 라이브러리를 모릅니다(자동완성·정의 이동).",
+                        );
+                        if ui
+                            .button("jsconfig.json 만들기")
+                            .on_hover_text(format!(
+                                "{dir}의 스크립트를 한 프로젝트로 묶는다. 언어 서버가 라이브러리 파일 이름을 보고 타입 정보(@types)를 인터넷에서 받는다"
+                            ))
+                            .clicked()
+                        {
+                            jsconfig_action = Some(true);
+                        }
+                        if ui.button("닫기").clicked() {
+                            jsconfig_action = Some(false);
+                        }
+                    });
+                    ui.separator();
+                }
             }
             if let Some(notebook) = doc.notebook.as_mut() {
                 if notebook.ui(ui, &mut doc.buffer, &doc.path) {
@@ -3201,6 +3266,15 @@ impl FerriteApp {
         }
         if let Some((path, line)) = run_request {
             self.http_task = Some(crate::http_ui::Task::Run { path, line });
+        }
+        match jsconfig_action {
+            Some(true) => self.create_jsconfig(),
+            Some(false) => {
+                if let Some(root) = self.tree.as_ref().map(|t| t.root().to_path_buf()) {
+                    self.jsconfig_dismissed.insert(root);
+                }
+            }
+            None => {}
         }
         if let Some(action) = find_action {
             self.run_find_action(action);
@@ -6780,6 +6854,45 @@ mod tests {
         assert_eq!(doc.buffer.text(), text);
         assert!(!doc.is_dirty());
         assert_eq!(doc.buffer.pos_to_line_col(doc.buffer.selection().head).0, 1);
+        drop(harness);
+        remove_project(&dir);
+    }
+
+    #[test]
+    fn 웹_프로젝트의_스크립트에_jsconfig가_없으면_만들자고_한다() {
+        let dir =
+            std::env::temp_dir().join(format!("ferrite-jsconfig-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let js = dir.join("src/main/webapp/js");
+        fs::create_dir_all(&js).unwrap();
+        fs::write(js.join("board.js"), "$.ajax({});\n").unwrap();
+        fs::write(js.join("list.js"), "$('#a').val();\n").unwrap();
+        let mut harness = harness_builder()
+            .with_size(egui::vec2(1200.0, 700.0))
+            .build_eframe(|cc| FerriteApp::new(cc, Some(dir.clone())));
+        harness.state_mut().open_file(js.join("board.js"));
+        harness.run_ok();
+        // 닫으면 그 프로젝트에서는 다시 묻지 않는다(다른 문서도).
+        harness.get_by_label("닫기").click();
+        harness.run_ok();
+        assert!(harness.query_by_label("jsconfig.json 만들기").is_none());
+        harness.state_mut().open_file(js.join("list.js"));
+        harness.run_ok();
+        assert!(harness.query_by_label("jsconfig.json 만들기").is_none());
+
+        harness.state_mut().jsconfig_dismissed.clear();
+        harness.run_ok();
+        harness.get_by_label("jsconfig.json 만들기").click();
+        harness.run_ok();
+        let text = fs::read_to_string(dir.join("jsconfig.json")).unwrap();
+        assert_eq!(text, ferrite_core::web::jsconfig_text("src/main/webapp"));
+        assert!(harness.query_by_label("jsconfig.json 만들기").is_none());
+        assert!(
+            harness
+                .state()
+                .status
+                .contains("jsconfig.json을 만들었습니다")
+        );
         drop(harness);
         remove_project(&dir);
     }

@@ -1707,6 +1707,7 @@ dependencies = [
 name = "ferrite-lsp"
 version = "0.1.0"
 dependencies = [
+ "ferrite-core",
  "flate2",
  "lsp-types",
  "ropey",

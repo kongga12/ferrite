@@ -349,3 +349,120 @@ fn npm에서_html_css_json_서버를_한_폴더에_받아_띄운다() {
     assert!(install::installed(&root, servers[1]).is_some());
     remove(&root);
 }
+
+/// 보낼 자동완성 위치(줄, 열)와 나와야 할 이름.
+type Wanted<'a> = &'a [((u32, u32), &'a str)];
+
+/// `file`을 열고 `wanted`의 자리마다 자동완성을 되풀이해 물어, 모든 이름이 나오는지(최대 `limit`).
+/// TS 서버는 라이브러리 이름을 보고 @types를 npm으로 받으므로 jQuery는 처음에 늦게 나온다.
+fn completes(
+    command: &ferrite_lsp::client::ServerCommand,
+    project: &Path,
+    file: &Path,
+    text: &str,
+    wanted: Wanted<'_>,
+    limit: Duration,
+) -> bool {
+    let mut lsp = LanguageServer::start(command, project, || {}).unwrap();
+    wait_ready(&lsp, Duration::from_secs(60));
+    lsp.did_open(file, "javascript", 1, text);
+    let uri = ferrite_lsp::uri::path_to_uri(file).unwrap();
+    let deadline = Instant::now() + limit;
+    let mut found = vec![false; wanted.len()];
+    let mut asked: HashMap<i64, usize> = HashMap::new();
+    while Instant::now() < deadline {
+        if asked.is_empty() {
+            for (i, ((line, character), _)) in wanted.iter().enumerate() {
+                let id = lsp.request(
+                    "textDocument/completion",
+                    serde_json::json!({ "textDocument": { "uri": uri }, "position": { "line": line, "character": character } }),
+                );
+                asked.insert(id, i);
+            }
+        }
+        for event in lsp.poll_events() {
+            match event {
+                ServerEvent::Response { id, result } => {
+                    let Some(i) = asked.remove(&id) else {
+                        continue;
+                    };
+                    let result = result.unwrap_or_default();
+                    let items = result
+                        .get("items")
+                        .or(Some(&result))
+                        .and_then(|v| v.as_array())
+                        .cloned()
+                        .unwrap_or_default();
+                    found[i] |= items.iter().any(|item| item["label"] == wanted[i].1);
+                }
+                ServerEvent::Exited(reason) => panic!("서버가 끝남: {reason}"),
+                _ => {}
+            }
+        }
+        if found.iter().all(|f| *f) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    eprintln!("나온 것: {found:?}");
+    false
+}
+
+#[test]
+#[ignore = "npm에서 TypeScript 7(풀면 약 31MB)을 받고, TS 서버가 npm으로 @types/jquery를 받는다"]
+fn npm에서_받은_typescript_7은_jsconfig가_있으면_화면_폴더의_전역과_jquery를_안다() {
+    let server = catalog::for_language("javascript").unwrap();
+    let root = temp_root("typescript-jquery");
+    if install_npm(&root, server).is_none() {
+        return;
+    }
+    // egov 화면 폴더: 화면이 <script>로 불러오는 jQuery·공통 스크립트와 그것을 쓰는 스크립트. TS 서버는
+    // 라이브러리 파일 이름을 보고 타입을 받으므로 jQuery의 내용은 상관없다.
+    let project = root.join("project");
+    let js = project.join("src/main/webapp/js");
+    fs::create_dir_all(&js).unwrap();
+    fs::write(js.join("jquery-3.7.1.min.js"), "/*! jQuery v3.7.1 */\n").unwrap();
+    fs::write(
+        js.join("common.js"),
+        "function fn_egov_search(pageNo) {\n  return pageNo;\n}\n",
+    )
+    .unwrap();
+    let text = "function search() {\n  $.aj\n  fn_egov_s\n}\n";
+    let board = js.join("board.js");
+    fs::write(&board, text).unwrap();
+    let command = install::command(&root, server, &project).unwrap().unwrap();
+    let global = ((2, 11), "fn_egov_search");
+    let jquery = ((1, 6), "ajax");
+
+    // 열린 파일만 보므로 다른 스크립트의 전역 함수를 모른다. (jQuery는 전에 받아 둔 타입이 이 PC에 있으면
+    // 알 수 있어 보지 않는다.)
+    assert!(
+        !completes(
+            &command,
+            &project,
+            &board,
+            text,
+            &[global],
+            Duration::from_secs(10)
+        ),
+        "jsconfig.json이 없으면 다른 스크립트의 전역 함수를 모른다"
+    );
+    let dir = ferrite_core::web::web_dir(&project).unwrap();
+    fs::write(
+        project.join("jsconfig.json"),
+        ferrite_core::web::jsconfig_text(dir),
+    )
+    .unwrap();
+    assert!(
+        completes(
+            &command,
+            &project,
+            &board,
+            text,
+            &[global, jquery],
+            Duration::from_secs(180)
+        ),
+        "jsconfig.json이 있으면 화면 폴더의 전역 함수와 jQuery($.ajax)를 완성한다"
+    );
+    remove(&root);
+}
