@@ -344,6 +344,17 @@ impl Drop for LanguageServer {
     }
 }
 
+/// 서버가 진단을 다시 물으라고 보내는 요청. 앱에는 같은 이름의 알림으로 넘긴다.
+pub const DIAGNOSTIC_REFRESH: &str = "workspace/diagnostic/refresh";
+
+/// `textDocument/diagnostic` 응답에서 진단 목록을 꺼낸다. 바뀌지 않았다는 답(`unchanged`)은 None.
+pub fn parse_pulled_diagnostics(result: &Value) -> Option<Vec<Diagnostic>> {
+    if result.get("kind").and_then(Value::as_str) != Some("full") {
+        return None;
+    }
+    serde_json::from_value(result.get("items")?.clone()).ok()
+}
+
 /// `textDocument/publishDiagnostics` 알림을 (파일 경로, 진단 목록)으로 바꾼다.
 pub fn parse_diagnostics(params: &Value) -> Option<(PathBuf, Vec<Diagnostic>)> {
     let params: PublishDiagnosticsParams = serde_json::from_value(params.clone()).ok()?;
@@ -368,6 +379,8 @@ fn initialize_params(root: &Path, init_options: &Value) -> Result<Value, String>
             "textDocument": {
                 "synchronization": { "didSave": true, "dynamicRegistration": false },
                 "publishDiagnostics": { "relatedInformation": false, "versionSupport": true },
+                // 진단을 클라이언트가 묻는 방식(LSP 3.17). TypeScript 7은 이것만 쓴다.
+                "diagnostic": { "dynamicRegistration": false, "relatedDocumentSupport": false },
                 // 스니펫($1 등)은 아직 펼치지 못하므로 받지 않는다고 알린다.
                 "completion": {
                     "completionItem": { "snippetSupport": false, "labelDetailsSupport": true },
@@ -394,6 +407,7 @@ fn initialize_params(root: &Path, init_options: &Value) -> Result<Value, String>
             "workspace": {
                 "workspaceFolders": true,
                 "configuration": true,
+                "diagnostics": { "refreshSupport": true },
                 "applyEdit": true,
                 // 코드 액션 명령·중계로 workspace/executeCommand를 보낸다. Spring Boot LS는 이것이
                 // 없으면 명령 목록을 만들지 않아 초기화하다 죽는다.
@@ -443,7 +457,14 @@ fn reader_loop(
                 params: message.get("params").cloned().unwrap_or(Value::Null),
             }),
             (Some(id), Some(method)) => {
-                reply_to_server_request(stdin, id, method, message.get("params"))
+                reply_to_server_request(stdin, id, method, message.get("params"));
+                // 진단을 다시 물으라는 요청은 답하고 앱에도 알린다(앱이 열린 문서의 진단을 다시 묻는다).
+                if method == DIAGNOSTIC_REFRESH {
+                    send(ServerEvent::Notification {
+                        method: method.to_owned(),
+                        params: Value::Null,
+                    });
+                }
             }
             (Some(id), None) => {
                 let result = match message.get("error") {
@@ -512,13 +533,14 @@ fn reply_to_server_request(
     params: Option<&Value>,
 ) {
     let result = match method {
-        // 설정은 아직 보내지 않는다: 항목 수만큼 null을 돌려주면 서버가 기본값을 쓴다.
+        // 설정은 아직 보내지 않는다: 항목 수만큼 빈 객체를 돌려주면 서버가 기본값을 쓴다. VS Code도 설정이
+        // 없는 절은 빈 객체로 답한다(null이면 CSS 서버가 검사하다 죽는다).
         "workspace/configuration" => {
             let count = params
                 .and_then(|p| p.get("items"))
                 .and_then(Value::as_array)
                 .map_or(0, Vec::len);
-            Value::Array(vec![Value::Null; count])
+            Value::Array(vec![json!({}); count])
         }
         "client/registerCapability"
         | "client/unregisterCapability"
@@ -527,7 +549,7 @@ fn reply_to_server_request(
         | "workspace/semanticTokens/refresh"
         | "workspace/inlayHint/refresh"
         | "workspace/codeLens/refresh"
-        | "workspace/diagnostic/refresh" => Value::Null,
+        | DIAGNOSTIC_REFRESH => Value::Null,
         _ => {
             let error = json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32601, "message": format!("지원하지 않는 요청: {method}") } });
             let _ = write_message(&mut *lock(stdin), &encode(&error));
@@ -536,4 +558,23 @@ fn reply_to_server_request(
     };
     let reply = json!({ "jsonrpc": "2.0", "id": id, "result": result });
     let _ = write_message(&mut *lock(stdin), &encode(&reply));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn 물어서_받은_진단은_전체_목록만_꺼낸다() {
+        let full = json!({ "kind": "full", "resultId": "1", "items": [{
+            "range": { "start": { "line": 0, "character": 4 }, "end": { "line": 0, "character": 5 } },
+            "severity": 1, "message": "오류"
+        }] });
+        let items = parse_pulled_diagnostics(&full).unwrap();
+        assert_eq!((items.len(), items[0].message.as_str()), (1, "오류"));
+        assert!(
+            parse_pulled_diagnostics(&json!({ "kind": "unchanged", "resultId": "1" })).is_none()
+        );
+        assert!(parse_pulled_diagnostics(&Value::Null).is_none());
+    }
 }

@@ -8,7 +8,9 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use ferrite_lsp::catalog::{self, Server};
-use ferrite_lsp::client::{LanguageServer, ServerEvent, parse_diagnostics};
+use ferrite_lsp::client::{
+    LanguageServer, ServerEvent, parse_diagnostics, parse_pulled_diagnostics,
+};
 use ferrite_lsp::install;
 use lsp_types::{Diagnostic, DiagnosticSeverity};
 
@@ -183,5 +185,167 @@ fn jdtls를_받아_lombok이_만든_getter를_인식하는지_본다() {
         std::thread::sleep(Duration::from_millis(200));
     }
     drop(lsp);
+    remove(&root);
+}
+
+/// npm으로 설치한다(진행률은 없다). npm이 없으면 None.
+fn install_npm(root: &Path, server: &Server) -> Option<install::Installed> {
+    if ferrite_lsp::client::find_program("npm").is_none() {
+        eprintln!("npm이 없어 건너뜁니다");
+        return None;
+    }
+    let started = Instant::now();
+    install::install(root, server, &mut |_, _| {}).unwrap_or_else(|e| panic!("설치 실패: {e}"));
+    eprintln!(
+        "{} {}: {:.1}초",
+        server.name,
+        server.version,
+        started.elapsed().as_secs_f64()
+    );
+    let installed = install::installed(root, server).expect("설치 기록이 없음");
+    assert!(!installed.is_outdated(server));
+    Some(installed)
+}
+
+/// `file`의 진단 중 오류가 하나라도 올 때까지 기다린다. 진단을 묻는 서버(LSP 3.17 pull)에는 물어 보고,
+/// 아니면 서버가 보내 주기를 기다린다.
+fn wait_errors(lsp: &mut LanguageServer, file: &Path, limit: Duration) -> Vec<String> {
+    let pull = lsp
+        .capabilities()
+        .is_some_and(|c| c.diagnostic_provider.is_some());
+    let uri = ferrite_lsp::uri::path_to_uri(file).unwrap();
+    let errors = |diagnostics: &[Diagnostic]| -> Vec<String> {
+        diagnostics
+            .iter()
+            .filter(|d| d.severity == Some(DiagnosticSeverity::ERROR))
+            .map(|d| d.message.clone())
+            .collect()
+    };
+    let deadline = Instant::now() + limit;
+    let mut asked = None;
+    loop {
+        if pull && asked.is_none() {
+            asked = Some(lsp.request(
+                "textDocument/diagnostic",
+                serde_json::json!({ "textDocument": { "uri": uri } }),
+            ));
+        }
+        for event in lsp.poll_events() {
+            let found = match event {
+                ServerEvent::Notification { method, params }
+                    if method == "textDocument/publishDiagnostics" =>
+                {
+                    parse_diagnostics(&params)
+                        .filter(|(path, _)| path.file_name() == file.file_name())
+                        .map(|(_, d)| errors(&d))
+                }
+                ServerEvent::Response { id, result } if Some(id) == asked => {
+                    // 아직 프로젝트를 읽는 중이면 비어 있을 수 있어 다시 묻는다.
+                    asked = None;
+                    result
+                        .ok()
+                        .as_ref()
+                        .and_then(parse_pulled_diagnostics)
+                        .map(|d| errors(&d))
+                }
+                ServerEvent::Exited(reason) => panic!("서버가 끝남: {reason}"),
+                _ => None,
+            };
+            if let Some(found) = found.filter(|e| !e.is_empty()) {
+                return found;
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{limit:?} 안에 {}의 오류가 오지 않음",
+            file.display()
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+#[test]
+#[ignore = "npm에서 TypeScript 7(풀면 약 31MB)을 받는다"]
+fn npm에서_typescript_7을_받아_타입_오류를_본다() {
+    let server = catalog::for_language("typescript").unwrap();
+    let root = temp_root("typescript");
+    let Some(installed) = install_npm(&root, server) else {
+        return;
+    };
+    let project = root.join("project");
+    fs::create_dir_all(&project).unwrap();
+    let command = install::command(&root, server, &project).unwrap().unwrap();
+    assert_eq!(
+        command.program, installed.bin,
+        "Node 없이 실행 파일을 바로 띄운다"
+    );
+
+    let mut lsp = LanguageServer::start(&command, &project, || {}).unwrap();
+    wait_ready(&lsp, Duration::from_secs(60));
+    let text = "let n: number = \"문자열\";\n";
+    let file = project.join("a.ts");
+    fs::write(&file, text).unwrap();
+    lsp.did_open(&file, "typescript", 1, text);
+    let errors = wait_errors(&mut lsp, &file, Duration::from_secs(60));
+    eprintln!("오류: {errors:?}");
+    drop(lsp);
+    remove(&root);
+}
+
+#[test]
+#[ignore = "npm에서 HTML·CSS·JSON 서버 묶음(풀면 약 85MB)을 받는다. Node가 필요하다"]
+fn npm에서_html_css_json_서버를_한_폴더에_받아_띄운다() {
+    let root = temp_root("web-servers");
+    let servers = ["html", "css", "json"].map(|l| catalog::for_language(l).unwrap());
+    // 설치 창에서 셋을 연달아 누른 것처럼 함께 설치한다(같은 폴더에 npm이 겹치면 안 된다).
+    let installed: Vec<_> = std::thread::scope(|scope| {
+        let jobs: Vec<_> = servers
+            .iter()
+            .map(|server| scope.spawn(|| install_npm(&root, server)))
+            .collect();
+        jobs.into_iter().map(|j| j.join().unwrap()).collect()
+    });
+    let Some(dirs) = installed
+        .into_iter()
+        .map(|i| i.map(|i| i.dir))
+        .collect::<Option<Vec<_>>>()
+    else {
+        return;
+    };
+    assert!(
+        dirs.windows(2).all(|w| w[0] == w[1]),
+        "한 폴더를 같이 쓴다: {dirs:?}"
+    );
+    let project = root.join("project");
+    fs::create_dir_all(&project).unwrap();
+    let samples = [
+        (
+            "html",
+            "a.html",
+            "<!DOCTYPE html>\n<html><body><p>안녕</p></body></html>\n",
+        ),
+        ("css", "a.css", "a { color: ; }\n"),
+        ("json", "a.json", "{ \"a\": }\n"),
+    ];
+    for (server, (language, name, text)) in servers.iter().zip(samples) {
+        let command = install::command(&root, server, &project)
+            .unwrap()
+            .unwrap_or_else(|e| panic!("{e}"));
+        let mut lsp = LanguageServer::start(&command, &project, || {}).unwrap();
+        wait_ready(&lsp, Duration::from_secs(60));
+        let file = project.join(name);
+        fs::write(&file, text).unwrap();
+        lsp.did_open(&file, language, 1, text);
+        // HTML 서버는 문법 검사를 하지 않는다(준비까지만 본다).
+        if language != "html" {
+            let errors = wait_errors(&mut lsp, &file, Duration::from_secs(60));
+            eprintln!("{name} 오류: {errors:?}");
+        }
+        drop(lsp);
+    }
+    // 하나를 지워도 나머지는 남는다.
+    install::uninstall(&root, servers[0]).unwrap();
+    assert!(install::installed(&root, servers[0]).is_none());
+    assert!(install::installed(&root, servers[1]).is_some());
     remove(&root);
 }

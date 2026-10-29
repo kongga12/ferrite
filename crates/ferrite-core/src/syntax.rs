@@ -36,6 +36,9 @@ pub enum Lang {
     Xml,
     Html,
     JavaScript,
+    TypeScript,
+    /// JSX가 든 TypeScript(`.tsx`).
+    Tsx,
     Css,
     Properties,
     /// HTML에 스크립틀릿(Java)·EL이 섞인 JSP. HTML 층과 Java 층을 따로 칠하고 JSP 구간을 덧칠한다.
@@ -43,7 +46,7 @@ pub enum Lang {
 }
 
 impl Lang {
-    pub const ALL: [Lang; 17] = [
+    pub const ALL: [Lang; 19] = [
         Lang::Rust,
         Lang::Python,
         Lang::Go,
@@ -58,6 +61,8 @@ impl Lang {
         Lang::Xml,
         Lang::Html,
         Lang::JavaScript,
+        Lang::TypeScript,
+        Lang::Tsx,
         Lang::Css,
         Lang::Properties,
         Lang::Jsp,
@@ -85,6 +90,8 @@ impl Lang {
             "html" | "htm" => Lang::Html,
             "jsp" | "jspf" | "tag" => Lang::Jsp,
             "js" | "mjs" | "cjs" => Lang::JavaScript,
+            "ts" | "mts" | "cts" => Lang::TypeScript,
+            "tsx" => Lang::Tsx,
             "css" => Lang::Css,
             "properties" => Lang::Properties,
             _ => return None,
@@ -107,6 +114,8 @@ impl Lang {
             Lang::Xml => "XML",
             Lang::Html => "HTML",
             Lang::JavaScript => "JavaScript",
+            Lang::TypeScript => "TypeScript",
+            Lang::Tsx => "TSX",
             Lang::Css => "CSS",
             Lang::Properties => "Properties",
             Lang::Jsp => "JSP",
@@ -130,6 +139,8 @@ impl Lang {
             Lang::Xml => "xml",
             Lang::Html => "html",
             Lang::JavaScript => "javascript",
+            Lang::TypeScript => "typescript",
+            Lang::Tsx => "typescriptreact",
             Lang::Css => "css",
             Lang::Properties => "properties",
             Lang::Jsp => "jsp",
@@ -140,7 +151,7 @@ impl Lang {
     pub fn line_comment(self) -> Option<&'static str> {
         match self {
             Lang::Rust | Lang::Go | Lang::C | Lang::Cpp | Lang::Php | Lang::Java => Some("//"),
-            Lang::JavaScript => Some("//"),
+            Lang::JavaScript | Lang::TypeScript | Lang::Tsx => Some("//"),
             Lang::Python | Lang::Toml | Lang::Yaml | Lang::Properties => Some("#"),
             Lang::Sql => Some("--"),
             Lang::Json | Lang::Xml | Lang::Html | Lang::Css | Lang::Jsp => None,
@@ -163,6 +174,8 @@ impl Lang {
             Lang::Xml => tree_sitter_xml::LANGUAGE_XML.into(),
             Lang::Html | Lang::Jsp => tree_sitter_html::LANGUAGE.into(),
             Lang::JavaScript => tree_sitter_javascript::LANGUAGE.into(),
+            Lang::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+            Lang::Tsx => tree_sitter_typescript::LANGUAGE_TSX.into(),
             Lang::Css => tree_sitter_css::LANGUAGE.into(),
             Lang::Properties => tree_sitter_properties::LANGUAGE.into(),
         }
@@ -180,6 +193,22 @@ impl Lang {
                     "{}\n{}",
                     tree_sitter_cpp::HIGHLIGHT_QUERY,
                     tree_sitter_c::HIGHLIGHT_QUERY
+                ));
+            }
+            // TypeScript 쿼리는 TS 고유 규칙만 담고 있어 JS 규칙(TSX는 JSX 규칙도)을 뒤에 붙인다.
+            Lang::TypeScript => {
+                return Cow::Owned(format!(
+                    "{}\n{}",
+                    tree_sitter_typescript::HIGHLIGHTS_QUERY,
+                    tree_sitter_javascript::HIGHLIGHT_QUERY
+                ));
+            }
+            Lang::Tsx => {
+                return Cow::Owned(format!(
+                    "{}\n{}\n{}",
+                    tree_sitter_typescript::HIGHLIGHTS_QUERY,
+                    tree_sitter_javascript::JSX_HIGHLIGHT_QUERY,
+                    tree_sitter_javascript::HIGHLIGHT_QUERY
                 ));
             }
             Lang::Php => tree_sitter_php::HIGHLIGHTS_QUERY,
@@ -572,6 +601,39 @@ mod tests {
             line1.contains(&("// 주석".into(), Highlight::Comment)),
             "{line1:?}"
         );
+    }
+
+    #[test]
+    fn 타입스크립트는_ts_규칙과_js_규칙으로_칠한다() {
+        assert_eq!(Lang::from_path(Path::new("a.ts")), Some(Lang::TypeScript));
+        assert_eq!(Lang::from_path(Path::new("a.tsx")), Some(Lang::Tsx));
+        assert_eq!(Lang::Tsx.lsp_id(), "typescriptreact");
+        let mut buffer = Buffer::new("interface A { n: number }\nconst s = \"x\"; // c\n");
+        buffer.set_track_syntax_edits(true);
+        let mut syntax = Syntax::new(Lang::TypeScript).unwrap();
+        syntax.update(&mut buffer);
+        let line0 = kinds_on_line(&syntax, &buffer, 0);
+        for want in [
+            ("interface", Highlight::Keyword),
+            ("A", Highlight::Type),
+            ("number", Highlight::Type),
+        ] {
+            assert!(line0.contains(&(want.0.into(), want.1)), "{line0:?}");
+        }
+        let line1 = kinds_on_line(&syntax, &buffer, 1);
+        for want in [
+            ("const", Highlight::Keyword),
+            ("\"x\"", Highlight::String),
+            ("// c", Highlight::Comment),
+        ] {
+            assert!(line1.contains(&(want.0.into(), want.1)), "{line1:?}");
+        }
+        let mut buffer = Buffer::new("const e = <div className=\"a\" />;\n");
+        buffer.set_track_syntax_edits(true);
+        let mut syntax = Syntax::new(Lang::Tsx).unwrap();
+        syntax.update(&mut buffer);
+        let line0 = kinds_on_line(&syntax, &buffer, 0);
+        assert!(line0.contains(&("div".into(), Highlight::Tag)), "{line0:?}");
     }
 
     #[test]

@@ -11,7 +11,10 @@ use eframe::egui;
 use ferrite_core::buffer::Buffer;
 use ferrite_core::syntax::{Lang, MAX_SYNTAX_BYTES};
 use ferrite_lsp::catalog::{self, Launch, Server as ServerSpec};
-use ferrite_lsp::client::{LanguageServer, RpcError, ServerEvent, parse_diagnostics};
+use ferrite_lsp::client::{
+    DIAGNOSTIC_REFRESH, LanguageServer, RpcError, ServerEvent, parse_diagnostics,
+    parse_pulled_diagnostics,
+};
 use ferrite_lsp::edits::{FileEdit, parse_workspace_edit};
 use ferrite_lsp::install;
 use ferrite_lsp::position::PositionEncoding;
@@ -63,6 +66,9 @@ struct FanOut {
 }
 
 /// 이 서버가 이 요청을 처리한다고 알렸는가.
+/// 진단을 묻는 요청(LSP 3.17).
+const PULL_DIAGNOSTICS: &str = "textDocument/diagnostic";
+
 fn supports(lsp: &LanguageServer, method: &str) -> bool {
     let Some(c) = lsp.capabilities() else {
         return false;
@@ -71,6 +77,7 @@ fn supports(lsp: &LanguageServer, method: &str) -> bool {
         matches!(provider, Some(OneOf::Left(true) | OneOf::Right(_)))
     }
     match method {
+        PULL_DIAGNOSTICS => c.diagnostic_provider.is_some(),
         "textDocument/completion" => c.completion_provider.is_some(),
         "textDocument/hover" => c
             .hover_provider
@@ -164,6 +171,8 @@ struct Server {
     started: Instant,
     /// 서버에 연 문서와 마지막으로 보낸 LSP 버전.
     opened: HashMap<PathBuf, i32>,
+    /// 진단을 물은(pull) 문서와 그때의 LSP 버전. 버전이 바뀌거나 서버가 다시 물으라고 하면 또 묻는다.
+    pulled: HashMap<PathBuf, i32>,
 }
 
 /// 문서마다 가지는 동기화 상태.
@@ -171,8 +180,9 @@ struct Server {
 pub struct DocSync {
     /// 모든 서버의 진단을 합쳐 위치순으로 정렬한 것.
     pub problems: Vec<Problem>,
-    /// 서버별 진단. 한 서버가 새로 보내면 그 서버 몫만 바꾼다.
-    by_server: Vec<(&'static str, Vec<Problem>)>,
+    /// 서버별 진단(서버, 물어서 받은 것인지). 한 서버가 새로 보내면 그 몫만 바꾼다. 한 서버가 보내 주는
+    /// 진단과 물어서 받는 진단을 섞어 쓸 수 있어 따로 둔다.
+    by_server: Vec<((&'static str, bool), Vec<Problem>)>,
     /// 마지막으로 서버들에 보낸 버퍼 버전.
     sent_version: Option<u64>,
     /// 보내지 않은 변경이 처음 생긴 시각(디바운스 기준).
@@ -189,14 +199,16 @@ impl DocSync {
     pub fn set_problems(
         &mut self,
         server: &'static str,
+        pulled: bool,
         rope: &Rope,
         diagnostics: &[Diagnostic],
         encoding: PositionEncoding,
     ) {
         let problems = to_problems(rope, diagnostics, encoding);
-        match self.by_server.iter_mut().find(|(s, _)| *s == server) {
+        let key = (server, pulled);
+        match self.by_server.iter_mut().find(|(k, _)| *k == key) {
             Some((_, existing)) => *existing = problems,
-            None => self.by_server.push((server, problems)),
+            None => self.by_server.push((key, problems)),
         }
         self.problems = self
             .by_server
@@ -212,6 +224,8 @@ pub enum HubUpdate {
     Diagnostics {
         path: PathBuf,
         server: &'static str,
+        /// 물어서(`textDocument/diagnostic`) 받은 진단이다.
+        pulled: bool,
         diagnostics: Vec<Diagnostic>,
         encoding: PositionEncoding,
     },
@@ -251,6 +265,8 @@ pub struct LspHub {
     relays: HashMap<(&'static str, i64), Relay>,
     /// 허브가 스스로 보낸 요청(응답은 버린다).
     internal: HashSet<(&'static str, i64)>,
+    /// 진단을 물은 요청: (서버, 요청 ID) → 문서.
+    pulls: HashMap<(&'static str, i64), PathBuf>,
     /// jdt.ls 확장이 Spring 프로젝트를 찾아 Spring Boot LS를 띄우라고 알렸다.
     spring_requested: bool,
     /// 실행 중에 죽은 서버(자동 재시작 대기).
@@ -269,6 +285,7 @@ impl LspHub {
             requests: HashMap::new(),
             relays: HashMap::new(),
             internal: HashSet::new(),
+            pulls: HashMap::new(),
             spring_requested: false,
             crashes: HashMap::new(),
             fan_outs: Vec::new(),
@@ -283,6 +300,7 @@ impl LspHub {
             self.requests.clear();
             self.relays.clear();
             self.internal.clear();
+            self.pulls.clear();
             self.spring_requested = false;
             self.crashes.clear();
             self.fan_outs.clear();
@@ -328,6 +346,7 @@ impl LspHub {
         self.requests.retain(|k, _| alive(k));
         self.relays.retain(|k, _| alive(k));
         self.internal.retain(alive);
+        self.pulls.retain(|k, _| alive(k));
         // 빠진 서버에 보낸 것이 있는 묶음은 답이 다 올 수 없어 버린다(서버가 죽으면 요청도 사라진다).
         self.fan_outs.retain(|g| g.waiting.iter().all(alive));
     }
@@ -410,7 +429,7 @@ impl LspHub {
             let Some(server) = self.servers.get_mut(spec.name) else {
                 continue;
             };
-            let Some(lsp) = &server.lsp else {
+            let Some(lsp) = server.lsp.as_mut() else {
                 continue;
             };
             let text = text.get_or_insert_with(|| buffer.text());
@@ -424,6 +443,20 @@ impl LspHub {
                     lsp.did_change_full(path, *lsp_version, text);
                 }
                 Some(_) => up_to_date &= !changed,
+            }
+            // 진단을 묻는 서버(TypeScript 7 등): 보낸 판마다 한 번 묻는다. 준비되기 전에 연 문서는
+            // 준비된 뒤에 묻는다.
+            let sent = server.opened.get(path).copied();
+            if lsp.is_ready()
+                && supports(lsp, PULL_DIAGNOSTICS)
+                && server.pulled.get(path).copied() != sent
+                && let Ok(uri) = ferrite_lsp::uri::path_to_uri(path)
+            {
+                let id = lsp.request(PULL_DIAGNOSTICS, json!({ "textDocument": { "uri": uri } }));
+                self.pulls.insert((spec.name, id), path.to_path_buf());
+                if let Some(sent) = sent {
+                    server.pulled.insert(path.to_path_buf(), sent);
+                }
             }
         }
         if due || up_to_date {
@@ -656,13 +689,33 @@ impl LspHub {
                 };
                 updates.push(HubUpdate::Message(message));
             }
+            ServerEvent::Notification { method, .. } if method == DIAGNOSTIC_REFRESH => {
+                // 다음 동기화 때 열린 문서마다 다시 묻는다.
+                if let Some(server) = self.servers.get_mut(name) {
+                    server.pulled.clear();
+                    self.ctx.request_repaint();
+                }
+            }
             ServerEvent::Notification { method, params } => {
                 if let Some(update) = notification(name, &method, &params, encoding) {
                     updates.push(update);
                 }
             }
             ServerEvent::Response { id, result } => {
-                if let Some(lang) = self.requests.remove(&(name, id)) {
+                if let Some(path) = self.pulls.remove(&(name, id)) {
+                    // 실패(서버가 취소함 등)는 버린다. 다음 판에서 다시 묻는다.
+                    if let Some(diagnostics) =
+                        result.ok().as_ref().and_then(parse_pulled_diagnostics)
+                    {
+                        updates.push(HubUpdate::Diagnostics {
+                            path,
+                            server: name,
+                            pulled: true,
+                            diagnostics,
+                            encoding,
+                        });
+                    }
+                } else if let Some(lang) = self.requests.remove(&(name, id)) {
                     updates.push(HubUpdate::Response {
                         lang,
                         server: name,
@@ -793,6 +846,7 @@ fn start_server(
         state: ServerState::NotInstalled,
         started: Instant::now(),
         opened: HashMap::new(),
+        pulled: HashMap::new(),
     };
     let Some(root) = root else {
         return server;
@@ -828,6 +882,7 @@ fn notification(
             Some(HubUpdate::Diagnostics {
                 path,
                 server,
+                pulled: false,
                 diagnostics,
                 encoding,
             })
@@ -880,12 +935,12 @@ mod tests {
         };
         let mut sync = DocSync::default();
         let utf16 = PositionEncoding::Utf16;
-        sync.set_problems("jdtls", &rope, &[diag(1, "jdt")], utf16);
-        sync.set_problems("spring-boot", &rope, &[diag(0, "spring")], utf16);
+        sync.set_problems("jdtls", false, &rope, &[diag(1, "jdt")], utf16);
+        sync.set_problems("spring-boot", false, &rope, &[diag(0, "spring")], utf16);
         let messages: Vec<_> = sync.problems.iter().map(|p| p.message.as_str()).collect();
         assert_eq!(messages, ["spring", "jdt"], "위치순으로 합친다");
 
-        sync.set_problems("jdtls", &rope, &[], utf16);
+        sync.set_problems("jdtls", false, &rope, &[], utf16);
         let messages: Vec<_> = sync.problems.iter().map(|p| p.message.as_str()).collect();
         assert_eq!(messages, ["spring"], "jdtls 몫만 비운다");
     }
