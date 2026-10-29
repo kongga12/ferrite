@@ -1141,6 +1141,7 @@
     - 화면 폴더의 스크립트를 묶는 jsconfig.json이 있으면 TS 서버가 라이브러리 파일 이름(`jquery-*.js`)을 보고 `@types/jquery`를 npm으로 받아(자동 타입 받기, VS Code와 같다) `$.ajax`·`.val` 완성과 `$` 정의 이동(`misc.d.ts`)이 된다.
     - 자동 타입 받기는 사용자 캐시(Windows `%LOCALAPPDATA%\Microsoft\TypeScript\7.0`)에 묻지 않고 받는다. 한 번 받으면 jsconfig.json이 없는 프로젝트에서도 jQuery를 안다. 결정(사용자): 그대로 두고 문서에 알린다. 인터넷이 막힌 PC는 프로젝트의 `node_modules/@types`에 넣는다.
     - 결정(사용자): 만들기를 제안한다. 화면 폴더(`src/main/webapp`·`WebContent`·`web`)의 `.js`를 열었는데 그 폴더부터 루트까지 jsconfig.json·tsconfig.json이 없으면 에디터 위에 알림과 [jsconfig.json 만들기]·[닫기]를 보인다. 만들면 `{"include": ["<화면 폴더>/**/*.js"]}`를 쓰고 JS 언어 서버를 다시 띄운다. 닫으면 그 프로젝트에서는 앱이 켜진 동안 묻지 않는다.
+    - TypeScript 7은 `jquery-3.7.1.min.js` 같은 `.min.js` 이름으로는 타입을 받지 않는다(`jquery-3.7.1.js`는 받는다). egov 프로젝트는 보통 `.min.js`를 두므로, 화면 폴더에 `jquery*.js`가 있으면 jsconfig.json에 `"typeAcquisition": {"include": ["jquery"]}`를 적는다. CI의 실제 시험이 처음 실패해(빈 캐시에서 jQuery 완성이 오지 않음) 찾았다.
     - 시험: 단위(제안 조건·내용), 창 시험(닫기·만들기), 실제 TypeScript 7(CI 3개 OS 전체 작업의 npm 시험): jsconfig.json이 없으면 다른 스크립트의 전역 함수를 모르고, 있으면 그 함수와 `$.ajax`를 완성한다.
   - 완료 조건 (2) 엔드포인트로 만든 `.http` 요청에서 로그인 쿠키 유지: 8-3의 로컬 서버 시험(로그인 302 → 쿠키 → 이어 보낸 요청)과 창 시험(▶·`Ctrl+Enter`·엔드포인트로 요청 만들기)이 CI 3개 OS에서 통과했다.
   - 완료 조건 (3) JSP 화면 스크립트의 중단점: 8-4의 실제 js-debug 시험(헤드리스 Chrome, `.do` 화면의 인라인 스크립트와 외부 스크립트의 중단점)이 어댑터 워크플로 3개 OS에서 통과했다(실행 40815830231).

@@ -2458,7 +2458,10 @@ impl FerriteApp {
             self.status = format!("이미 있습니다: {}", path.display());
             return;
         }
-        match text_file::write_atomic(&path, ferrite_core::web::jsconfig_text(dir).as_bytes()) {
+        match text_file::write_atomic(
+            &path,
+            ferrite_core::web::jsconfig_text(&root, dir).as_bytes(),
+        ) {
             Ok(()) => {
                 self.status = format!(
                     "jsconfig.json을 만들었습니다({dir}의 스크립트). JS 언어 서버를 다시 띄웁니다"
@@ -6885,7 +6888,10 @@ mod tests {
         harness.get_by_label("jsconfig.json 만들기").click();
         harness.run_ok();
         let text = fs::read_to_string(dir.join("jsconfig.json")).unwrap();
-        assert_eq!(text, ferrite_core::web::jsconfig_text("src/main/webapp"));
+        assert_eq!(
+            text,
+            ferrite_core::web::jsconfig_text(&dir, "src/main/webapp")
+        );
         assert!(harness.query_by_label("jsconfig.json 만들기").is_none());
         assert!(
             harness

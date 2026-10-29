@@ -450,7 +450,7 @@ fn npm에서_받은_typescript_7은_jsconfig가_있으면_화면_폴더의_전�
     let dir = ferrite_core::web::web_dir(&project).unwrap();
     fs::write(
         project.join("jsconfig.json"),
-        ferrite_core::web::jsconfig_text(dir),
+        ferrite_core::web::jsconfig_text(&project, dir),
     )
     .unwrap();
     assert!(
