@@ -230,13 +230,10 @@ pub fn detect(file: Option<&Path>, root: &Path) -> Vec<DebugConfig> {
 /// 컨텍스트 경로(`/app`)가 있으면 그 아래 URL을 webapp 폴더로 맞춘다.
 fn browser_configs(root: &Path) -> Vec<DebugConfig> {
     let url = base_url(root).unwrap_or_else(|| "http://localhost:8080".into());
-    let web_root = ["src/main/webapp", "WebContent", "web"]
-        .iter()
-        .find(|dir| root.join(dir).is_dir())
-        .map_or_else(
-            || "${workspaceFolder}".to_owned(),
-            |dir| format!("${{workspaceFolder}}/{dir}"),
-        );
+    let web_root = crate::web::web_dir(root).map_or_else(
+        || "${workspaceFolder}".to_owned(),
+        |dir| format!("${{workspaceFolder}}/{dir}"),
+    );
     let path = url.split_once("://").map_or(url.as_str(), |(_, rest)| rest);
     let context = path
         .find('/')

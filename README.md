@@ -5,7 +5,7 @@ Rust로 작성한 크로스플랫폼(Windows / macOS / Linux) 경량 IDE.
 
 - 개발 워크플로우와 로드맵: [docs/WORKFLOW.md](docs/WORKFLOW.md)
 
-## 현재 상태: Phase 2·2b·2c·3·4·5·6·7 완료 (LSP 연동, egov 언어 지원·개발도구, 프로젝트 도구, 실행·디버그, DB 도구, 데이터 사이언스, 확장·배포, 3개 OS 검증). 코드 서명·공증은 인증서가 생기면 한다
+## 현재 상태: Phase 2·2b·2c·3·4·5·6·7·8 완료 (LSP 연동, egov 언어 지원·개발도구, 프로젝트 도구, 실행·디버그, DB 도구, 데이터 사이언스, 확장·배포, 웹·API 개발 도구, 3개 OS 검증). 코드 서명·공증은 인증서가 생기면 한다
 
 - 설치 파일: 패키징 워크플로(`Package`)가 Windows(NSIS·MSI)·macOS(dmg)·Linux(deb·AppImage) 설치 파일을 만든다. 아직 서명하지 않아 Windows SmartScreen 경고([추가 정보] → [실행])와 macOS Gatekeeper 차단(오른쪽 단추 → [열기])이 뜬다.
 - WASM 플러그인: 설정 폴더의 `ferrite/plugins/<이름>/`에 `plugin.toml`과 `.wasm`을 넣으면 [플러그인] 메뉴에 명령이, 플러그인 창에 패널이 생긴다. 플러그인은 앱이 넘긴 문서만 보고 파일·네트워크는 못 쓴다. 예제는 `examples/plugins/text-stats`(Rust).
@@ -34,6 +34,8 @@ Rust로 작성한 크로스플랫폼(Windows / macOS / Linux) 경량 IDE.
 - 트리 우클릭: 새 파일·새 폴더·이름 바꾸기·휴지통으로 삭제
 - 가상화 코드 에디터: 100MB 파일도 스크롤·입력 1ms 미만, 줄 번호, 한글 IME 조합 표시
 - 언어 서버(LSP): rust-analyzer로 검증했다. gopls·clangd·basedpyright·phpactor·lemminx(XML)·jdt.ls(Java)도 연결한다. JS·TS는 TypeScript 7, HTML·CSS·JSON은 vscode-langservers-extracted를 npm으로 설치한다(npm 필요, HTML·CSS·JSON은 Node 필요).
+  - egov 화면 스크립트: `<script>`로 따로 불러오는 jQuery와 다른 스크립트의 전역 함수는 jsconfig.json이 있어야 안다. 화면 폴더의 `.js`를 열었는데 없으면 에디터 위에서 만들자고 한다.
+  - TypeScript 서버는 라이브러리 파일 이름(`jquery-*.js` 등)을 보고 타입 정보(`@types`)를 npm으로 사용자 캐시(Windows `%LOCALAPPDATA%\Microsoft\TypeScript\7.0`)에 받는다(VS Code와 같다). 인터넷이 막힌 PC는 프로젝트의 `node_modules/@types`에 넣는다.
   - Java: jdt.ls를 Lombok 에이전트와 함께 띄운다. 서버 실행에 Java 21 이상이 필요하다(JAVA_HOME 또는 PATH). 프로젝트는 Java 8·11이어도 된다.
   - Spring: Spring Boot LS를 설치하면 jdt.ls와 함께 붙는다. Java 진단을 보태고, `application.properties`·`yml`을 검사한다.
   - egov(내장, 설치 불필요): MyBatis·iBatis 매퍼에서 SQL Injection 위험(`${}`, `$prop$`), 정의 안 된 refid·resultMap, 중복 id를 진단한다.
