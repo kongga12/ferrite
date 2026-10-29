@@ -12,6 +12,8 @@ ignore = "0.4.33"
 nucleo-matcher = "0.3.1"
 regex = "1.13.1"
 ropey.workspace = true
+# JUnit XML 테스트 보고서. eframe(글꼴)이 이미 쓰는 판이다.
+roxmltree = "0.21.1"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 similar = "3.2.1"

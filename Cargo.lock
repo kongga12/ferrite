@@ -1632,6 +1632,7 @@ dependencies = [
  "nucleo-matcher",
  "regex",
  "ropey",
+ "roxmltree",
  "serde",
  "serde_json",
  "similar",

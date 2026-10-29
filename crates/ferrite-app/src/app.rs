@@ -596,6 +596,8 @@ pub struct FerriteApp {
     /// HTTP 요청 파일 실행과 응답 창. 창을 다 그린 뒤에 할 요청 일.
     http: crate::http_ui::HttpPanel,
     http_task: Option<crate::http_ui::Task>,
+    /// 테스트 창(테스트 명령 실행, 결과 트리).
+    tests: crate::test_ui::TestPanel,
     /// jsconfig.json을 만들자고 할지 본 문서와 그 결과(화면 폴더). 문서가 바뀌면 다시 본다.
     jsconfig: Option<(PathBuf, Option<&'static str>)>,
     /// jsconfig.json 제안을 닫은 프로젝트 루트(앱이 켜진 동안).
@@ -667,6 +669,7 @@ impl FerriteApp {
             endpoints: Default::default(),
             http: Default::default(),
             http_task: None,
+            tests: Default::default(),
             jsconfig: None,
             jsconfig_dismissed: Default::default(),
             watcher: FsWatcher::new(cc.egui_ctx.clone()).ok(),
@@ -2292,6 +2295,13 @@ impl FerriteApp {
                         ui.close();
                         self.edit_run_configs();
                     }
+                    if ui
+                        .add_enabled(project, egui::Button::new("테스트"))
+                        .clicked()
+                    {
+                        ui.close();
+                        dock::show(&mut self.layout, Pane::Tests);
+                    }
                     ui.separator();
                     let debugging = self.debugger.is_active();
                     let stopped = self.debugger.is_stopped();
@@ -3450,6 +3460,14 @@ impl egui_tiles::Behavior<Pane> for Dock<'_> {
                 None => {}
             },
             Pane::Http => app.http.ui(ui),
+            Pane::Tests => {
+                let root = app.tree.as_ref().map(|t| t.root().to_path_buf());
+                if let Some(crate::test_ui::TestAction::Go(path, line)) =
+                    app.tests.ui(ui, root.as_deref())
+                {
+                    app.on_debug_notice(crate::debug_ui::DebugNotice::Reveal(path, line));
+                }
+            }
             Pane::Plugins => {
                 let key =
                     plugin_doc(&app.docs, app.active).map(|d| (d.path.clone(), d.buffer.version()));
@@ -3500,6 +3518,8 @@ impl eframe::App for FerriteApp {
         // 디버그 중이면 대상을 끝낸다(어댑터가 띄운 브라우저 등). 그 뒤 어댑터에서 받아 담아 둔 화면
         // 스크립트와 어댑터 임시 폴더를 지운다. 브라우저가 늦게 끝나 폴더를 쥐고 있으면 잠깐 기다린다.
         self.debugger.shutdown();
+        self.tests.stop();
+        let _ = std::fs::remove_dir_all(crate::test_ui::reports_dir());
         let _ = std::fs::remove_dir_all(crate::debug_ui::sources_dir());
         let scratch = ferrite_dap::adapters::scratch_dir();
         for _ in 0..20 {
@@ -6898,6 +6918,66 @@ mod tests {
                 .state()
                 .status
                 .contains("jsconfig.json을 만들었습니다")
+        );
+        drop(harness);
+        remove_project(&dir);
+    }
+
+    #[test]
+    fn 테스트_결과를_트리로_보이고_실패_스택의_테스트_줄로_간다() {
+        let dir = std::env::temp_dir().join(format!("ferrite-tests-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let java = dir.join("src/test/java/com/example/board");
+        fs::create_dir_all(&java).unwrap();
+        fs::write(dir.join("pom.xml"), "<project/>").unwrap();
+        let source: String = (1..=30).map(|i| format!("// {i}\n")).collect();
+        fs::write(java.join("CalcTest.java"), &source).unwrap();
+        let report = r#"<testsuite name="com.example.board.CalcTest">
+  <testcase name="adds" classname="com.example.board.CalcTest" time="0.022"/>
+  <testcase name="addsWrong" classname="com.example.board.CalcTest" time="0.004">
+    <failure message="더하기 ==&gt; expected: &lt;4&gt; but was: &lt;3&gt;"><![CDATA[org.opentest4j.AssertionFailedError: 더하기
+	at org.junit.jupiter.api.Assertions.assertEquals(Assertions.java:563)
+	at com.example.board.CalcTest.addsWrong(CalcTest.java:16)
+]]></failure>
+  </testcase>
+</testsuite>"#;
+        let cases = ferrite_core::test_report::parse_junit(report).unwrap();
+        let mut harness = harness_builder()
+            .with_size(egui::vec2(1200.0, 1000.0))
+            .build_eframe(|cc| FerriteApp::new(cc, Some(dir.clone())));
+        harness.run_ok();
+        let config = ferrite_core::run::RunConfig {
+            name: "mvn test".into(),
+            command: "mvn test".into(),
+            cwd: None,
+            env: Default::default(),
+        };
+        {
+            let app = harness.state_mut();
+            app.tests.show_results(config, dir.clone(), cases);
+            dock::show(&mut app.layout, Pane::Tests);
+        }
+        harness.run_ok();
+        // 실패가 있는 묶음은 펼쳐 두고, 실패를 골라 사유를 보인다.
+        harness.get_by_label("com.example.board.CalcTest (실패 1/2)");
+        harness.get_by_label("adds  0.022초");
+        harness.get_by_label("더하기 ==> expected: <4> but was: <3>");
+        assert!(harness.query_by_label("실패만 다시").is_some());
+        // 스택의 테스트 줄을 누르면 그 파일의 그 줄로 간다(라이브러리 프레임이 아니라).
+        harness
+            .get_by_label("at com.example.board.CalcTest.addsWrong(CalcTest.java:16)")
+            .click();
+        harness.run_ok();
+        let app = harness.state();
+        let doc = &app.docs[app.active.unwrap()];
+        assert!(
+            doc.path.ends_with("CalcTest.java"),
+            "{}",
+            doc.path.display()
+        );
+        assert_eq!(
+            doc.buffer.pos_to_line_col(doc.buffer.selection().head).0,
+            15
         );
         drop(harness);
         remove_project(&dir);
