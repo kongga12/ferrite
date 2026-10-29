@@ -367,6 +367,12 @@ impl SymbolSearch {
 pub enum EndpointAction {
     Refresh,
     Go(Jump),
+    /// `http/<컨트롤러>.http`에 이 엔드포인트의 요청을 만든다.
+    MakeRequest {
+        controller: String,
+        path: String,
+        methods: String,
+    },
 }
 
 /// 엔드포인트 하나: (`/경로`, HTTP 메서드들).
@@ -481,11 +487,11 @@ impl Endpoints {
                     .default_open(true)
                     .show(ui, |ui| {
                         for (path, methods, s, encoding) in rows {
-                            let methods = if methods.is_empty() { "ALL" } else { methods };
+                            let shown = if methods.is_empty() { "ALL" } else { methods };
                             let mut job = egui::text::LayoutJob::default();
                             let font = egui::TextStyle::Monospace.resolve(ui.style());
                             job.append(
-                                &format!("{methods:<7}"),
+                                &format!("{shown:<7}"),
                                 0.0,
                                 egui::TextFormat::simple(
                                     font.clone(),
@@ -497,13 +503,26 @@ impl Endpoints {
                                 0.0,
                                 egui::TextFormat::simple(font, ui.visuals().strong_text_color()),
                             );
-                            if ui.selectable_label(false, job).clicked() {
-                                action = Some(EndpointAction::Go((
-                                    s.target.path.clone(),
-                                    s.target.range,
-                                    encoding,
-                                )));
-                            }
+                            ui.horizontal(|ui| {
+                                if ui
+                                    .small_button("요청")
+                                    .on_hover_text("http/<컨트롤러>.http에 이 요청을 만들고 엽니다")
+                                    .clicked()
+                                {
+                                    action = Some(EndpointAction::MakeRequest {
+                                        controller: container.to_owned(),
+                                        path: path.to_owned(),
+                                        methods: methods.to_owned(),
+                                    });
+                                }
+                                if ui.selectable_label(false, job).clicked() {
+                                    action = Some(EndpointAction::Go((
+                                        s.target.path.clone(),
+                                        s.target.range,
+                                        encoding,
+                                    )));
+                                }
+                            });
                         }
                     });
             }

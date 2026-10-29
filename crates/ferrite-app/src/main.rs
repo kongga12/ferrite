@@ -17,6 +17,7 @@ mod find_in_files;
 mod fonts;
 mod frame_ui;
 mod git_ui;
+mod http_ui;
 mod lsp_hub;
 mod lsp_ui;
 mod mapper_db;

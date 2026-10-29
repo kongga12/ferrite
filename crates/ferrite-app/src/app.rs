@@ -56,6 +56,8 @@ const CODE_ACTION: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, 
 const CODE_ACTION_ALT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::ALT, Key::Enter);
 const QUICK_OPEN: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::P);
 const SYMBOL_SEARCH: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::T);
+/// `.http` 파일에서 커서가 든 요청을 보낸다.
+const RUN_REQUEST: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Enter);
 const OUTLINE: KeyboardShortcut =
     KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::O);
 const SOURCE_CONTROL: KeyboardShortcut =
@@ -333,6 +335,8 @@ struct Document {
     git_marks: Vec<(usize, ferrite_core::git::LineChange)>,
     /// git_marks를 계산한 (버퍼 버전, 기준 내용 세대). 바뀌면 다시 계산한다.
     git_key: Option<(u64, u64)>,
+    /// `.http` 파일이면 (센 버퍼 버전, 요청 줄). 거터에 ▶를 그린다.
+    http_runs: Option<(u64, Vec<usize>)>,
     /// .ipynb면 노트북 보기(버퍼 위에 셀을 보인다).
     notebook: Option<crate::notebook_ui::NotebookView>,
     /// tree-sitter 언어가 없는 파일의 언어 확장(플러그인 폴더)과 그 TextMate 강조.
@@ -365,6 +369,7 @@ impl Document {
             lsp: DocSync::default(),
             git_marks: Vec::new(),
             git_key: None,
+            http_runs: None,
             notebook,
             ext: None,
             textmate: None,
@@ -588,6 +593,9 @@ pub struct FerriteApp {
     outline: crate::symbols_ui::Outline,
     symbol_search: crate::symbols_ui::SymbolSearch,
     endpoints: crate::symbols_ui::Endpoints,
+    /// HTTP 요청 파일 실행과 응답 창. 창을 다 그린 뒤에 할 요청 일.
+    http: crate::http_ui::HttpPanel,
+    http_task: Option<crate::http_ui::Task>,
     /// 감시를 시작하지 못한 환경(권한 등)에서는 없다. 그래도 편집은 된다.
     watcher: Option<FsWatcher>,
 }
@@ -653,6 +661,8 @@ impl FerriteApp {
             outline: Default::default(),
             symbol_search: Default::default(),
             endpoints: Default::default(),
+            http: Default::default(),
+            http_task: None,
             watcher: FsWatcher::new(cc.egui_ctx.clone()).ok(),
             name_prompt: None,
             confirm_delete: None,
@@ -1963,6 +1973,15 @@ impl FerriteApp {
 
     /// 거터 클릭: 왼쪽 단추는 중단점 켜고 끄기, 오른쪽 단추는 조건 고치기.
     fn on_gutter_click(&mut self, path: PathBuf, line: usize, secondary: bool) {
+        if let Some(doc) = self.docs.iter().find(|d| d.path == path)
+            && let Some((_, runs)) = &doc.http_runs
+        {
+            // 요청 파일의 거터는 중단점 대신 ▶(요청 보내기)다.
+            if !secondary && runs.contains(&line) {
+                self.http_task = Some(crate::http_ui::Task::Run { path, line });
+            }
+            return;
+        }
         let line = line + 1;
         if secondary {
             let condition = self
@@ -2385,6 +2404,10 @@ impl FerriteApp {
                         ui.close();
                         dock::show(&mut self.layout, Pane::Endpoints);
                     }
+                    if ui.button("HTTP 응답").clicked() {
+                        ui.close();
+                        dock::show(&mut self.layout, Pane::Http);
+                    }
                 });
                 ui.menu_button("플러그인", |ui| {
                     if let Some(choice) = self.plugins.menu_ui(ui) {
@@ -2414,6 +2437,82 @@ impl FerriteApp {
                 }
             }
         }
+    }
+
+    /// HTTP 요청 일을 한다. 응답 창을 앞으로 가져오므로 창을 다 그린 뒤에 부른다.
+    fn apply_http_task(&mut self, ctx: &egui::Context) {
+        match self.http_task.take() {
+            Some(crate::http_ui::Task::Run { path, line }) => {
+                let Some(doc) = self.docs.iter().find(|d| d.path == path) else {
+                    return;
+                };
+                let root = self.tree.as_ref().map(|t| t.root().to_path_buf());
+                self.http
+                    .run(ctx, &path, &doc.buffer.text(), line, root.as_deref());
+                dock::show(&mut self.layout, Pane::Http);
+            }
+            Some(crate::http_ui::Task::Make {
+                controller,
+                path,
+                methods,
+            }) => self.make_request(&controller, &path, &methods),
+            None => {}
+        }
+    }
+
+    /// 엔드포인트의 요청을 `http/<컨트롤러>.http` 끝에 더하고(이미 있으면 찾기만) 그 줄로 간다. 환경
+    /// 파일이 없으면 견본을 만든다. 더한 요청은 사용자가 저장한다.
+    fn make_request(&mut self, controller: &str, path: &str, methods: &str) {
+        let Some(root) = self.tree.as_ref().map(|t| t.root().to_path_buf()) else {
+            return;
+        };
+        let dir = root.join("http");
+        let file = dir.join(crate::http_ui::request_file_name(controller));
+        let created = std::fs::create_dir_all(&dir).and_then(|()| {
+            if ferrite_http::env::load(&dir, Some(&root)).0.dir.is_none() {
+                text_file::write_atomic(
+                    &dir.join(ferrite_http::env::PUBLIC),
+                    crate::http_ui::ENV_TEMPLATE.as_bytes(),
+                )?;
+            }
+            if !file.exists() {
+                text_file::write_atomic(&file, b"")?;
+            }
+            Ok(())
+        });
+        if let Err(e) = created {
+            self.status = format!("요청 파일을 만들지 못했습니다: {e}");
+            return;
+        }
+        self.open_file(file.clone());
+        let target = real_path(&file);
+        let Some(i) = self.docs.iter().position(|d| d.path == target) else {
+            return;
+        };
+        let (block, request_line) = crate::http_ui::request_block(controller, path, methods);
+        let find = |text: &str| text.lines().position(|l| l.trim() == request_line);
+        let doc = &mut self.docs[i];
+        let line = match find(&doc.buffer.text()) {
+            Some(line) => line,
+            None => {
+                let text = doc.buffer.text();
+                let gap = if text.is_empty() || text.ends_with("\n\n") {
+                    ""
+                } else if text.ends_with('\n') {
+                    "\n"
+                } else {
+                    "\n\n"
+                };
+                doc.buffer
+                    .set_selection(Selection::caret(doc.buffer.len_chars()));
+                doc.buffer.insert(&format!("{gap}{block}"), Instant::now());
+                find(&doc.buffer.text()).unwrap_or(0)
+            }
+        };
+        let pos = doc.buffer.line_col_to_pos(line, 0);
+        doc.buffer.set_selection(Selection::caret(pos));
+        doc.view.reveal_cursor();
+        self.focus_editor = true;
     }
 
     /// 플러그인이 시킨 일을 한다. 창 배치를 바꾸므로 창을 다 그린 뒤에 부른다.
@@ -2928,6 +3027,7 @@ impl FerriteApp {
         // 스크린리더가 에디터를 "현재 탭 이름"으로 읽도록 에디터를 활성 탭에 연결한다.
         let mut active_tab = None;
         let mut gutter_click = None;
+        let mut run_request = None;
         ui.scope(|ui| {
             egui::ScrollArea::horizontal()
                 .id_salt("tabs")
@@ -2991,6 +3091,17 @@ impl FerriteApp {
                 });
                 doc.git_key = Some(key);
             }
+            if crate::http_ui::is_http_file(&doc.path)
+                && doc
+                    .http_runs
+                    .as_ref()
+                    .is_none_or(|(version, _)| *version != doc.buffer.version())
+            {
+                doc.http_runs = Some((
+                    doc.buffer.version(),
+                    crate::http_ui::run_lines(&doc.buffer.text()),
+                ));
+            }
             // 어댑터가 걸 수 없다고 한 중단점은 빈 점으로 보인다(디버그 중일 때).
             let marks: Vec<(usize, BreakpointMark)> = self
                 .breakpoints
@@ -3038,8 +3149,20 @@ impl FerriteApp {
                     .location()
                     .filter(|(path, _)| *path == doc.path)
                     .map(|(_, line)| line),
+                run_lines: doc
+                    .http_runs
+                    .as_ref()
+                    .map_or(&[], |(_, lines)| lines.as_slice()),
             };
             let id = ui.make_persistent_id(&doc.path);
+            // 에디터가 Enter를 받기 전에 가로챈다.
+            if doc.http_runs.is_some()
+                && ui.memory(|m| m.has_focus(id))
+                && ui.input_mut(|i| i.consume_shortcut(&RUN_REQUEST))
+            {
+                let line = doc.buffer.pos_to_line_col(doc.buffer.selection().head).0;
+                run_request = Some((doc.path.clone(), line));
+            }
             if std::mem::take(&mut self.focus_editor) {
                 ui.memory_mut(|m| m.request_focus(id));
             }
@@ -3074,6 +3197,9 @@ impl FerriteApp {
         }
         if let Some((path, line, secondary)) = gutter_click {
             self.on_gutter_click(path, line, secondary);
+        }
+        if let Some((path, line)) = run_request {
+            self.http_task = Some(crate::http_ui::Task::Run { path, line });
         }
         if let Some(action) = find_action {
             self.run_find_action(action);
@@ -3232,8 +3358,20 @@ impl egui_tiles::Behavior<Pane> for Dock<'_> {
                 Some(crate::symbols_ui::EndpointAction::Go((path, range, encoding))) => {
                     app.navigate_to(&path, range, encoding);
                 }
+                Some(crate::symbols_ui::EndpointAction::MakeRequest {
+                    controller,
+                    path,
+                    methods,
+                }) => {
+                    app.http_task = Some(crate::http_ui::Task::Make {
+                        controller,
+                        path,
+                        methods,
+                    });
+                }
                 None => {}
             },
+            Pane::Http => app.http.ui(ui),
             Pane::Plugins => {
                 let key =
                     plugin_doc(&app.docs, app.active).map(|d| (d.path.clone(), d.buffer.version()));
@@ -3332,6 +3470,7 @@ impl eframe::App for FerriteApp {
         layout.ui(&mut Dock(self), ui);
         self.layout = layout;
         self.apply_plugin_actions();
+        self.apply_http_task(&ctx);
         let root = self.tree.as_ref().map(|t| t.root().to_path_buf());
         match self.symbol_search.ui(&ctx, root.as_deref()) {
             Some(crate::symbols_ui::SearchAction::Query(query)) => {
@@ -6443,6 +6582,158 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(25));
         }
         assert!(harness.state().docs[0].git_marks.is_empty());
+        drop(harness);
+        remove_project(&dir);
+    }
+
+    /// 로그인(302 + 세션 쿠키) 뒤 쿠키가 있어야 답하는 로컬 서버.
+    fn http_login_server() -> u16 {
+        use std::io::{BufRead, BufReader, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let mut reader = BufReader::new(&stream);
+                let mut head = Vec::new();
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 || line.trim().is_empty() {
+                        break;
+                    }
+                    head.push(line.trim().to_owned());
+                }
+                let first = head.first().cloned().unwrap_or_default();
+                let cookie = head.iter().any(|h| h.eq_ignore_ascii_case("cookie: sid=1"));
+                let (status, extra, body) = if first.starts_with("GET /login ") {
+                    (
+                        "302 Found",
+                        "Location: /me\r\nSet-Cookie: sid=1\r\n",
+                        String::new(),
+                    )
+                } else if first.starts_with("GET /me ") && cookie {
+                    (
+                        "200 OK",
+                        "Content-Type: application/json; charset=UTF-8\r\n",
+                        r#"{"user":"관리자"}"#.to_owned(),
+                    )
+                } else {
+                    ("401 Unauthorized", "", String::new())
+                };
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 {status}\r\n{extra}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+        });
+        port
+    }
+
+    #[test]
+    fn 요청_파일을_보내고_응답_창에_보이며_엔드포인트로_요청을_만든다() {
+        use egui::accesskit::Role;
+
+        let port = http_login_server();
+        let dir = std::env::temp_dir().join(format!("ferrite-http-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join(".git")).unwrap();
+        fs::create_dir_all(dir.join("http")).unwrap();
+        fs::write(
+            dir.join("http").join(ferrite_http::env::PUBLIC),
+            format!(r#"{{"dev": {{"base": "http://127.0.0.1:{port}"}}}}"#),
+        )
+        .unwrap();
+        fs::write(
+            dir.join("http").join(ferrite_http::env::PRIVATE),
+            r#"{"dev": {"path": "/me"}}"#,
+        )
+        .unwrap();
+        let file = dir.join("http").join("login.http");
+        fs::write(
+            &file,
+            "### 로그인\nGET {{base}}/login\n\n### 내 정보\nGET {{base}}{{path}}\n",
+        )
+        .unwrap();
+
+        let mut harness = harness_builder()
+            .with_size(egui::vec2(1200.0, 800.0))
+            .build_eframe(|cc| FerriteApp::new(cc, Some(dir.clone())));
+        harness.state_mut().open_file(file.clone());
+        harness.run_ok();
+        assert_eq!(
+            harness.state().docs[0]
+                .http_runs
+                .as_ref()
+                .map(|(_, l)| l.clone()),
+            Some(vec![1, 4]),
+            "요청 줄에 ▶"
+        );
+
+        // 쿠키가 없으면 401, 거터 ▶로 로그인하면 302를 따라가 쿠키와 함께 200을 받는다.
+        let path = harness.state().docs[0].path.clone();
+        harness.state_mut().on_gutter_click(path.clone(), 4, false);
+        assert!(run_until(&mut harness, |app| app.http.done()));
+        assert!(dock::is_shown(&harness.state().layout, Pane::Http));
+        harness.get_by_label("401 Unauthorized");
+        harness.state_mut().on_gutter_click(path.clone(), 2, false);
+        harness.run_ok();
+        assert!(
+            !harness.state().http.running(),
+            "▶가 아닌 줄은 보내지 않는다"
+        );
+        harness.state_mut().on_gutter_click(path, 1, false);
+        assert!(run_until(&mut harness, |app| app.http.done()));
+        harness.get_by_label("200 OK");
+        harness.get_by_label("쿠키 1개 지우기");
+
+        // Ctrl+Enter: 커서가 든 요청(둘째)을 보낸다. 개인 환경 파일의 값도 채운다.
+        harness
+            .get_by_role_and_label(Role::MultilineTextInput, "login.http")
+            .focus();
+        harness.run_ok();
+        {
+            let doc = &mut harness.state_mut().docs[0];
+            let pos = doc.buffer.line_col_to_pos(4, 3);
+            doc.buffer.set_selection(Selection::caret(pos));
+        }
+        harness.key_press_modifiers(Modifiers::COMMAND, Key::Enter);
+        assert!(run_until(&mut harness, |app| app.http.done()));
+        assert!(
+            !harness.state().docs[0].is_dirty(),
+            "Ctrl+Enter는 줄을 나누지 않는다"
+        );
+        harness.get_by_label("200 OK");
+        assert_eq!(
+            harness.state().http.body(),
+            Some("{\n  \"user\": \"관리자\"\n}")
+        );
+
+        // 개인 환경 파일이 git에서 빠지지 않았으면 경고하고, 누르면 .gitignore에 더한다.
+        harness.get_by_label(".gitignore에 더하기").click();
+        harness.run_ok();
+        assert!(ferrite_http::env::ignored_by_git(&dir));
+        assert!(harness.query_by_label(".gitignore에 더하기").is_none());
+
+        // 엔드포인트로 요청 만들기: 컨트롤러 파일 끝에 더하고, 다시 하면 더하지 않고 찾아간다.
+        for _ in 0..2 {
+            harness.state_mut().http_task = Some(crate::http_ui::Task::Make {
+                controller: "BoardController".into(),
+                path: "/board/save.do".into(),
+                methods: "POST".into(),
+            });
+            harness.run_ok();
+        }
+        let app = harness.state();
+        let doc = &app.docs[app.active.unwrap()];
+        assert!(doc.path.ends_with("http/BoardController.http"));
+        assert_eq!(
+            doc.buffer.text(),
+            "### BoardController /board/save.do\nPOST {{baseUrl}}/board/save.do\nContent-Type: application/x-www-form-urlencoded\n\n"
+        );
+        assert_eq!(
+            doc.buffer.pos_to_line_col(doc.buffer.selection().head),
+            (1, 0)
+        );
         drop(harness);
         remove_project(&dir);
     }

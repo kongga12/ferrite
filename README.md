@@ -23,6 +23,12 @@ Rust로 작성한 크로스플랫폼(Windows / macOS / Linux) 경량 IDE.
 - 통합 터미널(`` Ctrl+` ``): 탭 여러 개, Windows는 ConPTY(PowerShell), 한글 입출력, 256색·트루컬러, 복사(고른 글자)·붙여넣기
 - 파일로 이동(`Ctrl+P`): 파일 이름 퍼지 검색. 파일에서 찾기(`Ctrl+Shift+F`): 프로젝트 전체 검색(대소문자·단어·정규식·파일 패턴, UTF-8·CP949 파일). 둘 다 `.gitignore`를 따른다.
 - 기호: 개요 창(`Ctrl+Shift+O`, 지금 파일의 기호 나무), 기호로 이동(`Ctrl+T`, 떠 있는 언어 서버 모두에서 찾기), 엔드포인트 창(`도구 > 엔드포인트`, 컨트롤러별 URL·HTTP 메서드. Spring Boot LS가 없는 egov 3.x는 내장 egov 서버가 `@RequestMapping` 계열을 모은다).
+- HTTP 요청 파일(`.http`): `###`로 나눈 요청을 거터 ▶나 `Ctrl+Enter`로 보내고 HTTP 응답 창에서 상태·걸린 시간·헤더·본문을 본다.
+  - `{{변수}}`는 파일 변수(`@이름 = 값`), 환경 파일(`http-client.env.json`, 비밀 값은 `http-client.private.env.json`), `{{$uuid}}`·`{{$timestamp}}`로 채운다. 개인 환경 파일이 `.gitignore`에 없으면 알리고 더한다.
+  - 쿠키를 앱이 켜진 동안 둔다(egov 로그인 뒤 `.do` 요청). 리다이렉트를 따라가며 거치는 응답의 쿠키도 담는다.
+  - JSON은 키 차례 그대로 들여 쓰고, 본문은 응답 문자 집합대로 푼다(없으면 UTF-8, 아니면 EUC-KR).
+  - OS 인증서 저장소와 `HTTPS_PROXY`를 따른다. 자체 서명 인증서는 요청 위에 `# @insecure`를 적었을 때만 받는다. `# @no-redirect`·`# @no-cookie-jar`도 있다.
+  - 엔드포인트 창의 [요청]은 `http/<컨트롤러>.http`에 그 URL의 요청을 만든다(환경 파일이 없으면 견본도).
 - 트리 우클릭: 새 파일·새 폴더·이름 바꾸기·휴지통으로 삭제
 - 가상화 코드 에디터: 100MB 파일도 스크롤·입력 1ms 미만, 줄 번호, 한글 IME 조합 표시
 - 언어 서버(LSP): rust-analyzer로 검증했다. gopls·clangd·basedpyright·phpactor·lemminx(XML)·jdt.ls(Java)도 연결한다. JS·TS는 TypeScript 7, HTML·CSS·JSON은 vscode-langservers-extracted를 npm으로 설치한다(npm 필요, HTML·CSS·JSON은 Node 필요).
@@ -68,6 +74,7 @@ Rust로 작성한 크로스플랫폼(Windows / macOS / Linux) 경량 IDE.
 | 찾기 / 바꾸기 / 다음·이전 | `Ctrl+F` / `Ctrl+H` / `F3`·`Shift+F3` |
 | 파일로 이동 / 파일에서 찾기 | `Ctrl+P` / `Ctrl+Shift+F` |
 | 기호로 이동 / 개요 | `Ctrl+T` / `Ctrl+Shift+O` |
+| HTTP 요청 보내기(`.http`) | `Ctrl+Enter` |
 | 터미널 열기·숨기기 | `` Ctrl+` `` (macOS도 Ctrl) |
 | 소스 제어(Git) | `Ctrl+Shift+G` |
 | 실행 취소 / 다시 실행 | `Ctrl+Z` / `Ctrl+Y`, `Ctrl+Shift+Z` |

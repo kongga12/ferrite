@@ -79,6 +79,8 @@ pub struct EditorOptions<'a> {
     pub breakpoints: &'a [(usize, BreakpointMark)],
     /// 디버거가 멈춘 줄(0부터). 줄 배경과 거터 화살표로 보인다.
     pub debug_line: Option<usize>,
+    /// 실행할 수 있는 줄(0부터 순, `.http`의 요청 줄). 거터 왼쪽에 초록 ▶로 보인다.
+    pub run_lines: &'a [usize],
 }
 
 /// 앱이 언어 서버 기능을 붙이는 데 쓰는 정보.
@@ -261,6 +263,7 @@ pub fn show(
 }
 
 const BREAKPOINT_RED: Color32 = Color32::from_rgb(220, 60, 60);
+const RUN_GREEN: Color32 = Color32::from_rgb(60, 170, 90);
 
 /// 디버거가 멈춘 줄의 배경(노랑, 글자가 읽히게 옅게).
 fn debug_line_color(dark: bool) -> Color32 {
@@ -744,6 +747,18 @@ fn paint(
             geom.line_y(line) + geom.row_height / 2.0,
         );
         let radius = geom.row_height * 0.3;
+        if opts.run_lines.binary_search(&line).is_ok() {
+            let r = radius * 1.2;
+            painter.add(egui::Shape::convex_polygon(
+                vec![
+                    center + Vec2::new(-r * 0.7, -r),
+                    center + Vec2::new(r, 0.0),
+                    center + Vec2::new(-r * 0.7, r),
+                ],
+                RUN_GREEN,
+                Stroke::NONE,
+            ));
+        }
         if let Ok(i) = opts
             .breakpoints
             .binary_search_by_key(&line, |(marked, _)| *marked)
