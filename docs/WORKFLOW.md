@@ -1164,7 +1164,27 @@
 **완료 조건**: egov 표본 프로젝트에서 `mvn test` 결과가 트리로 보이고 실패 테스트의 줄로 간다. SpotBugs가 낸 SARIF가 문제 창에 뜬다. 알려진 취약 버전(예: log4j 2.14.1)을 쓰는 pom에 경고가 뜨고, 오프라인 DB로도 같다. 3개 OS.
 
 **진행 단계**:
-- [ ] 9-1 테스트 러너(JUnit XML·`go test -json` 결과 트리) — 중간
+- [x] 9-1 테스트 러너(JUnit XML·`go test -json` 결과 트리) — 중간
+  - 결정(사용자): 테스트 창이 명령을 직접 띄운다(끝남·종료 코드를 알고 `go test -json`의 표준 출력을 읽는다), JUnit XML은 roxmltree 0.21.1(eframe이 이미 쓰는 판), 대상은 계획대로 Maven·Gradle·pytest·CTest·Go, 실패를 누르면 스택의 테스트 줄로
+  - 테스트 창([실행 > 테스트]): 실행 구성(자동 감지·`.ferrite/run.toml`) 중 테스트 도구로 알 수 있는 명령을 고른다(`mvn test`·`gradle test`·`python -m pytest`·`ctest`·`go test`).
+    - [실행]·[실패만 다시]·[멈춤]. 결과·출력은 위 [결과]·[출력]으로 바꿔 보인다(창이 낮아도 다 보이게). 시작하면 출력, 결과가 오면 결과를 보인다.
+    - 결과 트리: 묶음(클래스·pytest 모듈·Go 패키지)마다 통과·실패·건너뜀과 걸린 시간. 실패가 있는 묶음은 펼쳐 둔다. 고르면 오른쪽에 사유·스택(누르면 그 줄로, 테스트 줄은 굵게)·전체 글. 실패를 두 번 누르면 테스트 줄로 간다.
+    - 출력은 줄마다 문자 집합을 맞춘다(Windows의 Maven은 CP949로 쓴다). `go test -json`은 사건 안의 출력만 보인다.
+    - [멈춤]은 셸이 띄운 자식까지 끝낸다(Windows `taskkill /T`, 그 밖은 프로세스 묶음).
+  - 보고서(`ferrite-core` `test_report`)
+    - 명령에 보고서 옵션을 붙인다: pytest `--junitxml`, CTest `--output-junit`(앱 임시 폴더), Go `-json`. Maven·Gradle은 원래 남긴다.
+    - 이번 실행의 보고서만 읽는다(시작 뒤 고친 파일): Maven `target/surefire-reports`·`failsafe-reports`의 `TEST-*.xml`, Gradle `build/test-results`.
+    - JUnit XML: `failure`·`error`는 실패, `skipped`는 건너뜀. 실패의 `system-out`(CTest는 여기에만 출력)을 붙인다.
+    - CTest(CMake의 JUnit 쓰기를 따름): `status="disabled"`는 건너뜀, `status="notrun"`은 돌리지 못한 것이라 CTest처럼 실패로 센다(사유는 `<skipped message>`). 다만 `SKIP_RETURN_CODE`·`SKIP_REGULAR_EXPRESSION`으로 건너뛴 것은 건너뜀.
+    - 자동 감지한 CTest 구성은 `ctest --test-dir build -C Debug`다. Windows의 Visual Studio 생성기(다중 구성)는 `-C`가 없으면 테스트를 하나도 돌리지 않는다(CI의 실제 시험이 Windows에서만 모두 "건너뜀"으로 나와 찾았다).
+    - `go test -json`: 부속 테스트, Go 1.24의 빌드 출력(`build-output`)과 빌드 실패는 "(패키지)" 실패로.
+  - 실패만 다시: Maven `-Dtest=클래스#메서드+메서드 -Dsurefire.failIfNoSpecifiedTests=false`, Gradle `--tests 클래스.메서드`, pytest `--lf`, CTest `--rerun-failed`, Go `-run "^(이름들)$" 패키지들`. 받은 결과를 앞 결과에 덮어 쓴다.
+  - 줄 찾기: Java는 스택에서 테스트 클래스의 프레임을 골라 패키지 경로(`com/example/CalcTest.java`)로 파일을 찾는다(Gradle의 `app//` 앞붙이, 안쪽 클래스). pytest는 마지막 `파일.py:줄:`, Go는 `파일_test.go:줄:`.
+  - 검증
+    - 단위: 실제 Surefire 3.5.4 보고서(로컬 Maven으로 오프라인 실행)와 Gradle·pytest(xunit2)·CTest·`go test -json` 형식, 도구 알아내기, 보고서 옵션·실패만 다시 명령, 이번 실행의 보고서 찾기, 줄 찾기
+    - 창 시험(kittest): 결과 트리와 실패 사유, 스택의 테스트 줄을 눌러 그 파일 그 줄로
+    - 실제 도구(CI 3개 OS 전체 작업): Maven(JUnit 5)·pytest·Go·CTest를 돌려 결과·테스트 줄을 확인하고 실패만 다시 돌려 실패한 것만 도는지 본다.
+  - 남은 것: Gradle 실제 실행은 CI에서 돌리지 않았다(형식 표본으로 확인), Kotlin·Scala 스택은 같은 꼴이라 읽지만 확인하지 않았다
 - [ ] 9-2 SARIF 결과 가져오기 — 작음
 - [ ] 9-3 의존성 취약점 검사(OSV, 오프라인 DB) — 중간
 - [ ] 3개 OS 검증

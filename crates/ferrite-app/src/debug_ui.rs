@@ -823,7 +823,7 @@ fn run_build(line: &str, dir: &Path) -> Result<String, String> {
 }
 
 /// 명령 줄을 실행할 플랫폼 셸(터미널의 실행 구성과 같다).
-fn shell(line: &str) -> Command {
+pub(crate) fn shell(line: &str) -> Command {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;

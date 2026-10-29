@@ -31,6 +31,7 @@ mod servers;
 mod sql_console;
 mod symbols_ui;
 mod terminal_ui;
+mod test_ui;
 mod theme;
 mod update_ui;
 mod watcher;

@@ -118,8 +118,8 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: '3.13'
-      - name: DAP·노트북 시험용 debugpy·ipykernel·pandas 설치
-        run: python -m pip install --disable-pip-version-check debugpy==1.8.22 ipykernel==7.4.0 pandas==3.1.0
+      - name: DAP·노트북·테스트 러너 시험용 debugpy·ipykernel·pandas·pytest 설치
+        run: python -m pip install --disable-pip-version-check debugpy==1.8.22 ipykernel==7.4.0 pandas==3.1.0 pytest==8.4.2
       # DB 시험의 임시 PostgreSQL 클러스터용. Ubuntu·Windows 러너에는 깔려 있고 macOS에는 없다.
       - name: PostgreSQL 설치(macOS)
         if: runner.os == 'macOS'
@@ -133,6 +133,17 @@ jobs:
           node-version: '22'
       - name: 웹 언어 서버 설치 시험(npm)
         run: cargo test -p ferrite-lsp --test download npm -- --ignored --nocapture
+      # 테스트 러너: 실제 Maven(JUnit 5)·pytest·Go·CTest를 돌려 보고서를 읽고 실패만 다시 돌린다.
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+          cache: false
+      - name: 테스트 러너 시험(Maven·pytest·Go·CTest)
+        run: cargo test -p ferrite-core --test test_tools -- --ignored --nocapture --test-threads=1
       - run: cargo build --release
       - name: 실행 파일 업로드 (OS별 수동 검증용)
         uses: actions/upload-artifact@v4

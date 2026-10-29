@@ -170,7 +170,8 @@ pub fn detect(root: &Path) -> Vec<RunConfig> {
             [
                 "cmake -S . -B build",
                 "cmake --build build",
-                "ctest --test-dir build",
+                // 다중 구성 빌드(Visual Studio·Xcode)는 구성을 골라야 테스트를 돌린다. 한 구성 빌드에는 상관없다.
+                "ctest --test-dir build -C Debug",
             ]
             .map(String::from),
         );
