@@ -1,0 +1,13 @@
+[package]
+name = "ferrite-http"
+description = "Ferrite HTTP 요청 파일(.http): 해석, 변수·환경 파일, 보내기(쿠키·리다이렉트·문자 집합)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+encoding_rs.workspace = true
+serde_json = "1.0.154"
+# 언어 서버 받기와 같은 설정: OS 인증서 저장소로 TLS를 검증한다. 프록시는 HTTPS_PROXY 등을 따른다.
+ureq = { version = "3.5.0", default-features = false, features = ["rustls", "platform-verifier"] }

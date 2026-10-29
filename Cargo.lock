@@ -1592,6 +1592,7 @@ dependencies = [
  "ferrite-dap",
  "ferrite-db",
  "ferrite-egov",
+ "ferrite-http",
  "ferrite-lsp",
  "ferrite-notebook",
  "ferrite-plugin",
@@ -1691,6 +1692,15 @@ dependencies = [
  "tree-sitter-java",
  "tree-sitter-xml",
  "zip",
+]
+
+[[package]]
+name = "ferrite-http"
+version = "0.1.0"
+dependencies = [
+ "encoding_rs",
+ "serde_json",
+ "ureq",
 ]
 
 [[package]]
