@@ -862,3 +862,115 @@ fn 코퍼스의_spring_xml_진단_통계() {
     }
     eprintln!("플레이스홀더 {resolved}/{placeholders} 이동");
 }
+
+#[test]
+#[ignore = "로컬 egov 코퍼스가 필요하다(FERRITE_EGOV_CORPUS)"]
+fn 코퍼스의_요청_매핑을_엔드포인트로_빠짐없이_모은다() {
+    let Some(root) = std::env::var_os("FERRITE_EGOV_CORPUS") else {
+        eprintln!("FERRITE_EGOV_CORPUS가 없어 건너뜁니다");
+        return;
+    };
+    const MAPPINGS: [&str; 6] = [
+        "@RequestMapping",
+        "@GetMapping",
+        "@PostMapping",
+        "@PutMapping",
+        "@DeleteMapping",
+        "@PatchMapping",
+    ];
+    let (mut controllers, mut endpoints, mut annotated) = (0, 0, 0);
+    let mut missed = Vec::new();
+    for path in files(Path::new(&root), &["java"]) {
+        let Ok(bytes) = text_file::read(&path) else {
+            continue;
+        };
+        let Ok(content) = text_file::decode(&bytes) else {
+            continue;
+        };
+        let text = content.text;
+        if !text.contains("@Controller") && !text.contains("@RestController") {
+            continue;
+        }
+        controllers += 1;
+        // 단순 검사기: 주석을 뺀 글에서 줄 처음의 매핑 애너테이션 수(클래스에 붙은 것 포함). 닫지 않은
+        // `/**`로 메서드가 통째로 주석이 된 파일이 있다.
+        let code = strip_comments(&text);
+        let lines = code
+            .lines()
+            .filter(|l| {
+                let l = l.trim_start();
+                MAPPINGS.iter().any(|m| {
+                    l.strip_prefix(m)
+                        .is_some_and(|rest| !rest.starts_with(|c: char| c.is_alphanumeric()))
+                })
+            })
+            .count();
+        let file = ferrite_egov::java::parse_file(&text);
+        let found: usize = file.types.iter().map(|t| t.endpoints.len()).sum();
+        // 클래스 선언 줄 앞의 매핑은 클래스에 붙은 공통 경로다.
+        let class_line = code
+            .lines()
+            .position(|l| l.contains(" class ") || l.trim_start().starts_with("class "))
+            .unwrap_or(0);
+        let class_level = code
+            .lines()
+            .take(class_line)
+            .filter(|l| MAPPINGS.iter().any(|m| l.trim_start().starts_with(m)))
+            .count();
+        annotated += lines;
+        endpoints += found;
+        // 클래스에 붙은 매핑을 빼도 메서드 매핑보다 엔드포인트가 적으면 놓친 것이다(배열은 더 많다).
+        if found + class_level < lines {
+            missed.push((path.display().to_string(), lines, found));
+        }
+    }
+    eprintln!(
+        "컨트롤러 {controllers}개, 매핑 애너테이션 {annotated}줄, 엔드포인트 {endpoints}개, 덜 모은 파일 {}개",
+        missed.len()
+    );
+    for (path, lines, found) in missed.iter().take(10) {
+        eprintln!("  {path}: 애너테이션 {lines}줄, 엔드포인트 {found}개");
+    }
+    assert!(controllers > 0, "코퍼스에 컨트롤러가 없다");
+    assert!(missed.is_empty(), "덜 모은 파일이 있다");
+}
+
+/// 주석(`//`, `/* */`)을 지운다(줄바꿈은 남긴다). 문자열 안은 그대로 둔다.
+fn strip_comments(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    let mut in_string = false;
+    while let Some(c) = chars.next() {
+        if in_string {
+            out.push(c);
+            if c == '\\' {
+                out.extend(chars.next());
+            } else if c == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match (c, chars.peek()) {
+            ('"', _) => {
+                in_string = true;
+                out.push(c);
+            }
+            ('/', Some('/')) => while chars.next_if(|&n| n != '\n').is_some() {},
+            ('/', Some('*')) => {
+                chars.next();
+                let mut prev = ' ';
+                for n in chars.by_ref() {
+                    if n == '\n' {
+                        out.push('\n');
+                    }
+                    if prev == '*' && n == '/' {
+                        break;
+                    }
+                    prev = n;
+                }
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}

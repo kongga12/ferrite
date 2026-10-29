@@ -4,10 +4,11 @@
 use lsp_types::Position;
 use ropey::Rope;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PositionEncoding {
     Utf8,
     /// LSP 기본값. 서버가 다른 인코딩을 고르지 않으면 이것이다.
+    #[default]
     Utf16,
 }
 

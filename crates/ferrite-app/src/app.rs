@@ -55,6 +55,9 @@ const RENAME_SYMBOL: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, K
 const CODE_ACTION: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Period);
 const CODE_ACTION_ALT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::ALT, Key::Enter);
 const QUICK_OPEN: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::P);
+const SYMBOL_SEARCH: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::T);
+const OUTLINE: KeyboardShortcut =
+    KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::O);
 const SOURCE_CONTROL: KeyboardShortcut =
     KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::G);
 // 터미널은 VS Code처럼 macOS에서도 실제 Ctrl+`다.
@@ -581,6 +584,10 @@ pub struct FerriteApp {
     updater: crate::update_ui::Updater,
     /// WASM 플러그인(메뉴 명령, 플러그인 창).
     plugins: crate::plugin_ui::Plugins,
+    /// 개요 창, 기호 찾기(Ctrl+T), 엔드포인트 창.
+    outline: crate::symbols_ui::Outline,
+    symbol_search: crate::symbols_ui::SymbolSearch,
+    endpoints: crate::symbols_ui::Endpoints,
     /// 감시를 시작하지 못한 환경(권한 등)에서는 없다. 그래도 편집은 된다.
     watcher: Option<FsWatcher>,
 }
@@ -643,6 +650,9 @@ impl FerriteApp {
             settings_changed: false,
             updater: Default::default(),
             plugins: crate::plugin_ui::Plugins::load(crate::plugin_ui::plugins_dir()),
+            outline: Default::default(),
+            symbol_search: Default::default(),
+            endpoints: Default::default(),
             watcher: FsWatcher::new(cc.egui_ctx.clone()).ok(),
             name_prompt: None,
             confirm_delete: None,
@@ -1080,6 +1090,12 @@ impl FerriteApp {
             && let Some(i) = self.active
         {
             self.request_close_tab(i);
+        }
+        if ctx.input_mut(|i| i.consume_shortcut(&SYMBOL_SEARCH)) {
+            self.symbol_search.show();
+        }
+        if ctx.input_mut(|i| i.consume_shortcut(&OUTLINE)) {
+            self.show_outline();
         }
         if ctx.input_mut(|i| i.consume_shortcut(&QUICK_OPEN)) {
             self.open_quick_open(ctx);
@@ -2190,6 +2206,19 @@ impl FerriteApp {
                         ui.close();
                         self.open_find_in_files();
                     }
+                    ui.separator();
+                    let item = egui::Button::new("기호로 이동…")
+                        .shortcut_text(ctx.format_shortcut(&SYMBOL_SEARCH));
+                    if ui.add(item).clicked() {
+                        ui.close();
+                        self.symbol_search.show();
+                    }
+                    let item =
+                        egui::Button::new("개요").shortcut_text(ctx.format_shortcut(&OUTLINE));
+                    if ui.add(item).clicked() {
+                        ui.close();
+                        self.show_outline();
+                    }
                 });
                 ui.menu_button("코드", |ui| {
                     let items: [(&str, KeyboardShortcut, Option<LspRequest>); 6] = [
@@ -2348,6 +2377,14 @@ impl FerriteApp {
                         ui.close();
                         dock::show(&mut self.layout, Pane::Sql);
                     }
+                    ui.separator();
+                    if ui
+                        .add_enabled(self.tree.is_some(), egui::Button::new("엔드포인트"))
+                        .clicked()
+                    {
+                        ui.close();
+                        dock::show(&mut self.layout, Pane::Endpoints);
+                    }
                 });
                 ui.menu_button("플러그인", |ui| {
                     if let Some(choice) = self.plugins.menu_ui(ui) {
@@ -2477,7 +2514,52 @@ impl FerriteApp {
                     self.hub
                         .reply(server, id, serde_json::json!({ "applied": true }));
                 }
+                HubUpdate::Outline {
+                    path,
+                    result,
+                    encoding,
+                } => self.outline.receive(&path, &result, encoding),
+                HubUpdate::WorkspaceSymbols {
+                    generation,
+                    server,
+                    result,
+                    encoding,
+                } => {
+                    self.symbol_search.receive(generation, &result, encoding);
+                    self.endpoints
+                        .receive(generation, server, &result, encoding);
+                }
             }
+        }
+        self.ask_symbols();
+    }
+
+    fn show_outline(&mut self) {
+        dock::show_beside(&mut self.layout, Pane::Outline, Pane::Project);
+        self.outline.focus = true;
+    }
+
+    /// 보이는 개요·엔드포인트 창에 필요한 기호를 묻는다.
+    fn ask_symbols(&mut self) {
+        if dock::is_shown(&self.layout, Pane::Outline) {
+            let doc = self
+                .active
+                .and_then(|i| self.docs.get_mut(i))
+                .filter(|d| d.notebook.is_none());
+            let key = doc.as_ref().map(|d| (d.path.clone(), d.buffer.version()));
+            if self.outline.due(key.clone())
+                && let (Some(doc), Some(key)) = (doc, key)
+            {
+                let sent = doc.lang.is_some_and(|lang| {
+                    self.hub.outline(&doc.path, lang, &doc.buffer, &mut doc.lsp)
+                });
+                self.outline.asked(key, sent);
+            }
+        }
+        if dock::is_shown(&self.layout, Pane::Endpoints) && self.endpoints.due() {
+            self.hub.ensure_builtin();
+            let (generation, asked) = self.hub.workspace_symbols("@/");
+            self.endpoints.started(generation, asked);
         }
     }
 
@@ -3138,6 +3220,20 @@ impl egui_tiles::Behavior<Pane> for Dock<'_> {
                     app.schema_action = Some(action);
                 }
             }
+            Pane::Outline => {
+                if let Some((range, encoding)) = app.outline.ui(ui)
+                    && let Some(path) = app.active.map(|i| app.docs[i].path.clone())
+                {
+                    app.navigate_to(&path, range, encoding);
+                }
+            }
+            Pane::Endpoints => match app.endpoints.ui(ui) {
+                Some(crate::symbols_ui::EndpointAction::Refresh) => app.endpoints.refresh(),
+                Some(crate::symbols_ui::EndpointAction::Go((path, range, encoding))) => {
+                    app.navigate_to(&path, range, encoding);
+                }
+                None => {}
+            },
             Pane::Plugins => {
                 let key =
                     plugin_doc(&app.docs, app.active).map(|d| (d.path.clone(), d.buffer.version()));
@@ -3236,6 +3332,17 @@ impl eframe::App for FerriteApp {
         layout.ui(&mut Dock(self), ui);
         self.layout = layout;
         self.apply_plugin_actions();
+        let root = self.tree.as_ref().map(|t| t.root().to_path_buf());
+        match self.symbol_search.ui(&ctx, root.as_deref()) {
+            Some(crate::symbols_ui::SearchAction::Query(query)) => {
+                let (generation, asked) = self.hub.workspace_symbols(&query);
+                self.symbol_search.started(generation, asked);
+            }
+            Some(crate::symbols_ui::SearchAction::Go((path, range, encoding))) => {
+                self.navigate_to(&path, range, encoding);
+            }
+            None => {}
+        }
         if let Some(path) = self.quick_open.ui(ui.ctx()) {
             self.open_file(path);
             self.focus_editor = true;

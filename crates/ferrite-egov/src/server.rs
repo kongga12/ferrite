@@ -155,6 +155,8 @@ impl Server {
                         "textDocumentSync": { "openClose": true, "change": 1 },
                         "definitionProvider": true,
                         "completionProvider": { "triggerCharacters": ["{", "#", "\"", "."] },
+                        // 컨트롤러의 요청 매핑(엔드포인트). Spring Boot LS가 없는 egov 3.x 프로젝트용이다.
+                        "workspaceSymbolProvider": true,
                     },
                     "serverInfo": { "name": "ferrite-egov", "version": env!("CARGO_PKG_VERSION") },
                 } })
@@ -164,6 +166,9 @@ impl Server {
             }
             "textDocument/completion" => {
                 json!({ "jsonrpc": "2.0", "id": id, "result": self.completion(params) })
+            }
+            "workspace/symbol" => {
+                json!({ "jsonrpc": "2.0", "id": id, "result": self.endpoint_symbols(params) })
             }
             "shutdown" => json!({ "jsonrpc": "2.0", "id": id, "result": null }),
             _ => json!({ "jsonrpc": "2.0", "id": id,
@@ -209,6 +214,41 @@ impl Server {
             }
             _ => Vec::new(),
         }
+    }
+
+    /// 요청 매핑을 `workspace/symbol` 결과(`SymbolInformation[]`)로. 이름에 질의가 들어 있는 것만
+    /// (대소문자 무시, 빈 질의는 모두). 파일 경로 순이다.
+    fn endpoint_symbols(&self, params: &Value) -> Value {
+        let query = params
+            .get("query")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_lowercase();
+        let mut files: Vec<_> = self.java.iter().collect();
+        files.sort_by(|a, b| a.0.cmp(b.0));
+        let mut symbols = Vec::new();
+        for (path, file) in files {
+            let Ok(uri) = path_to_uri(path) else {
+                continue;
+            };
+            for ty in &file.types {
+                let container = ty.fqn.rsplit('.').next().unwrap_or(&ty.fqn);
+                for endpoint in &ty.endpoints {
+                    let name = endpoint.label();
+                    if !name.to_lowercase().contains(&query) {
+                        continue;
+                    }
+                    symbols.push(json!({
+                        "name": name,
+                        // SymbolKind::Method
+                        "kind": 6,
+                        "containerName": container,
+                        "location": { "uri": uri, "range": endpoint.location },
+                    }));
+                }
+            }
+        }
+        Value::Array(symbols)
     }
 
     /// 열린 문서의 내용을 바꾸고 열린 문서 모두를 다시 진단한다(서로 참조할 수 있어서).

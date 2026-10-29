@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use eframe::egui;
 use ferrite_core::buffer::Buffer;
 use ferrite_core::syntax::{Lang, MAX_SYNTAX_BYTES};
-use ferrite_lsp::catalog::{self, Launch, Server as ServerSpec};
+use ferrite_lsp::catalog::{self, Launch, Server as ServerSpec, Source};
 use ferrite_lsp::client::{
     DIAGNOSTIC_REFRESH, LanguageServer, RpcError, ServerEvent, parse_diagnostics,
     parse_pulled_diagnostics,
@@ -68,6 +68,8 @@ struct FanOut {
 /// 이 서버가 이 요청을 처리한다고 알렸는가.
 /// 진단을 묻는 요청(LSP 3.17).
 const PULL_DIAGNOSTICS: &str = "textDocument/diagnostic";
+const DOCUMENT_SYMBOL: &str = "textDocument/documentSymbol";
+const WORKSPACE_SYMBOL: &str = "workspace/symbol";
 
 fn supports(lsp: &LanguageServer, method: &str) -> bool {
     let Some(c) = lsp.capabilities() else {
@@ -83,6 +85,8 @@ fn supports(lsp: &LanguageServer, method: &str) -> bool {
             .hover_provider
             .is_some_and(|h| !matches!(h, HoverProviderCapability::Simple(false))),
         "textDocument/definition" => on(c.definition_provider),
+        DOCUMENT_SYMBOL => on(c.document_symbol_provider),
+        WORKSPACE_SYMBOL => on(c.workspace_symbol_provider),
         "textDocument/references" => on(c.references_provider),
         "textDocument/formatting" => on(c.document_formatting_provider),
         "textDocument/rename" => on(c.rename_provider),
@@ -245,6 +249,19 @@ pub enum HubUpdate {
         edits: Vec<FileEdit>,
         encoding: PositionEncoding,
     },
+    /// 문서의 기호(`outline`으로 물은 것).
+    Outline {
+        path: PathBuf,
+        result: Value,
+        encoding: PositionEncoding,
+    },
+    /// 프로젝트 기호(`workspace_symbols`로 물은 것). 서버마다 따로 온다. 실패한 서버는 null이다.
+    WorkspaceSymbols {
+        generation: u64,
+        server: &'static str,
+        result: Value,
+        encoding: PositionEncoding,
+    },
 }
 
 /// 다른 서버로 넘긴 요청의 응답을 돌려줄 곳.
@@ -267,6 +284,11 @@ pub struct LspHub {
     internal: HashSet<(&'static str, i64)>,
     /// 진단을 물은 요청: (서버, 요청 ID) → 문서.
     pulls: HashMap<(&'static str, i64), PathBuf>,
+    /// 개요를 물은 요청: (서버, 요청 ID) → 문서.
+    outlines: HashMap<(&'static str, i64), PathBuf>,
+    /// 프로젝트 기호를 물은 요청: (서버, 요청 ID) → 물은 차례.
+    symbol_queries: HashMap<(&'static str, i64), u64>,
+    symbol_generation: u64,
     /// jdt.ls 확장이 Spring 프로젝트를 찾아 Spring Boot LS를 띄우라고 알렸다.
     spring_requested: bool,
     /// 실행 중에 죽은 서버(자동 재시작 대기).
@@ -286,6 +308,9 @@ impl LspHub {
             relays: HashMap::new(),
             internal: HashSet::new(),
             pulls: HashMap::new(),
+            outlines: HashMap::new(),
+            symbol_queries: HashMap::new(),
+            symbol_generation: 0,
             spring_requested: false,
             crashes: HashMap::new(),
             fan_outs: Vec::new(),
@@ -301,6 +326,8 @@ impl LspHub {
             self.relays.clear();
             self.internal.clear();
             self.pulls.clear();
+            self.outlines.clear();
+            self.symbol_queries.clear();
             self.spring_requested = false;
             self.crashes.clear();
             self.fan_outs.clear();
@@ -347,6 +374,8 @@ impl LspHub {
         self.relays.retain(|k, _| alive(k));
         self.internal.retain(alive);
         self.pulls.retain(|k, _| alive(k));
+        self.outlines.retain(|k, _| alive(k));
+        self.symbol_queries.retain(|k, _| alive(k));
         // 빠진 서버에 보낸 것이 있는 묶음은 답이 다 올 수 없어 버린다(서버가 죽으면 요청도 사라진다).
         self.fan_outs.retain(|g| g.waiting.iter().all(alive));
     }
@@ -464,6 +493,72 @@ impl LspHub {
             sync.changed_since = None;
         } else {
             self.ctx.request_repaint_after(CHANGE_DEBOUNCE);
+        }
+    }
+
+    /// 문서의 기호(개요)를 이 문서를 맡은 서버 중 처음으로 기호를 주는 준비된 서버에 묻는다. 답은
+    /// `HubUpdate::Outline`으로 온다. 물을 서버가 없으면 false.
+    pub fn outline(
+        &mut self,
+        path: &Path,
+        lang: Lang,
+        buffer: &Buffer,
+        sync: &mut DocSync,
+    ) -> bool {
+        self.sync_inner(path, lang, buffer, sync, true);
+        let Ok(uri) = ferrite_lsp::uri::path_to_uri(path) else {
+            return false;
+        };
+        let name = catalog::servers_for(language_id(lang, path))
+            .map(|spec| spec.name)
+            .find(|name| {
+                self.servers.get(name).is_some_and(|s| {
+                    s.opened.contains_key(path)
+                        && s.lsp
+                            .as_ref()
+                            .is_some_and(|l| l.is_ready() && supports(l, DOCUMENT_SYMBOL))
+                })
+            });
+        let Some(lsp) = name.and_then(|n| self.servers.get_mut(n)?.lsp.as_mut()) else {
+            return false;
+        };
+        let id = lsp.request(DOCUMENT_SYMBOL, json!({ "textDocument": { "uri": uri } }));
+        if let Some(name) = name {
+            self.outlines.insert((name, id), path.to_path_buf());
+        }
+        true
+    }
+
+    /// 떠 있는 준비된 서버 모두에 프로젝트 기호를 묻는다. (이 물음의 차례, 물은 서버 수). 답은
+    /// `HubUpdate::WorkspaceSymbols`로 서버마다 온다.
+    pub fn workspace_symbols(&mut self, query: &str) -> (u64, usize) {
+        self.symbol_generation += 1;
+        let generation = self.symbol_generation;
+        let mut asked = 0;
+        for (name, server) in &mut self.servers {
+            if let Some(lsp) = server
+                .lsp
+                .as_mut()
+                .filter(|l| l.is_ready() && supports(l, WORKSPACE_SYMBOL))
+            {
+                let id = lsp.request(WORKSPACE_SYMBOL, json!({ "query": query }));
+                self.symbol_queries.insert((*name, id), generation);
+                asked += 1;
+            }
+        }
+        (generation, asked)
+    }
+
+    /// Ferrite에 든 서버(egov)를 띄운다. 엔드포인트 창은 Java 파일을 열지 않아도 엔드포인트를 보인다.
+    pub fn ensure_builtin(&mut self) {
+        let Some(root) = self.root.clone() else {
+            return;
+        };
+        for spec in catalog::SERVERS
+            .iter()
+            .filter(|s| matches!(s.source, Source::Builtin(_)))
+        {
+            self.ensure_started(spec, &root);
         }
     }
 
@@ -702,7 +797,22 @@ impl LspHub {
                 }
             }
             ServerEvent::Response { id, result } => {
-                if let Some(path) = self.pulls.remove(&(name, id)) {
+                if let Some(path) = self.outlines.remove(&(name, id)) {
+                    if let Ok(result) = result {
+                        updates.push(HubUpdate::Outline {
+                            path,
+                            result,
+                            encoding,
+                        });
+                    }
+                } else if let Some(generation) = self.symbol_queries.remove(&(name, id)) {
+                    updates.push(HubUpdate::WorkspaceSymbols {
+                        generation,
+                        server: name,
+                        result: result.unwrap_or(Value::Null),
+                        encoding,
+                    });
+                } else if let Some(path) = self.pulls.remove(&(name, id)) {
                     // 실패(서버가 취소함 등)는 버린다. 다음 판에서 다시 묻는다.
                     if let Some(diagnostics) =
                         result.ok().as_ref().and_then(parse_pulled_diagnostics)

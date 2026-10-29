@@ -21,10 +21,12 @@ pub enum Pane {
     Sql,
     Schema,
     Plugins,
+    Outline,
+    Endpoints,
 }
 
 /// 열고 닫는 도구 창. 프로젝트와 에디터는 늘 있다.
-const TOOLS: [Pane; 9] = [
+const TOOLS: [Pane; 11] = [
     Pane::Terminal,
     Pane::Problems,
     Pane::Search,
@@ -34,9 +36,11 @@ const TOOLS: [Pane; 9] = [
     Pane::Sql,
     Pane::Schema,
     Pane::Plugins,
+    Pane::Outline,
+    Pane::Endpoints,
 ];
 
-const ALL: [Pane; 11] = [
+const ALL: [Pane; 13] = [
     Pane::Project,
     Pane::Editor,
     Pane::Terminal,
@@ -48,6 +52,8 @@ const ALL: [Pane; 11] = [
     Pane::Sql,
     Pane::Schema,
     Pane::Plugins,
+    Pane::Outline,
+    Pane::Endpoints,
 ];
 
 impl Pane {
@@ -64,6 +70,8 @@ impl Pane {
             Pane::Sql => "SQL",
             Pane::Schema => "스키마",
             Pane::Plugins => "플러그인",
+            Pane::Outline => "개요",
+            Pane::Endpoints => "엔드포인트",
         }
     }
 
@@ -95,6 +103,29 @@ pub fn is_shown(layout: &Layout, pane: Pane) -> bool {
         .tiles
         .find_pane(&pane)
         .is_some_and(|id| layout.active_tiles().contains(&id))
+}
+
+/// 창을 `beside` 창과 같은 묶음에 탭으로 넣어 앞으로 가져온다(개요는 프로젝트 옆). 이미 있으면
+/// 그 자리에서 앞으로 가져온다. 그 묶음이 없으면 `show`와 같다.
+pub fn show_beside(layout: &mut Layout, pane: Pane, beside: Pane) {
+    if layout.tiles.find_pane(&pane).is_none()
+        && let Some(parent) = layout
+            .tiles
+            .find_pane(&beside)
+            .and_then(|id| layout.tiles.parent_of(id))
+        && matches!(
+            layout.tiles.get(parent),
+            Some(Tile::Container(Container::Tabs(_)))
+        )
+    {
+        let id = layout.tiles.insert_pane(pane);
+        if let Some(Tile::Container(Container::Tabs(tabs))) = layout.tiles.get_mut(parent) {
+            tabs.add_child(id);
+            tabs.set_active(id);
+        }
+        return;
+    }
+    show(layout, pane);
 }
 
 /// 창을 앞으로 가져온다. 없으면 다른 도구 창이 있는 묶음에 탭으로 넣고, 그런 묶음도 없으면

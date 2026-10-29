@@ -1,12 +1,13 @@
-//! 기능 요청의 매개변수 만들기와 응답 해석: 자동완성, 호버, 정의, 참조.
+//! 기능 요청의 매개변수 만들기와 응답 해석: 자동완성, 호버, 정의, 참조, 기호.
 //! 응답은 에디터가 바로 쓰는 문자 범위·평문으로 바꿔 돌려준다.
 
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use lsp_types::{
-    CompletionItemKind, CompletionResponse, CompletionTextEdit, GotoDefinitionResponse, Hover,
-    HoverContents, Location, MarkedString, Range as LspRange, TextEdit,
+    CompletionItemKind, CompletionResponse, CompletionTextEdit, DocumentSymbol,
+    DocumentSymbolResponse, GotoDefinitionResponse, Hover, HoverContents, Location, MarkedString,
+    OneOf, Range as LspRange, SymbolKind, TextEdit, WorkspaceSymbolResponse,
 };
 use ropey::Rope;
 use serde_json::{Value, json};
@@ -213,8 +214,165 @@ pub fn parse_locations(result: &Value) -> Vec<Target> {
     }
 }
 
+/// 파일 안의 기호(개요). 범위는 이름 위치(선택 범위)다.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Symbol {
+    pub name: String,
+    /// 타입·시그니처 같은 덧붙임 설명.
+    pub detail: Option<String>,
+    pub kind: SymbolKind,
+    pub range: LspRange,
+    pub children: Vec<Symbol>,
+}
+
+/// `textDocument/documentSymbol` 응답. 서버가 평평한 목록(`SymbolInformation[]`)으로 주면 나무 없이 그대로.
+pub fn parse_document_symbols(result: &Value) -> Vec<Symbol> {
+    fn nested(s: DocumentSymbol) -> Symbol {
+        Symbol {
+            name: s.name,
+            detail: s.detail.filter(|d| !d.is_empty()),
+            kind: s.kind,
+            range: s.selection_range,
+            children: s
+                .children
+                .unwrap_or_default()
+                .into_iter()
+                .map(nested)
+                .collect(),
+        }
+    }
+    match serde_json::from_value::<Option<DocumentSymbolResponse>>(result.clone()) {
+        Ok(Some(DocumentSymbolResponse::Nested(list))) => list.into_iter().map(nested).collect(),
+        Ok(Some(DocumentSymbolResponse::Flat(list))) => list
+            .into_iter()
+            .map(|s| Symbol {
+                name: s.name,
+                detail: s.container_name,
+                kind: s.kind,
+                range: s.location.range,
+                children: Vec::new(),
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// 프로젝트의 기호(`workspace/symbol`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct WorkspaceSymbol {
+    pub name: String,
+    pub kind: SymbolKind,
+    /// 담고 있는 것(클래스 이름 등).
+    pub container: Option<String>,
+    pub target: Target,
+}
+
+/// `workspace/symbol` 응답(`SymbolInformation[]` 또는 `WorkspaceSymbol[]`). 위치 없이 파일만 준 기호는
+/// 파일 처음을 가리킨다.
+pub fn parse_workspace_symbols(result: &Value) -> Vec<WorkspaceSymbol> {
+    match serde_json::from_value::<Option<WorkspaceSymbolResponse>>(result.clone()) {
+        Ok(Some(WorkspaceSymbolResponse::Flat(list))) => list
+            .into_iter()
+            .filter_map(|s| {
+                Some(WorkspaceSymbol {
+                    name: s.name,
+                    kind: s.kind,
+                    container: s.container_name.filter(|c| !c.is_empty()),
+                    target: Target {
+                        path: uri_to_path(&s.location.uri)?,
+                        range: s.location.range,
+                    },
+                })
+            })
+            .collect(),
+        Ok(Some(WorkspaceSymbolResponse::Nested(list))) => list
+            .into_iter()
+            .filter_map(|s| {
+                let (uri, range) = match s.location {
+                    OneOf::Left(l) => (l.uri, l.range),
+                    OneOf::Right(l) => (l.uri, LspRange::default()),
+                };
+                Some(WorkspaceSymbol {
+                    name: s.name,
+                    kind: s.kind,
+                    container: s.container_name.filter(|c| !c.is_empty()),
+                    target: Target {
+                        path: uri_to_path(&uri)?,
+                        range,
+                    },
+                })
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// 기호 종류의 짧은 이름(화면 표시용).
+pub fn symbol_kind_label(kind: SymbolKind) -> &'static str {
+    match kind {
+        SymbolKind::FILE => "파일",
+        SymbolKind::MODULE | SymbolKind::NAMESPACE | SymbolKind::PACKAGE => "모듈",
+        SymbolKind::CLASS => "클래스",
+        SymbolKind::METHOD => "메서드",
+        SymbolKind::PROPERTY => "속성",
+        SymbolKind::FIELD => "필드",
+        SymbolKind::CONSTRUCTOR => "생성자",
+        SymbolKind::ENUM => "열거형",
+        SymbolKind::INTERFACE => "인터페이스",
+        SymbolKind::FUNCTION => "함수",
+        SymbolKind::VARIABLE => "변수",
+        SymbolKind::CONSTANT => "상수",
+        SymbolKind::STRUCT => "구조체",
+        SymbolKind::ENUM_MEMBER => "열거값",
+        SymbolKind::TYPE_PARAMETER => "타입 인자",
+        SymbolKind::KEY => "키",
+        _ => "기호",
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn 기호_응답은_나무와_평평한_목록을_모두_읽는다() {
+        use super::*;
+        let range = |l: u32| json!({ "start": { "line": l, "character": 0 }, "end": { "line": l, "character": 3 } });
+        let nested = json!([{
+            "name": "Board", "kind": 5, "range": range(0), "selectionRange": range(0), "detail": "",
+            "children": [{ "name": "list", "kind": 6, "range": range(2), "selectionRange": range(2), "detail": "() -> String" }]
+        }]);
+        let symbols = parse_document_symbols(&nested);
+        assert_eq!(
+            (symbols[0].name.as_str(), symbols[0].detail.as_deref()),
+            ("Board", None)
+        );
+        assert_eq!(
+            symbols[0].children[0].detail.as_deref(),
+            Some("() -> String")
+        );
+        assert_eq!(symbol_kind_label(symbols[0].children[0].kind), "메서드");
+        let uri = path_to_uri(&std::env::temp_dir().join("A.java")).unwrap();
+        let flat = json!([{ "name": "x", "kind": 13, "location": { "uri": uri, "range": range(4) }, "containerName": "A" }]);
+        assert_eq!(
+            parse_document_symbols(&flat)[0].detail.as_deref(),
+            Some("A")
+        );
+        let found = parse_workspace_symbols(&flat);
+        assert_eq!(
+            (
+                found[0].container.as_deref(),
+                found[0].target.range.start.line
+            ),
+            (Some("A"), 4)
+        );
+        // 파일만 준 WorkspaceSymbol은 파일 처음.
+        let nested = json!([{ "name": "y", "kind": 12, "location": { "uri": uri } }]);
+        assert_eq!(
+            parse_workspace_symbols(&nested)[0].target.range,
+            LspRange::default()
+        );
+        assert!(parse_workspace_symbols(&Value::Null).is_empty());
+    }
+
     use lsp_types::Position;
 
     use super::*;
