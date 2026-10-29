@@ -1,7 +1,8 @@
 //! 디버그 어댑터를 실제 배포처에서 받아 설치하고(`ferrite_lsp::install`), 언어마다 같은 예제
 //! (`add(41, 1)`)의 `return` 줄에서 멈춰 변수 a=41·b=1·total=42를 읽는다. 내려받기가 커서 기본은
 //! 건너뛰고, `.github/workflows/adapters.yml`이 3개 OS에서 `--ignored`로 돌린다. 필요한 도구(Go,
-//! PHP+Xdebug, node, rustc)가 없으면 로컬에서는 건너뛰고 CI에서는 실패한다.
+//! PHP+Xdebug, node, rustc, Chrome)가 없으면 로컬에서는 건너뛰고 CI에서는 실패한다. js-debug는 브라우저 화면의
+//! 외부 스크립트와 인라인 스크립트에서 멈춘다.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -432,4 +433,253 @@ fn java_debug를_jdtls에_실어_java를_디버그한다() {
     drop(lsp);
     let _ = std::fs::remove_dir_all(&servers);
     let _ = std::fs::remove_dir_all(&project);
+}
+
+/// 이 PC의 Chrome(없으면 Edge). js-debug의 `type`과 실행 파일.
+fn browser() -> Option<&'static str> {
+    let found = |paths: &[PathBuf]| paths.iter().any(|p| p.exists());
+    let env = |key: &str| std::env::var_os(key).map(PathBuf::from).unwrap_or_default();
+    if cfg!(windows) {
+        let chrome = [
+            env("ProgramFiles").join("Google/Chrome/Application/chrome.exe"),
+            env("ProgramFiles(x86)").join("Google/Chrome/Application/chrome.exe"),
+            env("LOCALAPPDATA").join("Google/Chrome/Application/chrome.exe"),
+        ];
+        let edge = [env("ProgramFiles(x86)").join("Microsoft/Edge/Application/msedge.exe")];
+        return if found(&chrome) {
+            Some("pwa-chrome")
+        } else {
+            found(&edge).then_some("pwa-msedge")
+        };
+    }
+    if cfg!(target_os = "macos") {
+        return found(&[PathBuf::from("/Applications/Google Chrome.app")]).then_some("pwa-chrome");
+    }
+    [
+        "google-chrome",
+        "google-chrome-stable",
+        "chromium",
+        "chromium-browser",
+    ]
+    .iter()
+    .any(|name| find_program(name).is_some())
+    .then_some("pwa-chrome")
+}
+
+const PAGE: &str = "<!doctype html>
+<html><body>
+<h1>목록</h1>
+<script src=\"/app/js/app.js\"></script>
+<script>
+var count = 0;
+function tick() {
+  count = count + 1;
+  add(count, 1);
+}
+setInterval(tick, 200);
+</script>
+</body></html>
+";
+
+const APP_JS: &str = "function add(a, b) {
+  var total = a + b;
+  return total;
+}
+";
+
+/// 컨텍스트 경로 /app 아래에 화면(인라인 스크립트)과 외부 스크립트를 주는 웹 서버.
+fn web_server() -> u16 {
+    use std::io::{BufRead, BufReader, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for mut stream in listener.incoming().flatten() {
+            let mut line = String::new();
+            let mut reader = BufReader::new(&stream);
+            let _ = reader.read_line(&mut line);
+            loop {
+                let mut header = String::new();
+                if reader.read_line(&mut header).unwrap_or(0) == 0 || header.trim().is_empty() {
+                    break;
+                }
+            }
+            let (kind, body) = if line.starts_with("GET /app/list.do ") {
+                ("text/html; charset=UTF-8", PAGE)
+            } else if line.starts_with("GET /app/js/app.js ") {
+                ("application/javascript", APP_JS)
+            } else {
+                ("text/plain", "")
+            };
+            let status = if body.is_empty() {
+                "404 Not Found"
+            } else {
+                "200 OK"
+            };
+            let _ = write!(
+                stream,
+                "HTTP/1.1 {status}\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+        }
+    });
+    port
+}
+
+/// 시험이 실패해 풀릴 때 기록 파일의 끝을 출력한다.
+struct DumpOnPanic(PathBuf);
+
+impl Drop for DumpOnPanic {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            let text = std::fs::read_to_string(&self.0).unwrap_or_default();
+            let lines: Vec<&str> = text.lines().collect();
+            eprintln!(
+                "--- {} 끝 ---\n{}",
+                self.0.display(),
+                lines[lines.len().saturating_sub(60)..].join("\n")
+            );
+        }
+    }
+}
+
+/// 다음 멈춤을 기다려 (스레드, 맨 위 프레임)을 돌려준다.
+fn top_frame(
+    session: &mut DebugSession,
+    wait: &mut impl FnMut(&mut DebugSession, &dyn Fn(&DebugEvent) -> bool) -> DebugEvent,
+) -> (i64, ferrite_dap::StackFrame) {
+    let DebugEvent::Stopped(stopped) = wait(session, &|e| matches!(e, DebugEvent::Stopped(_)))
+    else {
+        unreachable!()
+    };
+    let thread = stopped.thread_id.expect("멈춘 스레드");
+    session.stack_trace(thread);
+    let frames = types::stack_frames(&response(wait(
+        session,
+        &|e| matches!(e, DebugEvent::Response { command, .. } if command == "stackTrace"),
+    )));
+    (thread, frames[0].clone())
+}
+
+#[test]
+#[ignore = "GitHub에서 vscode-js-debug(약 1.2MB)를 받는다. node와 Chrome(Windows는 Edge도 된다)이 필요하다"]
+fn js_debug를_설치해_브라우저의_외부_스크립트와_화면_스크립트에서_멈춘다() {
+    let Some(kind) = browser() else {
+        require("Chrome", false);
+        return;
+    };
+    if !require("node", find_program("node").is_some()) {
+        return;
+    }
+    let (servers, project) = (temp_dir("js-servers"), temp_dir("js"));
+    let web_root = project.join("src/main/webapp");
+    std::fs::create_dir_all(web_root.join("js")).unwrap();
+    let app_js = web_root.join("js/app.js");
+    std::fs::write(&app_js, APP_JS).unwrap();
+    let port = web_server();
+    let adapter = install_adapter(&servers, "js-debug", &project);
+    let mut runtime_args = vec!["--headless=new", "--disable-gpu"];
+    if cfg!(target_os = "linux") {
+        runtime_args.extend(["--no-sandbox", "--disable-dev-shm-usage"]);
+    }
+    // 실패하면 js-debug의 기록 끝을 보인다(브라우저를 띄우지 못한 까닭 등).
+    let trace = project.join("js-debug.log");
+    let _dump = DumpOnPanic(trace.clone());
+    let launch = Launch {
+        adapter_id: "js-debug".into(),
+        attach: false,
+        arguments: json!({
+            "type": kind,
+            "url": format!("http://127.0.0.1:{port}/app/list.do"),
+            "webRoot": web_root,
+            "pathMapping": { "/app/": format!("{}/", web_root.display()) },
+            "runtimeArgs": runtime_args,
+            // CI 러너에서 처음 띄우는 브라우저는 느리다(기본 10초).
+            "timeout": 60000,
+            "trace": { "logFile": trace },
+        }),
+    };
+    let breakpoints = BTreeMap::from([(
+        app_js.clone(),
+        vec![Breakpoint {
+            line: 3,
+            condition: None,
+        }],
+    )]);
+    let mut session = DebugSession::start(&adapter, launch, breakpoints, || {}).unwrap();
+    let (mut seen, mut next) = (Vec::new(), 0);
+    let mut wait = |session: &mut DebugSession, done: &dyn Fn(&DebugEvent) -> bool| {
+        wait_for(session, &mut seen, &mut next, done)
+    };
+    // 1) 외부 스크립트: URL /app/js/app.js가 webapp 폴더의 파일로 맞춰져 그 파일의 중단점에서 멈춘다.
+    let (thread, frame) = top_frame(&mut session, &mut wait);
+    let source = frame.source.clone().unwrap();
+    eprintln!("외부 스크립트 프레임: {frame:?}");
+    assert_eq!(frame.line, 3);
+    let path = source.path.expect("로컬 경로");
+    assert_eq!(
+        std::fs::canonicalize(&path).unwrap(),
+        std::fs::canonicalize(&app_js).unwrap()
+    );
+
+    // 2) 화면 스크립트: 로컬 파일이 없으니 내용을 받아 담아 두고, 그 파일에 건 중단점을 원래 소스로 건다.
+    session.loaded_sources();
+    let sources = types::sources(&response(wait(
+        &mut session,
+        &|e| matches!(e, DebugEvent::Response { command, .. } if command == "loadedSources"),
+    )));
+    eprintln!("불러온 스크립트: {sources:#?}");
+    let page = sources
+        .iter()
+        .find(|s| {
+            s.source_reference > 0 && s.name.as_deref().is_some_and(|n| n.contains("list.do"))
+        })
+        .expect("화면 스크립트")
+        .clone();
+    session.source(&page);
+    let content = response(wait(
+        &mut session,
+        &|e| matches!(e, DebugEvent::Response { command, .. } if command == "source"),
+    ));
+    let content = content["content"].as_str().unwrap().to_owned();
+    let line = content
+        .lines()
+        .position(|l| l.contains("count = count + 1"))
+        .expect("tick 본문")
+        + 1;
+    let local = project.join("list.do.html");
+    std::fs::write(&local, &content).unwrap();
+    session.map_source(&local, &page);
+    session.set_breakpoints(&app_js, Vec::new());
+    session.set_breakpoints(
+        &local,
+        vec![Breakpoint {
+            line,
+            condition: None,
+        }],
+    );
+    session.resume(thread);
+    let (_, frame) = top_frame(&mut session, &mut wait);
+    eprintln!("화면 스크립트 프레임: {frame:?}");
+    assert_eq!(frame.line as usize, line);
+    assert_eq!(
+        frame.source.unwrap().source_reference,
+        page.source_reference
+    );
+
+    session.stop();
+    wait(&mut session, &|e| {
+        matches!(e, DebugEvent::Terminated | DebugEvent::Closed(_))
+    });
+    drop(session);
+    // js-debug에 임시 폴더로 준 곳(브라우저 프로필)까지 지운다. 브라우저가 늦게 끝나 폴더를 쥐고 있으면
+    // 잠깐 기다린다.
+    for dir in [servers, project, adapters::scratch_dir()] {
+        for _ in 0..40 {
+            if !dir.exists() || std::fs::remove_dir_all(&dir).is_ok() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        }
+        assert!(!dir.exists(), "폴더가 남음: {}", dir.display());
+    }
 }

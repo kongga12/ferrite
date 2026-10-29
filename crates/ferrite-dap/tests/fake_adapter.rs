@@ -346,3 +346,220 @@ fn 어댑터를_띄우지_못하면_오류() {
         .expect("실패해야 한다");
     assert!(error.contains("ferrite-없는-어댑터"), "{error}");
 }
+
+/// 받은 연결로 가짜 어댑터를 만든다.
+fn fake_on(stream: TcpStream) -> Fake {
+    Fake {
+        reader: BufReader::new(stream.try_clone().unwrap()),
+        writer: stream,
+        seq: 0,
+    }
+}
+
+/// initialize → launch → initialized → setBreakpoints → configurationDone → launch 응답. 처음 중단점 요청을
+/// 돌려준다(응답은 부르는 쪽이 한다).
+fn boot(f: &mut Fake, launch_check: impl Fn(&Value)) -> (Value, Value) {
+    let initialize = f.expect("initialize");
+    f.respond(
+        &initialize,
+        json!({ "supportsConfigurationDoneRequest": true, "supportsLoadedSourcesRequest": true }),
+    );
+    let launch = f.expect("launch");
+    launch_check(&launch);
+    f.event("initialized", json!({}));
+    let set = f.expect("setBreakpoints");
+    (launch, set)
+}
+
+#[test]
+fn 거꾸로_요청한_자식_세션에서_멈추고_페이지_스크립트에_중단점을_건다() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let app_js = std::env::temp_dir()
+        .join("ferrite-dap-child")
+        .join("app.js");
+    let local = std::env::temp_dir()
+        .join("ferrite-dap-child")
+        .join("list.do.html");
+    let expected_js = app_js.clone();
+    let root = thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        let mut f = fake_on(stream);
+        let initialize = f.expect("initialize");
+        assert_eq!(
+            initialize["arguments"]["supportsStartDebuggingRequest"], true,
+            "자식 세션을 받는다고 알린다"
+        );
+        f.respond(
+            &initialize,
+            json!({ "supportsConfigurationDoneRequest": true }),
+        );
+        let launch = f.expect("launch");
+        assert_eq!(launch["arguments"]["type"], "pwa-chrome");
+        f.event("initialized", json!({}));
+        let set = f.expect("setBreakpoints");
+        // 부모는 페이지가 없으므로 아직 걸지 못한다.
+        f.respond(
+            &set,
+            json!({ "breakpoints": [{ "id": 1, "verified": false }] }),
+        );
+        let done = f.expect("configurationDone");
+        f.respond(&done, json!({}));
+        f.respond(&launch, json!({}));
+        // 페이지가 생겼다: 자식 세션을 거꾸로 요청한다.
+        f.send(json!({
+            "type": "request", "command": "startDebugging",
+            "arguments": { "request": "launch", "configuration": { "type": "pwa-chrome", "__pendingTargetId": "t1" } },
+        }));
+        let child = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut f = fake_on(stream);
+            let (launch, set) = boot(&mut f, |launch| {
+                assert_eq!(launch["arguments"]["__pendingTargetId"], "t1");
+            });
+            assert_eq!(set["arguments"]["source"]["path"], json!(expected_js));
+            f.respond(
+                &set,
+                json!({ "breakpoints": [{ "id": 7, "verified": false }] }),
+            );
+            let done = f.expect("configurationDone");
+            f.respond(&done, json!({}));
+            f.respond(&launch, json!({}));
+            // 스크립트를 불러오며 건 중단점을 알리고, 그 줄에서 멈춘다.
+            f.event(
+                "breakpoint",
+                json!({ "reason": "changed", "breakpoint": { "id": 7, "verified": true, "line": 3 } }),
+            );
+            f.event("stopped", json!({ "reason": "breakpoint", "threadId": 1 }));
+            let trace = f.expect("stackTrace");
+            f.respond(
+                &trace,
+                json!({ "stackFrames": [{ "id": 10, "name": "tick", "line": 2, "column": 1,
+                    "source": { "name": "list.do", "path": "localhost:8080/app/list.do", "sourceReference": 5 } }] }),
+            );
+            let source = f.expect("source");
+            assert_eq!(source["arguments"]["sourceReference"], 5);
+            f.respond(
+                &source,
+                json!({ "content": "<script>\ntick();\n</script>" }),
+            );
+            // 담아 둔 파일의 중단점은 원래 소스로 건다.
+            let set = f.expect("setBreakpoints");
+            assert_eq!(
+                set["arguments"]["source"],
+                json!({ "name": "list.do", "path": "localhost:8080/app/list.do", "sourceReference": 5 })
+            );
+            f.respond(
+                &set,
+                json!({ "breakpoints": [{ "id": 8, "verified": true, "line": 2 }] }),
+            );
+            let resume = f.expect("continue");
+            f.respond(&resume, json!({}));
+            f.event("terminated", json!({}));
+        });
+        let reply = read_message(&mut f.reader).unwrap().unwrap();
+        let reply: Value = serde_json::from_slice(&reply).unwrap();
+        assert_eq!(
+            (&reply["command"], &reply["success"]),
+            (&json!("startDebugging"), &json!(true))
+        );
+        let set = f.expect("setBreakpoints");
+        assert_eq!(set["arguments"]["source"]["sourceReference"], 5);
+        f.respond(
+            &set,
+            json!({ "breakpoints": [{ "id": 2, "verified": false }] }),
+        );
+        let disconnect = f.expect("disconnect");
+        assert_eq!(disconnect["arguments"]["terminateDebuggee"], true);
+        f.respond(&disconnect, json!({}));
+        f.event("terminated", json!({}));
+        child.join().expect("자식 세션 각본이 어긋남");
+    });
+
+    let launch = Launch {
+        adapter_id: "js-debug".into(),
+        attach: false,
+        arguments: json!({ "type": "pwa-chrome" }),
+    };
+    let breakpoints = BTreeMap::from([(
+        app_js.clone(),
+        vec![Breakpoint {
+            line: 3,
+            condition: None,
+        }],
+    )]);
+    let mut session =
+        DebugSession::start(&Adapter::Tcp(address), launch, breakpoints, || {}).unwrap();
+    let mut log = Log::default();
+    // 자식이 확인한 중단점이 부모의 "아직 못 걸음"을 대신한다.
+    let event = wait_for(
+        &mut session,
+        &mut log,
+        |e| matches!(e, DebugEvent::Breakpoints { states, .. } if states.first().is_some_and(|s| s.verified)),
+    );
+    assert!(
+        matches!(&event, DebugEvent::Breakpoints { path, states } if *path == app_js && states[0].line == Some(3)),
+        "{event:?}"
+    );
+    wait_for(&mut session, &mut log, |e| {
+        matches!(e, DebugEvent::Stopped(_))
+    });
+    assert!(
+        matches!(session.state(), State::Stopped(_)),
+        "자식이 멈추면 세션도 멈춤"
+    );
+
+    let id = session.stack_trace(1);
+    let body = response_body(
+        wait_for(&mut session, &mut log, |e| {
+            matches!(e, DebugEvent::Response { .. })
+        }),
+        id,
+    );
+    let frame = types::stack_frames(&body).remove(0);
+    let source = frame.source.unwrap();
+    assert_eq!(source.source_reference, 5);
+    let id = session.source(&source);
+    let body = response_body(
+        wait_for(&mut session, &mut log, |e| {
+            matches!(e, DebugEvent::Response { .. })
+        }),
+        id,
+    );
+    assert_eq!(body["content"], "<script>\ntick();\n</script>");
+
+    session.map_source(&local, &source);
+    session.set_breakpoints(
+        &local,
+        vec![Breakpoint {
+            line: 2,
+            condition: None,
+        }],
+    );
+    let event = wait_for(
+        &mut session,
+        &mut log,
+        |e| matches!(e, DebugEvent::Breakpoints { path, .. } if *path == local),
+    );
+    assert!(
+        matches!(&event, DebugEvent::Breakpoints { states, .. } if states[0].verified),
+        "부모의 미확인 응답은 버린다: {event:?}"
+    );
+    session.resume(1);
+    // 자식(페이지)이 끝나도 세션은 이어진다. 부모가 끝나야 끝난다.
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_millis(300) {
+        log.seen.extend(session.poll());
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        !log.seen.iter().any(|e| matches!(e, DebugEvent::Terminated)),
+        "{:#?}",
+        log.seen
+    );
+    session.stop();
+    wait_for(&mut session, &mut log, |e| {
+        matches!(e, DebugEvent::Terminated)
+    });
+    root.join().expect("부모 세션 각본이 어긋남");
+}

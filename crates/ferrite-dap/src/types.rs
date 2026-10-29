@@ -12,6 +12,7 @@ pub struct Capabilities {
     pub supports_configuration_done_request: bool,
     pub supports_conditional_breakpoints: bool,
     pub supports_terminate_request: bool,
+    pub supports_loaded_sources_request: bool,
     pub exception_breakpoint_filters: Option<Vec<Value>>,
 }
 
@@ -21,12 +22,32 @@ pub struct Thread {
     pub name: String,
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 pub struct Source {
     #[serde(default)]
     pub name: Option<String>,
     #[serde(default)]
     pub path: Option<PathBuf>,
+    /// 0보다 크면 어댑터에 `source`로 내용을 물어야 한다(로컬 파일이 없는 페이지 스크립트 등).
+    #[serde(default, rename = "sourceReference")]
+    pub source_reference: i64,
+}
+
+impl Source {
+    /// 어댑터에 다시 보낼 때의 꼴(중단점, `source` 요청).
+    pub fn to_json(&self) -> Value {
+        let mut source = serde_json::Map::new();
+        if let Some(name) = &self.name {
+            source.insert("name".into(), Value::from(name.as_str()));
+        }
+        if let Some(path) = &self.path {
+            source.insert("path".into(), Value::from(path.to_string_lossy()));
+        }
+        if self.source_reference > 0 {
+            source.insert("sourceReference".into(), Value::from(self.source_reference));
+        }
+        Value::Object(source)
+    }
 }
 
 /// 줄·열은 1부터 센다(초기화 때 그렇게 요청한다).
@@ -65,6 +86,9 @@ pub struct Variable {
 /// 어댑터가 확인한 중단점. 실제로 걸 수 있는 줄로 옮겼으면 `line`이 바뀐다.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 pub struct BreakpointState {
+    /// 어댑터가 붙인 번호. 나중에 `breakpoint` 이벤트로 이 번호의 확인 상태를 바꾼다.
+    #[serde(default)]
+    pub id: Option<i64>,
     #[serde(default)]
     pub verified: bool,
     #[serde(default)]
@@ -99,6 +123,11 @@ pub fn stack_frames(body: &Value) -> Vec<StackFrame> {
 /// `scopes` 응답.
 pub fn scopes(body: &Value) -> Vec<Scope> {
     list(body, "scopes")
+}
+
+/// `loadedSources` 응답.
+pub fn sources(body: &Value) -> Vec<Source> {
+    list(body, "sources")
 }
 
 /// `variables` 응답.

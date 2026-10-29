@@ -3,6 +3,7 @@
 //! 찾는다.
 
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ferrite_lsp::catalog::{ADAPTERS, Server};
 use ferrite_lsp::client::find_program;
@@ -29,10 +30,29 @@ pub fn resolve(name: &str, servers: &Path, cwd: &Path) -> Result<Adapter, String
     {
         env.push(("PYTHONPATH".to_owned(), path));
     }
+    // js-debug는 임시 폴더에 브라우저 프로필(한 번에 약 6MB)을 만들고 지우지 않는다. 세션마다 이 앱의
+    // 폴더를 임시 폴더로 주고 세션이 끝나면 지운다([`scratch_of`], [`remove_later`]).
+    if name == "js-debug" {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let dir = scratch_dir().join(nanos.to_string());
+        std::fs::create_dir_all(&dir)
+            .map_err(|e| format!("{} 폴더를 만들지 못했습니다: {e}", dir.display()))?;
+        for key in ["TEMP", "TMP", "TMPDIR"] {
+            env.push((key.to_owned(), dir.to_string_lossy().into_owned()));
+        }
+    }
     let (program, mut args, cwd) = (command.program, command.args, Some(cwd.to_path_buf()));
-    Ok(if name == "delve" {
-        // 빈 포트로 듣게 하고, 알린 주소로 붙는다(정해 둔 포트가 이미 쓰이는 일이 없다).
-        args.push("--listen=127.0.0.1:0".into());
+    // 빈 포트로 듣게 하고, 알린 주소로 붙는다(정해 둔 포트가 이미 쓰이는 일이 없다).
+    let listen: &[&str] = match name {
+        "delve" => &["--listen=127.0.0.1:0"],
+        "js-debug" => &["0", "127.0.0.1"],
+        _ => &[],
+    };
+    Ok(if !listen.is_empty() {
+        args.extend(listen.iter().map(|a| a.to_string()));
         Adapter::Listening {
             program,
             args,
@@ -47,6 +67,34 @@ pub fn resolve(name: &str, servers: &Path, cwd: &Path) -> Result<Adapter, String
             env,
         }
     })
+}
+
+/// 이 앱 프로세스가 디버그 어댑터에 임시 폴더로 주는 폴더들의 부모. 앱을 닫을 때 지운다.
+pub fn scratch_dir() -> PathBuf {
+    std::env::temp_dir().join(format!("ferrite-js-debug-{}", std::process::id()))
+}
+
+/// 그 어댑터에 준 세션 임시 폴더(있으면).
+pub fn scratch_of(adapter: &Adapter) -> Option<PathBuf> {
+    let (Adapter::Stdio { env, .. } | Adapter::Listening { env, .. }) = adapter else {
+        return None;
+    };
+    env.iter()
+        .find(|(key, _)| key == "TMPDIR")
+        .map(|(_, value)| PathBuf::from(value))
+        .filter(|dir| dir.starts_with(scratch_dir()))
+}
+
+/// 세션이 끝난 뒤 그 임시 폴더를 지운다. 브라우저가 늦게 끝나 파일을 쥐고 있을 수 있어 잠깐 되풀이한다.
+pub fn remove_later(dir: PathBuf) {
+    std::thread::spawn(move || {
+        for _ in 0..40 {
+            if !dir.exists() || std::fs::remove_dir_all(&dir).is_ok() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        }
+    });
 }
 
 /// 구성 인자에 어댑터별 기본값을 채운다. 사용자가 적은 값은 그대로 둔다.
