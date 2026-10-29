@@ -26,6 +26,7 @@ mod notebook_ui;
 mod picker;
 mod plugin_ui;
 mod quick_open;
+mod sarif_ui;
 mod schema_ui;
 mod servers;
 mod sql_console;

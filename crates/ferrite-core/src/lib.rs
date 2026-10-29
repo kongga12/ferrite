@@ -2,11 +2,13 @@
 
 pub mod buffer;
 pub mod debug_config;
+pub mod files;
 pub mod fs_ops;
 pub mod git;
 pub mod jsp;
 pub mod project_search;
 pub mod run;
+pub mod sarif;
 pub mod search;
 pub mod settings;
 pub mod syntax;

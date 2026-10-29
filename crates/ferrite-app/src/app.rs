@@ -337,6 +337,9 @@ struct Document {
     git_key: Option<(u64, u64)>,
     /// `.http` 파일이면 (센 버퍼 버전, 요청 줄). 거터에 ▶를 그린다.
     http_runs: Option<(u64, Vec<usize>)>,
+    /// 이 문서에 해당하는 정적 분석(SARIF) 결과(에디터 물결선)와 그것을 만든 (SARIF 세대, 버퍼 버전).
+    sarif_problems: Vec<ferrite_lsp::problem::Problem>,
+    sarif_key: Option<(u64, u64)>,
     /// .ipynb면 노트북 보기(버퍼 위에 셀을 보인다).
     notebook: Option<crate::notebook_ui::NotebookView>,
     /// tree-sitter 언어가 없는 파일의 언어 확장(플러그인 폴더)과 그 TextMate 강조.
@@ -370,6 +373,8 @@ impl Document {
             git_marks: Vec::new(),
             git_key: None,
             http_runs: None,
+            sarif_problems: Vec::new(),
+            sarif_key: None,
             notebook,
             ext: None,
             textmate: None,
@@ -598,6 +603,9 @@ pub struct FerriteApp {
     http_task: Option<crate::http_ui::Task>,
     /// 테스트 창(테스트 명령 실행, 결과 트리).
     tests: crate::test_ui::TestPanel,
+    /// 문제 창의 정적 분석(SARIF)과, 문제 창이 그것을 보이는지(아니면 현재 문서의 언어 서버 진단).
+    sarif: crate::sarif_ui::SarifPanel,
+    problems_sarif: bool,
     /// jsconfig.json을 만들자고 할지 본 문서와 그 결과(화면 폴더). 문서가 바뀌면 다시 본다.
     jsconfig: Option<(PathBuf, Option<&'static str>)>,
     /// jsconfig.json 제안을 닫은 프로젝트 루트(앱이 켜진 동안).
@@ -670,6 +678,8 @@ impl FerriteApp {
             http: Default::default(),
             http_task: None,
             tests: Default::default(),
+            sarif: Default::default(),
+            problems_sarif: false,
             jsconfig: None,
             jsconfig_dismissed: Default::default(),
             watcher: FsWatcher::new(cc.egui_ctx.clone()).ok(),
@@ -2707,8 +2717,32 @@ impl FerriteApp {
         }
     }
 
-    /// "문제" 창(현재 문서의 진단). 항목을 누르면 그 위치로 이동한다.
+    /// "문제" 창: 현재 문서의 진단 또는 프로젝트의 정적 분석(SARIF). 항목을 누르면 그 위치로 이동한다.
     fn problems_panel(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut self.problems_sarif, false, "이 파일");
+            ui.selectable_value(
+                &mut self.problems_sarif,
+                true,
+                format!("정적 분석 ({})", self.sarif.findings().len()),
+            );
+        });
+        if self.problems_sarif {
+            let root = self.tree.as_ref().map(|t| t.root().to_path_buf());
+            if let Some(crate::sarif_ui::SarifAction::Go(path, line, column)) =
+                self.sarif.ui(ui, root.as_deref())
+            {
+                self.open_file(path.clone());
+                if let Some(i) = self.active.filter(|&i| self.docs[i].path == path) {
+                    let doc = &mut self.docs[i];
+                    let pos = doc.buffer.line_col_to_pos(line, column);
+                    doc.buffer.move_to(pos, false);
+                    doc.view.reveal_cursor();
+                    self.focus_editor = true;
+                }
+            }
+            return;
+        }
         let Some(index) = self.active else {
             ui.weak("열린 파일이 없습니다");
             return;
@@ -2753,7 +2787,14 @@ impl FerriteApp {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 self.updater.status_ui(ui);
                 if let Some(doc) = self.active.map(|i| &mut self.docs[i]) {
-                    let count = |s| doc.lsp.problems.iter().filter(|p| p.severity == s).count();
+                    let count = |s| {
+                        doc.lsp
+                            .problems
+                            .iter()
+                            .chain(&doc.sarif_problems)
+                            .filter(|p| p.severity == s)
+                            .count()
+                    };
                     let (errors, warnings) = (count(Severity::Error), count(Severity::Warning));
                     if ui
                         .selectable_label(
@@ -3169,6 +3210,27 @@ impl FerriteApp {
                 });
                 doc.git_key = Some(key);
             }
+            let sarif_key = (self.sarif.generation(), doc.buffer.version());
+            if doc.sarif_key != Some(sarif_key) {
+                doc.sarif_problems = crate::sarif_ui::problems_for(
+                    self.sarif.findings(),
+                    &doc.path,
+                    doc.buffer.rope(),
+                );
+                doc.sarif_key = Some(sarif_key);
+            }
+            // 언어 서버 진단과 정적 분석 결과를 위치 순으로 합친다(정적 분석이 없으면 그대로).
+            let merged: Vec<ferrite_lsp::problem::Problem>;
+            let problems = if doc.sarif_problems.is_empty() {
+                &doc.lsp.problems
+            } else {
+                let mut all = doc.lsp.problems.clone();
+                all.extend(doc.sarif_problems.iter().cloned());
+                // 같은 자리면 심각한 것을 나중에 그려 위에 보이게 한다.
+                all.sort_by_key(|p| (p.range.start, std::cmp::Reverse(p.severity)));
+                merged = all;
+                &merged
+            };
             if crate::http_ui::is_http_file(&doc.path)
                 && doc
                     .http_runs
@@ -3214,7 +3276,7 @@ impl FerriteApp {
                     .filter(|b| !b.is_empty())
                     .unwrap_or(&editor_view::DEFAULT_BRACKETS),
                 search_matches: self.find.as_ref().map_or(&[], |f| f.matches()),
-                problems: &doc.lsp.problems,
+                problems,
                 hover: self
                     .hover
                     .as_ref()
@@ -3544,6 +3606,8 @@ impl eframe::App for FerriteApp {
         self.sync_language_servers();
         self.check_mapper_sql();
         self.updater.poll();
+        let root = self.tree.as_ref().map(|t| t.root().to_path_buf());
+        self.sarif.poll(ctx, root.as_deref());
         if std::mem::take(&mut self.settings_changed) {
             let (settings, error) = load_settings();
             self.status = error.unwrap_or_else(|| "설정을 적용했습니다".into());
@@ -6979,6 +7043,75 @@ mod tests {
             doc.buffer.pos_to_line_col(doc.buffer.selection().head).0,
             15
         );
+        drop(harness);
+        remove_project(&dir);
+    }
+
+    #[test]
+    fn 정적_분석_sarif를_불러와_파일별로_보이고_줄로_가며_바뀌면_다시_읽는다() {
+        let dir = std::env::temp_dir().join(format!("ferrite-sarif-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let java = dir.join("src/main/java/com/example/board");
+        fs::create_dir_all(&java).unwrap();
+        fs::create_dir_all(dir.join("target")).unwrap();
+        let source: String = (1..=16).map(|i| format!("    line{i}();\n")).collect();
+        fs::write(java.join("Board.java"), &source).unwrap();
+        // SpotBugs가 쓰는 꼴: 원본 폴더 기준 경로, 규칙의 메시지 틀과 인자.
+        let sarif = |results: &str| {
+            format!(
+                r#"{{"version": "2.1.0", "runs": [{{"tool": {{"driver": {{"name": "SpotBugs", "rules": [
+                  {{"id": "NP_ALWAYS_NULL", "messageStrings": {{"default": {{"text": "Null pointer dereference of {{0}} in {{1}}."}}}}}},
+                  {{"id": "ES_COMPARING_PARAMETER_STRING_WITH_EQ", "messageStrings": {{"default": {{"text": "Comparison of String parameter using == or != in {{0}}."}}}}}}
+                ]}}}}, "results": [{results}]}}]}}"#
+            )
+        };
+        let np = r#"{"ruleId": "NP_ALWAYS_NULL", "ruleIndex": 0, "level": "error", "message": {"id": "default", "text": "Null pointer dereference", "arguments": ["s", "Board.length(String)"]}, "locations": [{"physicalLocation": {"artifactLocation": {"uri": "com/example/board/Board.java"}, "region": {"startLine": 12}}}]}"#;
+        let es = r#"{"ruleId": "ES_COMPARING_PARAMETER_STRING_WITH_EQ", "ruleIndex": 1, "level": "warning", "message": {"id": "default", "arguments": ["Board.same(String)"]}, "locations": [{"physicalLocation": {"artifactLocation": {"uri": "com/example/board/Board.java"}, "region": {"startLine": 7}}}]}"#;
+        let report = dir.join("target/spotbugsSarif.json");
+        fs::write(&report, sarif(&format!("{np}, {es}"))).unwrap();
+
+        let mut harness = harness_builder()
+            .with_size(egui::vec2(1200.0, 1000.0))
+            .build_eframe(|cc| FerriteApp::new(cc, Some(dir.clone())));
+        {
+            let app = harness.state_mut();
+            app.problems_sarif = true;
+            dock::show(&mut app.layout, Pane::Problems);
+        }
+        harness.run_ok();
+        harness.get_by_label("불러오기").click();
+        harness.run_ok();
+        harness.get_by_label("src/main/java/com/example/board/Board.java (2)");
+        let row =
+            "12:1  [오류] NP_ALWAYS_NULL: Null pointer dereference of s in Board.length(String).";
+        harness.get_by_label(row).click();
+        harness.run_ok();
+        {
+            let app = harness.state();
+            let doc = &app.docs[app.active.unwrap()];
+            assert!(doc.path.ends_with("Board.java"), "{}", doc.path.display());
+            assert_eq!(
+                doc.buffer.pos_to_line_col(doc.buffer.selection().head),
+                (11, 0)
+            );
+            // 열린 파일에는 물결선(들여쓰기를 뺀 그 줄의 글자)으로도 보이고, 상태바 개수에 들어간다.
+            let ranges: Vec<_> = doc.sarif_problems.iter().map(|p| p.range.clone()).collect();
+            let line7 = doc.buffer.line_col_to_pos(6, 4);
+            assert_eq!(ranges[0], line7..line7 + 8);
+            assert_eq!(doc.sarif_problems.len(), 2);
+        }
+        harness.get_by_label("오류 1 · 경고 1");
+
+        // 분석을 다시 돌려 SARIF가 바뀌면 다시 읽는다(1초마다 본다).
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        fs::write(&report, sarif(es)).unwrap();
+        assert!(
+            run_until(&mut harness, |app| app.sarif.findings().len() == 1),
+            "바뀐 SARIF를 다시 읽지 않음"
+        );
+        harness.run_ok();
+        let app = harness.state();
+        assert_eq!(app.docs[app.active.unwrap()].sarif_problems.len(), 1);
         drop(harness);
         remove_project(&dir);
     }
