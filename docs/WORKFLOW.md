@@ -1174,7 +1174,9 @@
   - 보고서(`ferrite-core` `test_report`)
     - 명령에 보고서 옵션을 붙인다: pytest `--junitxml`, CTest `--output-junit`(앱 임시 폴더), Go `-json`. Maven·Gradle은 원래 남긴다.
     - 이번 실행의 보고서만 읽는다(시작 뒤 고친 파일): Maven `target/surefire-reports`·`failsafe-reports`의 `TEST-*.xml`, Gradle `build/test-results`.
-    - JUnit XML: `failure`·`error`는 실패, `skipped`와 CTest의 `status="notrun"`·`disabled`는 건너뜀. 실패의 `system-out`(CTest는 여기에만 출력)을 붙인다.
+    - JUnit XML: `failure`·`error`는 실패, `skipped`는 건너뜀. 실패의 `system-out`(CTest는 여기에만 출력)을 붙인다.
+    - CTest(CMake의 JUnit 쓰기를 따름): `status="disabled"`는 건너뜀, `status="notrun"`은 돌리지 못한 것이라 CTest처럼 실패로 센다(사유는 `<skipped message>`). 다만 `SKIP_RETURN_CODE`·`SKIP_REGULAR_EXPRESSION`으로 건너뛴 것은 건너뜀.
+    - 자동 감지한 CTest 구성은 `ctest --test-dir build -C Debug`다. Windows의 Visual Studio 생성기(다중 구성)는 `-C`가 없으면 테스트를 하나도 돌리지 않는다(CI의 실제 시험이 Windows에서만 모두 "건너뜀"으로 나와 찾았다).
     - `go test -json`: 부속 테스트, Go 1.24의 빌드 출력(`build-output`)과 빌드 실패는 "(패키지)" 실패로.
   - 실패만 다시: Maven `-Dtest=클래스#메서드+메서드 -Dsurefire.failIfNoSpecifiedTests=false`, Gradle `--tests 클래스.메서드`, pytest `--lf`, CTest `--rerun-failed`, Go `-run "^(이름들)$" 패키지들`. 받은 결과를 앞 결과에 덮어 쓴다.
   - 줄 찾기: Java는 스택에서 테스트 클래스의 프레임을 골라 패키지 경로(`com/example/CalcTest.java`)로 파일을 찾는다(Gradle의 `app//` 앞붙이, 안쪽 클래스). pytest는 마지막 `파일.py:줄:`, Go는 `파일_test.go:줄:`.

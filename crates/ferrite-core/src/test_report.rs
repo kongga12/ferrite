@@ -98,20 +98,30 @@ pub fn parse_junit(xml: &str) -> Result<Vec<Case>, String> {
         };
         let problem = child("failure").or_else(|| child("error"));
         let skipped = child("skipped");
-        // CTest는 돌리지 않은 테스트를 status로 알린다.
-        let not_run = matches!(node.attribute("status"), Some("notrun" | "disabled"));
+        // CTest는 결과를 status로 알린다. disabled는 건너뜀이고, notrun(`<skipped message="사유">`)은
+        // 돌리지 못한 것(다중 구성 빌드에 `-C` 빠짐, 실행 파일 없음)이라 CTest처럼 실패로 센다. 다만
+        // SKIP_RETURN_CODE·SKIP_REGULAR_EXPRESSION으로 건너뛴 것은 건너뜀이다.
+        let status = node.attribute("status");
+        let reason = skipped.and_then(|s| s.attribute("message"));
+        let not_run = status == Some("notrun")
+            && !reason.is_some_and(|r| r.to_ascii_uppercase().contains("SKIP"));
         let (outcome, message, mut detail) = match (problem, skipped) {
             (Some(p), _) => (
                 Outcome::Failed,
                 p.attribute("message").map(str::to_owned),
                 text(p),
             ),
+            _ if not_run => (
+                Outcome::Failed,
+                Some(format!("돌리지 못함: {}", reason.unwrap_or("Not Run"))),
+                String::new(),
+            ),
             (None, Some(s)) => (
                 Outcome::Skipped,
                 s.attribute("message").map(str::to_owned),
                 text(s),
             ),
-            (None, None) if not_run => (Outcome::Skipped, None, String::new()),
+            (None, None) if status == Some("disabled") => (Outcome::Skipped, None, String::new()),
             (None, None) => (Outcome::Passed, None, String::new()),
         };
         // 실패한 테스트의 출력(CTest는 여기에만 있다).

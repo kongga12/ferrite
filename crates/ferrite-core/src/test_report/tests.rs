@@ -48,7 +48,8 @@ E       assert 3 == 4
 
 tests\test_calc.py:8: AssertionError</failure></testcase><testcase classname="tests.test_calc" name="test_skip" time="0.000"><skipped type="pytest.skip" message="나중에">tests\test_calc.py:10: 나중에</skipped></testcase></testsuite></testsuites>"#;
 
-/// CTest 3.2x(`--output-junit`): 결과는 status, 출력은 system-out에만.
+/// CTest 3.2x(`--output-junit`): 결과는 status, 출력은 system-out에만. CMake의 JUnit 쓰기(cmCTestTestHandler)를
+/// 따랐다: disabled는 요소 없이, notrun은 `<skipped message="사유">`.
 const CTEST: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <testsuite name="Linux-c++" tests="3" failures="1" disabled="1" skipped="0" hostname="" time="0" timestamp="2026-10-29T05:00:00" >
 	<testcase name="ok" classname="ok" time="0.0123" status="run">
@@ -61,7 +62,14 @@ const CTEST: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 </system-out>
 	</testcase>
 	<testcase name="off" classname="off" time="0" status="disabled">
-		<skipped message="Disabled"/>
+	</testcase>
+	<testcase name="nocfg" classname="nocfg" time="0" status="notrun">
+		<skipped message="Required configuration not found"/>
+		<system-out>Test not available without configuration.  (Missing "-C &lt;config&gt;"?)
+</system-out>
+	</testcase>
+	<testcase name="later" classname="later" time="0" status="notrun">
+		<skipped message="SKIP_RETURN_CODE=4"/>
 	</testcase>
 </testsuite>"#;
 
@@ -175,10 +183,18 @@ fn gradle_pytest_ctest_보고서를_읽는다() {
             ("ok", Outcome::Passed),
             ("bad", Outcome::Failed),
             ("off", Outcome::Skipped),
+            ("nocfg", Outcome::Failed),
+            ("later", Outcome::Skipped),
         ]
     );
     assert_eq!(ctest[1].message.as_deref(), Some("Failed"));
     assert!(ctest[1].detail.contains("bad output"), "실패 출력");
+    // 돌리지 못한 것(다중 구성 빌드에 -C 빠짐)은 CTest처럼 실패, SKIP_*로 건너뛴 것은 건너뜀.
+    assert_eq!(
+        ctest[3].message.as_deref(),
+        Some("돌리지 못함: Required configuration not found")
+    );
+    assert!(ctest[3].detail.contains("Missing \"-C <config>\""));
     assert!(parse_junit("<testsuite>").is_err());
 }
 

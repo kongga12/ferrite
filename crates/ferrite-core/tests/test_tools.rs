@@ -289,7 +289,8 @@ fn ctest_output_junit과_실패만_다시() {
     assert!(run(&root, "cmake -S . -B build").0, "cmake 구성");
     let report = root.join("reports");
     std::fs::create_dir_all(&report).unwrap();
-    let command = "ctest --test-dir build";
+    // Windows의 Visual Studio 생성기는 다중 구성이라 `-C`가 없으면 테스트를 돌리지 않는다(Not Run).
+    let command = "ctest --test-dir build -C Debug";
     let since = SystemTime::now();
     run(
         &root,
