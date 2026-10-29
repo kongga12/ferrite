@@ -22,6 +22,7 @@ Rust로 작성한 크로스플랫폼(Windows / macOS / Linux) 경량 IDE.
 - Git(`Ctrl+Shift+G`): 거터에 변경 줄 표시(저장 전 편집 포함), 상태바에 브랜치, 소스 제어 창에서 diff·스테이지·커밋·푸시·브랜치 전환(git CLI)
 - 통합 터미널(`` Ctrl+` ``): 탭 여러 개, Windows는 ConPTY(PowerShell), 한글 입출력, 256색·트루컬러, 복사(고른 글자)·붙여넣기
 - 파일로 이동(`Ctrl+P`): 파일 이름 퍼지 검색. 파일에서 찾기(`Ctrl+Shift+F`): 프로젝트 전체 검색(대소문자·단어·정규식·파일 패턴, UTF-8·CP949 파일). 둘 다 `.gitignore`를 따른다.
+- 기호: 개요 창(`Ctrl+Shift+O`, 지금 파일의 기호 나무), 기호로 이동(`Ctrl+T`, 떠 있는 언어 서버 모두에서 찾기), 엔드포인트 창(`도구 > 엔드포인트`, 컨트롤러별 URL·HTTP 메서드. Spring Boot LS가 없는 egov 3.x는 내장 egov 서버가 `@RequestMapping` 계열을 모은다).
 - 트리 우클릭: 새 파일·새 폴더·이름 바꾸기·휴지통으로 삭제
 - 가상화 코드 에디터: 100MB 파일도 스크롤·입력 1ms 미만, 줄 번호, 한글 IME 조합 표시
 - 언어 서버(LSP): rust-analyzer로 검증했다. gopls·clangd·basedpyright·phpactor·lemminx(XML)·jdt.ls(Java)도 연결한다. JS·TS는 TypeScript 7, HTML·CSS·JSON은 vscode-langservers-extracted를 npm으로 설치한다(npm 필요, HTML·CSS·JSON은 Node 필요).
@@ -66,6 +67,7 @@ Rust로 작성한 크로스플랫폼(Windows / macOS / Linux) 경량 IDE.
 | 저장 / 다른 이름으로 저장 | `Ctrl+S` / `Ctrl+Shift+S` |
 | 찾기 / 바꾸기 / 다음·이전 | `Ctrl+F` / `Ctrl+H` / `F3`·`Shift+F3` |
 | 파일로 이동 / 파일에서 찾기 | `Ctrl+P` / `Ctrl+Shift+F` |
+| 기호로 이동 / 개요 | `Ctrl+T` / `Ctrl+Shift+O` |
 | 터미널 열기·숨기기 | `` Ctrl+` `` (macOS도 Ctrl) |
 | 소스 제어(Git) | `Ctrl+Shift+G` |
 | 실행 취소 / 다시 실행 | `Ctrl+Z` / `Ctrl+Y`, `Ctrl+Shift+Z` |

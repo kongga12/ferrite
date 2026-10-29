@@ -28,6 +28,7 @@ mod quick_open;
 mod schema_ui;
 mod servers;
 mod sql_console;
+mod symbols_ui;
 mod terminal_ui;
 mod theme;
 mod update_ui;

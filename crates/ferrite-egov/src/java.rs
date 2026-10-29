@@ -51,6 +51,180 @@ pub struct TypeDecl {
     pub beans: Vec<(String, Range<usize>)>,
     /// `@Entity`면 JPQL에서 쓰는 엔티티 이름(`@Entity(name)`, 없으면 클래스 단순 이름).
     pub entity: Option<String>,
+    /// 컨트롤러의 요청 매핑(`@RequestMapping` 계열). 클래스의 공통 경로를 붙였다.
+    pub endpoints: Vec<Endpoint>,
+}
+
+/// 요청 매핑 하나. Spring Boot LS의 기호와 같은 꼴(`@/경로 -- GET`)로 내보낸다.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Endpoint {
+    /// URL 경로(`/board/list.do`).
+    pub path: String,
+    /// HTTP 메서드(`GET` 등). 비었으면 모든 메서드다.
+    pub methods: Vec<String>,
+    /// 처리 메서드 이름의 위치(UTF-16 LSP 위치). 기호를 찾을 때 파일을 다시 읽지 않게 미리 센다.
+    pub location: lsp_types::Range,
+}
+
+impl Endpoint {
+    /// 기호 이름: `@/경로`, 메서드가 정해져 있으면 ` -- GET,POST`를 붙인다.
+    pub fn label(&self) -> String {
+        if self.methods.is_empty() {
+            format!("@{}", self.path)
+        } else {
+            format!("@{} -- {}", self.path, self.methods.join(","))
+        }
+    }
+}
+
+/// 요청 매핑 애너테이션과 그것이 정하는 HTTP 메서드.
+const MAPPINGS: [(&str, Option<&str>); 6] = [
+    ("RequestMapping", None),
+    ("GetMapping", Some("GET")),
+    ("PostMapping", Some("POST")),
+    ("PutMapping", Some("PUT")),
+    ("DeleteMapping", Some("DELETE")),
+    ("PatchMapping", Some("PATCH")),
+];
+
+/// 노드(클래스·메서드)에 붙은 요청 매핑: (경로들, HTTP 메서드들). 경로를 쓰지 않았으면 `[""]`다.
+/// 상수로 쓴 경로처럼 글자로 읽을 수 없는 값은 건너뛴다.
+fn mapping_of(node: Node<'_>, text: &str) -> Option<(Vec<String>, Vec<String>)> {
+    let annotation = children(modifiers(node)?)
+        .filter(|n| matches!(n.kind(), "annotation" | "marker_annotation"))
+        .find(|a| {
+            field_text(*a, "name", text)
+                .map(|n| n.rsplit('.').next().unwrap_or(n))
+                .is_some_and(|n| MAPPINGS.iter().any(|(m, _)| *m == n))
+        })?;
+    let name = field_text(annotation, "name", text)?;
+    let name = name.rsplit('.').next().unwrap_or(name);
+    let implied = MAPPINGS.iter().find(|(m, _)| *m == name)?.1;
+    let mut paths = Vec::new();
+    let mut methods: Vec<String> = implied.map(str::to_owned).into_iter().collect();
+    if let Some(args) = annotation.child_by_field_name("arguments") {
+        for arg in children(args).filter(|n| n.is_named()) {
+            if arg.kind() != "element_value_pair" {
+                paths.extend(strings(arg, text));
+                continue;
+            }
+            let Some(value) = arg.child_by_field_name("value") else {
+                continue;
+            };
+            match field_text(arg, "key", text) {
+                Some("value" | "path") => paths.extend(strings(value, text)),
+                Some("method") => methods.extend(enum_names(value, text)),
+                _ => {}
+            }
+        }
+    }
+    if paths.is_empty() {
+        paths.push(String::new());
+    }
+    Some((paths, methods))
+}
+
+/// 문자열 하나나 문자열 배열(`{"/a", "/b"}`)의 글자들.
+fn strings(node: Node<'_>, text: &str) -> Vec<String> {
+    match node.kind() {
+        "string_literal" => vec![
+            children(node)
+                .find(|n| n.kind() == "string_fragment")
+                .and_then(|f| f.utf8_text(text.as_bytes()).ok())
+                .unwrap_or_default()
+                .to_owned(),
+        ],
+        "element_value_array_initializer" => {
+            children(node).flat_map(|n| strings(n, text)).collect()
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// `RequestMethod.GET`·`GET`(정적 import)이나 그 배열의 이름들.
+fn enum_names(node: Node<'_>, text: &str) -> Vec<String> {
+    match node.kind() {
+        "field_access" => field_text(node, "field", text)
+            .map(str::to_owned)
+            .into_iter()
+            .collect(),
+        "identifier" => node
+            .utf8_text(text.as_bytes())
+            .ok()
+            .map(str::to_owned)
+            .into_iter()
+            .collect(),
+        "element_value_array_initializer" => {
+            children(node).flat_map(|n| enum_names(n, text)).collect()
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// 클래스의 공통 경로와 메서드 경로를 잇는다. 앞에 `/`를 두고 끝의 `/`는 뺀다(루트만 `/`).
+fn join_path(prefix: &str, path: &str) -> String {
+    let joined = format!(
+        "/{}/{}",
+        prefix.trim_matches('/'),
+        path.trim_start_matches('/')
+    );
+    let mut out = String::with_capacity(joined.len());
+    for c in joined.chars() {
+        if !(c == '/' && out.ends_with('/')) {
+            out.push(c);
+        }
+    }
+    if out.len() > 1 && out.ends_with('/') && !path.ends_with('/') {
+        out.pop();
+    }
+    out
+}
+
+/// 바이트 위치의 UTF-16 LSP 위치.
+fn utf16_position(text: &str, byte: usize) -> lsp_types::Position {
+    let before = &text[..byte.min(text.len())];
+    let line_start = before.rfind('\n').map_or(0, |i| i + 1);
+    lsp_types::Position::new(
+        before.matches('\n').count() as u32,
+        before[line_start..].encode_utf16().count() as u32,
+    )
+}
+
+/// 컨트롤러(`@Controller`·`@RestController`, 또는 클래스에 `@RequestMapping`)의 요청 매핑.
+fn endpoints_of(node: Node<'_>, body: Node<'_>, text: &str, controller: bool) -> Vec<Endpoint> {
+    let class_mapping = mapping_of(node, text);
+    if !controller && class_mapping.is_none() {
+        return Vec::new();
+    }
+    let (prefixes, class_methods) =
+        class_mapping.unwrap_or_else(|| (vec![String::new()], Vec::new()));
+    let mut found = Vec::new();
+    for method in children(body).filter(|n| n.kind() == "method_declaration") {
+        let (Some((paths, methods)), Some(name)) =
+            (mapping_of(method, text), method.child_by_field_name("name"))
+        else {
+            continue;
+        };
+        let methods = if methods.is_empty() {
+            class_methods.clone()
+        } else {
+            methods
+        };
+        let location = lsp_types::Range::new(
+            utf16_position(text, name.start_byte()),
+            utf16_position(text, name.end_byte()),
+        );
+        for prefix in &prefixes {
+            for path in &paths {
+                found.push(Endpoint {
+                    path: join_path(prefix, path),
+                    methods: methods.clone(),
+                    location,
+                });
+            }
+        }
+    }
+    found
 }
 
 /// 클래스에 붙으면 빈이 되는 애너테이션. `Mapper`는 egov `@Mapper("이름")`·MyBatis `@Mapper`다.
@@ -331,6 +505,14 @@ fn collect_types(node: Node<'_>, text: &str, package: Option<&str>, found: &mut 
             .iter()
             .find(|(a, _)| *a == "Entity")
             .map(|(_, value)| value.unwrap_or(simple).to_owned());
+        let controller = annotated
+            .iter()
+            .any(|(a, _)| matches!(*a, "Controller" | "RestController"));
+        let endpoints = if is_interface {
+            Vec::new()
+        } else {
+            endpoints_of(node, body, text, controller)
+        };
         found.push(TypeDecl {
             fqn: qualify(package, simple),
             range,
@@ -340,6 +522,7 @@ fn collect_types(node: Node<'_>, text: &str, package: Option<&str>, found: &mut 
             methods,
             beans,
             entity,
+            endpoints,
         });
     }
     for child in children(node) {
@@ -529,6 +712,75 @@ fn simple_type_name(ty: Node<'_>, text: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn 컨트롤러의_요청_매핑을_공통_경로와_함께_모은다() {
+        let text = r#"package egov.board.web;
+
+@Controller
+@RequestMapping("/board")
+public class BoardController {
+    @RequestMapping("/list.do")
+    public String list() { return "x"; }
+
+    @RequestMapping(value = {"/view.do", "/detail.do"}, method = RequestMethod.GET)
+    public String view() { return "x"; }
+
+    @PostMapping(path = "save.do")
+    public String save() { return "x"; }
+
+    @RequestMapping(value = "/del.do", method = {RequestMethod.POST, RequestMethod.DELETE})
+    public String 삭제() { return "x"; }
+
+    @GetMapping
+    public String index() { return "x"; }
+
+    @RequestMapping(Urls.HIDDEN)
+    public String constant() { return "x"; }
+
+    public String helper() { return "x"; }
+}
+
+@RestController
+public class ApiController {
+    @GetMapping("/api/items")
+    public List<String> items() { return null; }
+}
+
+public class NotController {
+    @RequestMapping("/no.do")
+    public void x() {}
+}
+"#;
+        let file = parse_file(text);
+        let labels: Vec<String> = file
+            .types
+            .iter()
+            .flat_map(|t| t.endpoints.iter().map(Endpoint::label))
+            .collect();
+        assert_eq!(
+            labels,
+            [
+                "@/board/list.do",
+                "@/board/view.do -- GET",
+                "@/board/detail.do -- GET",
+                "@/board/save.do -- POST",
+                "@/board/del.do -- POST,DELETE",
+                "@/board -- GET",
+                "@/board",
+                "@/api/items -- GET",
+            ]
+        );
+        // 위치는 처리 메서드 이름(UTF-16): `삭제`는 두 글자다.
+        let delete = &file.types[0].endpoints[4];
+        assert_eq!(delete.location.start.line, 15);
+        assert_eq!(
+            delete.location.end.character - delete.location.start.character,
+            2
+        );
+        assert_eq!(join_path("", ""), "/");
+        assert_eq!(join_path("/a/", "/b/"), "/a/b/");
+    }
 
     const MAPPER: &str = r#"package egov.sample.service.impl;
 

@@ -821,3 +821,50 @@ fn spring_xml과_jpa를_검증하고_이동하고_완성한다() {
         std::thread::sleep(Duration::from_millis(100));
     }
 }
+
+#[test]
+fn 프로젝트의_요청_매핑을_엔드포인트_기호로_낸다() {
+    let root = project("endpoints");
+    let web = root.join("src/main/java/egov/board/web");
+    fs::create_dir_all(&web).unwrap();
+    fs::write(
+        web.join("BoardController.java"),
+        "package egov.board.web;\n\n@Controller\n@RequestMapping(\"/board\")\npublic class BoardController {\n    @RequestMapping(\"/list.do\")\n    public String list() { return \"x\"; }\n    @PostMapping(\"/save.do\")\n    public String save() { return \"x\"; }\n}\n",
+    )
+    .unwrap();
+    let command = ServerCommand {
+        program: env!("CARGO_BIN_EXE_ferrite-egov-ls").into(),
+        ..Default::default()
+    };
+    let mut lsp = LanguageServer::start(&command, &root, || {}).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !lsp.is_ready() {
+        assert!(Instant::now() < deadline, "준비되지 않음");
+        let _ = lsp.poll_events();
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        lsp.capabilities()
+            .is_some_and(|c| c.workspace_symbol_provider.is_some())
+    );
+    let names = |lsp: &mut LanguageServer, query: &str| -> Vec<String> {
+        let id = lsp.request("workspace/symbol", serde_json::json!({ "query": query }));
+        response(lsp, id)
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["name"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    assert_eq!(
+        names(&mut lsp, "@/"),
+        ["@/board/list.do", "@/board/save.do -- POST"]
+    );
+    assert_eq!(names(&mut lsp, "SAVE"), ["@/board/save.do -- POST"]);
+    let id = lsp.request("workspace/symbol", serde_json::json!({ "query": "list" }));
+    let symbol = &response(&lsp, id)[0];
+    assert_eq!(symbol["containerName"], "BoardController");
+    assert_eq!(symbol["location"]["range"]["start"]["line"], 6);
+    drop(lsp);
+    let _ = fs::remove_dir_all(&root);
+}

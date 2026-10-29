@@ -388,6 +388,7 @@ fn initialize_params(root: &Path, init_options: &Value) -> Result<Value, String>
                 },
                 "hover": { "contentFormat": ["plaintext", "markdown"] },
                 "definition": { "linkSupport": true },
+                "documentSymbol": { "hierarchicalDocumentSymbolSupport": true },
                 "references": {},
                 "formatting": {},
                 "rename": { "prepareSupport": false },
@@ -408,6 +409,7 @@ fn initialize_params(root: &Path, init_options: &Value) -> Result<Value, String>
                 "workspaceFolders": true,
                 "configuration": true,
                 "diagnostics": { "refreshSupport": true },
+                "symbol": {},
                 "applyEdit": true,
                 // 코드 액션 명령·중계로 workspace/executeCommand를 보낸다. Spring Boot LS는 이것이
                 // 없으면 명령 목록을 만들지 않아 초기화하다 죽는다.
