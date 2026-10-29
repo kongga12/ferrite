@@ -5216,8 +5216,10 @@ mod tests {
             .unwrap_or_default()
     }
 
+    /// 터미널 글자가 조건에 맞을 때까지(최대 60초) 기다린다. 시험이 함께 도는 Windows CI 러너에서는
+    /// PowerShell이 20초 넘게 걸리기도 했다(셸은 살아 있었다).
     fn wait_for_terminal(harness: &mut Harness<'_, FerriteApp>, done: impl Fn(&str) -> bool) {
-        for _ in 0..400 {
+        for _ in 0..1200 {
             harness.run_ok();
             if done(&terminal_text(harness)) {
                 return;
