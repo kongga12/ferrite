@@ -525,6 +525,23 @@ fn web_server() -> u16 {
     port
 }
 
+/// 시험이 실패해 풀릴 때 기록 파일의 끝을 출력한다.
+struct DumpOnPanic(PathBuf);
+
+impl Drop for DumpOnPanic {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            let text = std::fs::read_to_string(&self.0).unwrap_or_default();
+            let lines: Vec<&str> = text.lines().collect();
+            eprintln!(
+                "--- {} 끝 ---\n{}",
+                self.0.display(),
+                lines[lines.len().saturating_sub(60)..].join("\n")
+            );
+        }
+    }
+}
+
 /// 다음 멈춤을 기다려 (스레드, 맨 위 프레임)을 돌려준다.
 fn top_frame(
     session: &mut DebugSession,
@@ -562,8 +579,11 @@ fn js_debug를_설치해_브라우저의_외부_스크립트와_화면_스크립
     let adapter = install_adapter(&servers, "js-debug", &project);
     let mut runtime_args = vec!["--headless=new", "--disable-gpu"];
     if cfg!(target_os = "linux") {
-        runtime_args.push("--no-sandbox");
+        runtime_args.extend(["--no-sandbox", "--disable-dev-shm-usage"]);
     }
+    // 실패하면 js-debug의 기록 끝을 보인다(브라우저를 띄우지 못한 까닭 등).
+    let trace = project.join("js-debug.log");
+    let _dump = DumpOnPanic(trace.clone());
     let launch = Launch {
         adapter_id: "js-debug".into(),
         attach: false,
@@ -573,6 +593,9 @@ fn js_debug를_설치해_브라우저의_외부_스크립트와_화면_스크립
             "webRoot": web_root,
             "pathMapping": { "/app/": format!("{}/", web_root.display()) },
             "runtimeArgs": runtime_args,
+            // CI 러너에서 처음 띄우는 브라우저는 느리다(기본 10초).
+            "timeout": 60000,
+            "trace": { "logFile": trace },
         }),
     };
     let breakpoints = BTreeMap::from([(
