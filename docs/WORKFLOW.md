@@ -1185,7 +1185,23 @@
     - 창 시험(kittest): 결과 트리와 실패 사유, 스택의 테스트 줄을 눌러 그 파일 그 줄로
     - 실제 도구(CI 3개 OS 전체 작업): Maven(JUnit 5)·pytest·Go·CTest를 돌려 결과·테스트 줄을 확인하고 실패만 다시 돌려 실패한 것만 도는지 본다.
   - 남은 것: Gradle 실제 실행은 CI에서 돌리지 않았다(형식 표본으로 확인), Kotlin·Scala 스택은 같은 꼴이라 읽지만 확인하지 않았다
-- [ ] 9-2 SARIF 결과 가져오기 — 작음
+- [x] 9-2 SARIF 결과 가져오기 — 작음
+  - 결정(사용자): 문제 창 목록과 열린 파일의 물결선 둘 다, 프로젝트의 SARIF를 찾아 고르고 바뀌면 다시 읽기, 실제 SpotBugs로 로컬·CI 확인(로컬에서 spotbugs-maven-plugin 4.10.5.0을 받음, 53개 jar 31MB)
+  - 문제 창 위 [이 파일]·[정적 분석 (N)]: 정적 분석은 프로젝트의 SARIF(`*.sarif`·`*.sarif.json`, SpotBugs의 `spotbugsSarif.json`, 최근 것이 먼저)를 골라 [불러오기], 그 밖은 [다른 파일…]. [찾기]·[지우기].
+    - 도구·수준별 개수와 파일을 보이고, 결과를 파일별로 묶어 `줄:열 [수준] 규칙: 메시지`로 보인다. 누르면 그 파일 그 줄·열로 간다. 말풍선은 도구와 규칙 설명 주소.
+    - 불러온 파일을 1초마다 보고 바뀌면 다시 읽는다(실행 구성으로 분석을 다시 돌린 뒤).
+    - 열린 파일에는 언어 서버 진단처럼 물결선·말풍선으로 보이고 상태바 개수에 들어간다. 열이 없으면 들여쓰기를 뺀 그 줄을 칠한다. 같은 자리면 심각한 것을 위에 그린다.
+  - SARIF 2.1.0 읽기(`ferrite-core` `sarif`)
+    - 수준: 결과의 `level`, 없으면 규칙의 `defaultConfiguration.level`, 그것도 없으면 경고. `note`·`none`은 정보. `kind`가 `pass`·`notApplicable`이면 뺀다.
+    - 메시지: 규칙의 메시지 틀(`messageStrings`)에 인자(`arguments`)를 채운 것을 쓴다(SpotBugs는 짧은 `text`와 자세한 틀을 함께 준다). 없으면 `text`.
+    - 파일: `uriBaseId` → `originalUriBaseIds`로 잇기, `file:` 주소, SARIF 폴더·프로젝트 기준 상대 경로, 그래도 없으면 경로 끝이 같은 프로젝트 파일. SpotBugs(Maven 플러그인)는 기준 주소 없이 원본 폴더 기준 경로(`com/example/board/Board.java`)만 적어서 마지막 방법이 필요하다. `%XX`를 푼다.
+    - 테스트 보고서와 같이 쓰는 프로젝트 파일 찾기를 `files`로 뺐다.
+  - 검증
+    - 단위: 실제 SpotBugs 4.10.5 SARIF(로컬에서 낸 것), 기준 주소·`file:` 주소·규칙 기본 수준·`kind=pass`·`%20`, 메시지 틀, SARIF 파일 찾기, 결과를 에디터 범위로
+    - 창 시험(kittest): 불러오기 → 파일별 목록, 누르면 그 줄로, 물결선·상태바 개수, SARIF가 바뀌면 다시 읽기
+    - 실제 SpotBugs(CI 3개 OS 전체 작업): Maven으로 분석해 `spotbugsSarif.json`을 찾고, null 역참조(`NP_ALWAYS_NULL`)가 그 파일 12줄의 오류로, 메시지 틀이 채워져 나온다.
+    - 실제 앱(Windows, 릴리스 빌드): SpotBugs가 낸 SARIF를 찾아 불러와 오류 1·경고 2·참고 1, 7·12줄 물결선, 상태바 "오류 1 · 경고 2", 눌러서 12줄로 가는 것을 화면으로 확인했다. 확인 뒤 설정 폴더를 지웠다.
+  - 남은 것: PMD·Semgrep·clang의 실제 SARIF는 돌려 보지 않았다(SARIF 2.1.0 공통 형식과 기준 주소 처리로 읽는다)
 - [ ] 9-3 의존성 취약점 검사(OSV, 오프라인 DB) — 중간
 - [ ] 3개 OS 검증
 

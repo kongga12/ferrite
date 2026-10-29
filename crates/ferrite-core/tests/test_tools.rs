@@ -1,6 +1,7 @@
 //! 실제 테스트 도구(Maven·pytest·Go·CTest)를 돌려 보고서를 읽고, 실패 스택의 줄을 프로젝트에서 찾고,
-//! 실패한 것만 다시 돌린다. 도구가 필요하고 Maven은 의존성을 받으므로 기본으로는 돌지 않는다. CI의 3개 OS
-//! 전체 작업이 `--ignored`로 돌린다. 도구가 없으면 로컬에서는 건너뛰고 CI에서는 실패한다.
+//! 실패한 것만 다시 돌린다. 정적 분석기(SpotBugs)가 낸 SARIF도 읽는다. 도구가 필요하고 Maven은
+//! 의존성을 받으므로 기본으로는 돌지 않는다. CI의 3개 OS 전체 작업이 `--ignored`로 돌린다. 도구가 없으면
+//! 로컬에서는 건너뛰고 CI에서는 실패한다.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -316,6 +317,71 @@ fn ctest_output_junit과_실패만_다시() {
         outcomes(&again),
         [("bad".to_owned(), Outcome::Failed)],
         "실패한 것만 다시"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+#[ignore = "Maven으로 SpotBugs(spotbugs-maven-plugin 4.10.5.0, 약 31MB)를 받아 돌린다. Java 17 이상과 mvn이 필요하다"]
+fn spotbugs가_낸_sarif를_읽고_원본_파일을_찾는다() {
+    use ferrite_core::sarif::{self, Level};
+
+    if !require("mvn -v") {
+        return;
+    }
+    let root = temp_dir("spotbugs");
+    let java = root.join("src/main/java/com/example/board");
+    std::fs::create_dir_all(&java).unwrap();
+    std::fs::write(
+        root.join("pom.xml"),
+        r#"<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>com.example</groupId>
+  <artifactId>board</artifactId>
+  <version>1.0</version>
+  <properties>
+    <maven.compiler.release>17</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+  </properties>
+</project>
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        java.join("Board.java"),
+        "package com.example.board;\n\npublic class Board {\n    private String title;\n\n    public boolean same(String other) {\n        return title == other;\n    }\n\n    public int length(String s) {\n        if (s == null) {\n            return s.length();\n        }\n        return 0;\n    }\n}\n",
+    )
+    .unwrap();
+    let (ok, _) = run(
+        &root,
+        "mvn -B -q compile com.github.spotbugs:spotbugs-maven-plugin:4.10.5.0:spotbugs -Dspotbugs.sarifOutput=true",
+    );
+    assert!(ok, "SpotBugs 분석");
+    let report = root.join("target/spotbugsSarif.json");
+    assert_eq!(
+        sarif::candidates(&root),
+        std::slice::from_ref(&report),
+        "프로젝트에서 찾는다"
+    );
+    let text = std::fs::read_to_string(&report).unwrap();
+    let findings = sarif::parse(&text, &root, &root.join("target")).unwrap();
+    let np = findings
+        .iter()
+        .find(|f| f.rule == "NP_ALWAYS_NULL")
+        .expect("null 역참조");
+    assert_eq!(
+        (np.tool.as_str(), np.level, np.line),
+        ("SpotBugs", Level::Error, 12)
+    );
+    assert_eq!(
+        np.message,
+        "Null pointer dereference of s in com.example.board.Board.length(String)."
+    );
+    assert_eq!(np.path.as_deref(), Some(java.join("Board.java").as_path()));
+    assert!(
+        findings
+            .iter()
+            .any(|f| f.rule == "ES_COMPARING_PARAMETER_STRING_WITH_EQ" && f.line == 7)
     );
     let _ = std::fs::remove_dir_all(&root);
 }

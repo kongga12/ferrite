@@ -301,7 +301,7 @@ pub fn report_files(tool: Tool, root: &Path, dir: &Path, since: SystemTime) -> V
     let mut files = match tool {
         Tool::Maven | Tool::Gradle => {
             let mut found = Vec::new();
-            walk(root, 12, &mut |path, is_dir| {
+            crate::files::walk(root, 12, &mut |path, is_dir| {
                 if is_dir {
                     return true;
                 }
@@ -511,64 +511,7 @@ pub fn resolve(root: &Path, dir: &Path, frame: &Frame) -> Option<PathBuf> {
             frame.file.replace('\\', "/")
         }
     };
-    let wanted: Vec<&str> = relative.split('/').filter(|p| !p.is_empty()).collect();
-    let mut found = None;
-    walk(root, 20, &mut |path, is_dir| {
-        if is_dir {
-            return found.is_none();
-        }
-        let parts: Vec<String> = path
-            .components()
-            .map(|c| c.as_os_str().to_string_lossy().into_owned())
-            .collect();
-        if parts.len() >= wanted.len() && parts[parts.len() - wanted.len()..] == wanted[..] {
-            found = Some(path.to_path_buf());
-        }
-        found.is_none()
-    });
-    found
-}
-
-/// 폴더를 내려가며 `visit(경로, 폴더인지)`를 부른다. 빌드·의존성 폴더는 건너뛰고, `visit`이 false를 주면
-/// 그 폴더 안으로 들어가지 않는다(파일이면 멈춘다).
-// ponytail: 깊이와 항목 수로만 자른다. 아주 큰 저장소에서 느리면 git이 아는 파일 목록으로 바꾼다.
-fn walk(root: &Path, depth: usize, visit: &mut dyn FnMut(&Path, bool) -> bool) {
-    const SKIP: [&str; 8] = [
-        ".git",
-        "node_modules",
-        ".gradle",
-        ".idea",
-        ".venv",
-        "__pycache__",
-        ".mvn",
-        ".ferrite",
-    ];
-    let mut stack = vec![(root.to_path_buf(), 0)];
-    let mut seen = 0;
-    while let Some((dir, level)) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            seen += 1;
-            if seen > 200_000 {
-                return;
-            }
-            let path = entry.path();
-            let is_dir = entry.file_type().is_ok_and(|t| t.is_dir());
-            if is_dir {
-                let name = entry.file_name();
-                if SKIP.iter().any(|s| name == *s) || level >= depth {
-                    continue;
-                }
-                if visit(&path, true) {
-                    stack.push((path, level + 1));
-                }
-            } else if !visit(&path, false) {
-                return;
-            }
-        }
-    }
+    crate::files::find_suffix(root, &relative)
 }
 
 #[cfg(test)]
