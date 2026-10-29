@@ -1,5 +1,7 @@
 //! 디버거: 디버그 세션 하나와 그 화면(도구 막대·호출 스택·변수 창, 디버그 출력 창).
 //! 멈추면 호출 스택과 맨 위 프레임의 변수를 스스로 불러오고, 앱에 멈춘 자리를 알린다.
+//! 로컬 파일이 없는 스크립트(브라우저 화면의 인라인 스크립트)는 어댑터에서 내용을 받아 임시 폴더에
+//! 담아 읽기 전용으로 연다. 그 파일에 건 중단점은 원래 소스로 건다.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -11,8 +13,8 @@ use std::time::{Duration, Instant};
 use eframe::egui;
 use ferrite_core::debug_config::DebugConfig;
 use ferrite_dap::{
-    Adapter, Breakpoint, BreakpointState, DebugEvent, DebugSession, Launch, Scope, StackFrame,
-    State, Variable, adapters, types,
+    Adapter, Breakpoint, BreakpointState, DebugEvent, DebugSession, Launch, Scope, Source,
+    StackFrame, State, Variable, adapters, types,
 };
 use serde_json::Value;
 
@@ -29,6 +31,62 @@ enum Request {
     Scopes,
     Variables(i64),
     Evaluate(String),
+    LoadedSources,
+    /// 로컬 파일이 없는 소스의 내용.
+    Source(Source),
+}
+
+/// 로컬 파일이 없는 소스를 담아 두는 폴더(이 앱 프로세스의 것). 앱을 닫을 때 지운다.
+pub fn sources_dir() -> PathBuf {
+    std::env::temp_dir().join(format!("ferrite-debug-sources-{}", std::process::id()))
+}
+
+/// 어댑터에 내용을 물어야 하는 소스(로컬 파일이 없다).
+fn is_remote(source: &Source) -> bool {
+    source.source_reference > 0
+        && !source
+            .path
+            .as_ref()
+            .is_some_and(|p| p.is_absolute() && p.is_file())
+}
+
+/// 어댑터가 준 소스 이름을 보일 글. js-debug는 경로에 쓸 수 없는 `:` 대신 `꞉`(U+A789)을 쓰는데 글꼴에 없다.
+fn shown(name: &str) -> String {
+    name.replace('\u{a789}', ":")
+}
+
+/// 소스를 담을 파일 이름: 경로의 마지막 조각에서 파일 이름에 못 쓰는 글자를 빼고, HTML이면 `.html`을 붙인다.
+fn stored_name(source: &Source, content: &str) -> String {
+    let text = source
+        .path
+        .as_ref()
+        .map(|p| p.to_string_lossy().into_owned())
+        .or_else(|| source.name.clone())
+        .unwrap_or_default();
+    let last = text.rsplit(['/', '\\']).next().unwrap_or_default();
+    let mut name: String = last
+        .chars()
+        .map(|c| match c {
+            '\u{a789}' | ':' | '<' | '>' | '"' | '|' | '?' | '*' => '_',
+            c if c.is_control() => '_',
+            c => c,
+        })
+        .collect();
+    if name.trim_matches(['_', '.']).is_empty() {
+        name = "script".into();
+    }
+    // 화면이면 HTML, 아니면 스크립트로 강조한다(js-debug는 인라인 스크립트를 화면 줄에 맞춰 빈 줄을
+    // 채운 스크립트로 준다).
+    let lower = name.to_ascii_lowercase();
+    let (extension, known): (&str, &[&str]) = if content.trim_start().starts_with('<') {
+        (".html", &[".html", ".htm"])
+    } else {
+        (".js", &[".js", ".mjs", ".cjs", ".ts", ".jsx", ".tsx"])
+    };
+    if !known.iter().any(|e| lower.ends_with(e)) {
+        name.push_str(extension);
+    }
+    name
 }
 
 /// 빌드가 끝나기를 기다리는 시작. 빌드에 성공하면 세션을 띄운다.
@@ -74,6 +132,24 @@ pub struct Debugger {
     states: HashMap<PathBuf, Vec<BreakpointState>>,
     console: String,
     expression: String,
+    /// 담아 둔 소스: 어댑터의 소스 경로(글) → 로컬 파일.
+    stored: HashMap<String, PathBuf>,
+    /// 불러온 스크립트 중 로컬 파일이 없는 것(디버그 창 목록).
+    scripts: Vec<Source>,
+    /// 내용을 받으면 열 소스(목록에서 누른 것).
+    open_after: Option<String>,
+    /// 어댑터에 준 세션 임시 폴더(js-debug). 세션이 끝나면 지운다.
+    scratch: Option<PathBuf>,
+}
+
+/// 담아 둔 소스를 찾는 열쇠(같은 화면을 다시 불러도 같다. 번호는 바뀐다).
+fn source_key(source: &Source) -> String {
+    source
+        .path
+        .as_ref()
+        .map(|p| p.to_string_lossy().into_owned())
+        .or_else(|| source.name.clone())
+        .unwrap_or_else(|| source.source_reference.to_string())
 }
 
 impl Debugger {
@@ -142,6 +218,7 @@ impl Debugger {
         breakpoints: BTreeMap<PathBuf, Vec<Breakpoint>>,
     ) -> Result<(), String> {
         let wake = self.ctx.clone();
+        self.scratch = adapters::scratch_of(adapter);
         let session = DebugSession::start(adapter, launch, breakpoints, move || {
             if let Some(ctx) = &wake {
                 ctx.request_repaint();
@@ -173,8 +250,26 @@ impl Debugger {
         }
     }
 
+    /// 앱을 닫을 때: 대상을 끝내라고 하고 끝났다는 알림을 잠깐(`STOP_GRACE`) 기다린 뒤 세션을 버린다.
+    /// 바로 버리면 어댑터만 죽고, 어댑터가 띄운 브라우저가 늦게 끝나 임시 폴더를 쥐고 있다.
+    pub fn shutdown(&mut self) {
+        self.pending = None;
+        if let Some(session) = &mut self.session {
+            session.stop();
+            let deadline = Instant::now() + STOP_GRACE;
+            while Instant::now() < deadline && *session.state() != State::Terminated {
+                session.poll();
+                thread::sleep(Duration::from_millis(50));
+            }
+        }
+        self.session = None;
+    }
+
     fn end(&mut self, note: &str) {
         self.session = None;
+        if let Some(dir) = self.scratch.take() {
+            adapters::remove_later(dir);
+        }
         self.stopping = None;
         self.clear_stop();
         self.push_console(&format!("{note}\n"));
@@ -230,6 +325,33 @@ impl Debugger {
         self.states.get(path)?.get(index)
     }
 
+    /// 어댑터에서 받아 담아 둔 소스 파일인지(읽기 전용으로 연다).
+    pub fn is_stored(&self, path: &Path) -> bool {
+        self.stored.values().any(|p| p == path)
+    }
+
+    /// 받은 소스 내용을 파일에 담는다. 이미 담은 소스면 내용만 고친다(화면을 다시 불렀을 때).
+    fn store(&mut self, source: &Source, content: &str) -> std::io::Result<PathBuf> {
+        let key = source_key(source);
+        if let Some(local) = self.stored.get(&key) {
+            std::fs::write(local, content)?;
+            return Ok(local.clone());
+        }
+        let dir = sources_dir();
+        std::fs::create_dir_all(&dir)?;
+        let dir = crate::app::real_path(&dir);
+        let name = stored_name(source, content);
+        let mut local = dir.join(&name);
+        let mut n = 2;
+        while self.stored.values().any(|p| *p == local) {
+            local = dir.join(format!("{n}-{name}"));
+            n += 1;
+        }
+        std::fs::write(&local, content)?;
+        self.stored.insert(key, local.clone());
+        Ok(local)
+    }
+
     /// 고른 프레임의 파일과 줄(0부터). 멈춰 있을 때만.
     pub fn location(&self) -> Option<(&Path, usize)> {
         let frame = self.frames.get(self.frame)?;
@@ -267,6 +389,8 @@ impl Debugger {
                 let frame = self.frames.get(self.frame).map(|f| f.id);
                 session.evaluate(expression, frame)
             }
+            Request::LoadedSources => session.loaded_sources(),
+            Request::Source(source) => session.source(source),
         };
         self.requests.insert(id, request);
     }
@@ -413,11 +537,24 @@ impl Debugger {
             }
             Request::StackTrace => {
                 self.frames = types::stack_frames(&body);
-                // 어댑터가 준 경로(드라이브 글자 대소문자 등)를 열린 문서 경로와 같은 꼴로 맞춘다.
-                for frame in &mut self.frames {
-                    if let Some(path) = frame.source.as_mut().and_then(|s| s.path.as_mut()) {
+                // 어댑터가 준 경로(드라이브 글자 대소문자 등)를 열린 문서 경로와 같은 꼴로 맞춘다. 로컬 파일이
+                // 없는 소스는 담아 둔 파일로 바꾸고, 아직 없으면 내용을 묻는다.
+                let mut fetch: Vec<Source> = Vec::new();
+                for source in self.frames.iter_mut().filter_map(|f| f.source.as_mut()) {
+                    if is_remote(source) {
+                        match self.stored.get(&source_key(source)) {
+                            Some(local) => source.path = Some(local.clone()),
+                            None if !fetch.iter().any(|f| source_key(f) == source_key(source)) => {
+                                fetch.push(source.clone());
+                            }
+                            None => {}
+                        }
+                    } else if let Some(path) = source.path.as_mut() {
                         *path = crate::app::real_path(path);
                     }
+                }
+                for source in fetch {
+                    self.send(Request::Source(source));
                 }
                 self.frame = 0;
                 self.send(Request::Scopes);
@@ -446,12 +583,46 @@ impl Debugger {
                 self.push_console(&format!("> {expression}\n{value}\n"));
                 None
             }
+            Request::LoadedSources => {
+                self.scripts = types::sources(&body)
+                    .into_iter()
+                    .filter(is_remote)
+                    .collect();
+                self.scripts.sort_by_key(source_key);
+                None
+            }
+            Request::Source(source) => {
+                let content = body.get("content").and_then(Value::as_str).unwrap_or("");
+                let local = match self.store(&source, content) {
+                    Ok(local) => local,
+                    Err(e) => {
+                        self.push_console(&format!("[오류] 스크립트를 담지 못했습니다: {e}\n"));
+                        return None;
+                    }
+                };
+                if let Some(session) = &mut self.session {
+                    session.map_source(&local, &source);
+                }
+                let key = source_key(&source);
+                // 멈춘 프레임이 이 소스면 담은 파일을 가리키게 한다.
+                for frame_source in self.frames.iter_mut().filter_map(|f| f.source.as_mut()) {
+                    if is_remote(frame_source) && source_key(frame_source) == key {
+                        frame_source.path = Some(local.clone());
+                    }
+                }
+                if self.open_after.as_ref() == Some(&key) {
+                    self.open_after = None;
+                    return Some(DebugNotice::Reveal(local, 0));
+                }
+                self.reveal_frame()
+            }
         }
     }
 
     /// "디버그" 창: 도구 막대, 호출 스택, 변수.
     pub fn panel_ui(&mut self, ui: &mut egui::Ui) -> Option<DebugNotice> {
         let mut step = None;
+        let mut script = None;
         let active = self.is_active() && self.stopping.is_none();
         let stopped = active && self.is_stopped();
         ui.horizontal(|ui| {
@@ -483,6 +654,37 @@ impl Debugger {
             {
                 self.stop();
             }
+            // 로컬 파일이 없는 스크립트(JSP 인라인 스크립트 등)를 열어 중단점을 건다. 창이 낮아도 보이게
+            // 펼침 메뉴로 두고, 펼칠 때 목록을 묻는다.
+            let loadable = active
+                && self
+                    .session
+                    .as_ref()
+                    .is_some_and(|s| s.capabilities().supports_loaded_sources_request);
+            if loadable {
+                let menu = ui.menu_button("화면 스크립트", |ui| {
+                    if self.scripts.is_empty() {
+                        ui.weak("프로젝트 파일이 없는 스크립트가 아직 없습니다");
+                    }
+                    for source in &self.scripts {
+                        let name = shown(source.name.as_deref().unwrap_or("(이름 없음)"));
+                        if ui.selectable_label(false, name).clicked() {
+                            script = Some(source.clone());
+                            ui.close();
+                        }
+                    }
+                    ui.separator();
+                    if ui.button("새로 고침").clicked() {
+                        self.send(Request::LoadedSources);
+                    }
+                });
+                if menu.response.clicked() {
+                    self.send(Request::LoadedSources);
+                }
+                menu.response.on_hover_text(
+                    "브라우저가 불러온 스크립트 중 프로젝트 파일이 없는 것. 열어서 중단점을 건다",
+                );
+            }
         });
         if let Some(how) = step {
             self.resume(how);
@@ -511,7 +713,7 @@ impl Debugger {
                     })
                 })
                 .unwrap_or_default();
-            let text = format!("{}  {place}:{}", frame.name, frame.line);
+            let text = format!("{}  {}:{}", frame.name, shown(&place), frame.line);
             if ui.selectable_label(i == self.frame, text).clicked() {
                 picked = Some(i);
             }
@@ -526,6 +728,17 @@ impl Debugger {
             notice = self.reveal_frame();
         }
         ui.separator();
+
+        if let Some(source) = script {
+            let key = source_key(&source);
+            match self.stored.get(&key) {
+                Some(local) => notice = Some(DebugNotice::Reveal(local.clone(), 0)),
+                None => {
+                    self.open_after = Some(key);
+                    self.send(Request::Source(source));
+                }
+            }
+        }
 
         ui.strong("변수");
         let mut load = Vec::new();
@@ -675,5 +888,50 @@ fn variables_ui(
                 label.on_hover_text(hover);
             }
         }
+    }
+}
+
+#[cfg(test)]
+impl Debugger {
+    /// 시험용: 어댑터에서 받은 것처럼 그 파일을 담아 둔 소스로 둔다.
+    pub(crate) fn mark_stored(&mut self, path: PathBuf) {
+        self.stored
+            .insert(path.to_string_lossy().into_owned(), path);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn source(path: &str, reference: i64) -> Source {
+        Source {
+            name: Some(path.into()),
+            path: Some(path.into()),
+            source_reference: reference,
+        }
+    }
+
+    #[test]
+    fn 화면_스크립트를_담을_이름과_로컬_파일이_없는_소스를_가린다() {
+        let page = source("127.0.0.1\u{a789}8080/app/list.do\u{a789}5:9", 7);
+        assert!(is_remote(&page));
+        assert_eq!(
+            shown(page.name.as_deref().unwrap()),
+            "127.0.0.1:8080/app/list.do:5:9"
+        );
+        assert_eq!(stored_name(&page, "<!doctype html>"), "list.do_5_9.html");
+        assert_eq!(stored_name(&page, "\n\nvar x;"), "list.do_5_9.js");
+        assert_eq!(stored_name(&source("eval-1", 3), "x()"), "eval-1.js");
+        assert_eq!(stored_name(&source("a/b.mjs", 3), "x()"), "b.mjs");
+        assert_eq!(stored_name(&source("/", 3), ""), "script.js");
+        // 로컬 파일이 있거나 번호가 없으면 어댑터에 묻지 않는다.
+        let here = std::env::current_dir().unwrap().join("Cargo.toml");
+        assert!(!is_remote(&source(&here.to_string_lossy(), 3)));
+        assert!(!is_remote(&source("x.js", 0)));
+        assert_eq!(
+            source_key(&page),
+            page.path.as_ref().unwrap().to_string_lossy()
+        );
     }
 }

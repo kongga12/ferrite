@@ -4,6 +4,9 @@
 //! 채널로 넘기고, UI는 프레임마다 [`DebugSession::poll`]로 꺼내 처리한다. 시작 순서
 //! (initialize → launch/attach → `initialized` 이벤트 → 중단점 → configurationDone)도 `poll`이
 //! 진행한다. 어댑터마다 다른 것(띄우는 명령, launch 인자)은 [`Adapter`]와 [`Launch`]로 받는다.
+//!
+//! 어댑터가 거꾸로 `startDebugging`을 요청하면(js-debug: 브라우저 페이지마다) 같은 주소로 자식 세션을
+//! 열어 이 세션 안에 둔다. 화면은 세션 하나만 다루고, 요청은 멈춘 자식에게 간다.
 
 pub mod adapters;
 pub mod java;
@@ -14,6 +17,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
@@ -23,6 +27,8 @@ use ferrite_lsp::transport::{read_message, write_message};
 use serde_json::{Value, json};
 
 pub use types::{BreakpointState, Capabilities, Scope, Source, StackFrame, Thread, Variable};
+
+type Wake = Arc<dyn Fn() + Send + Sync>;
 
 /// 종료 사유로 보여 줄 어댑터 stderr 마지막 줄 수.
 const STDERR_TAIL_LINES: usize = 20;
@@ -144,7 +150,17 @@ pub struct DebugSession {
     writer: Box<dyn Write + Send>,
     incoming: Receiver<Incoming>,
     stderr_tail: Arc<Mutex<VecDeque<String>>>,
-    next_seq: i64,
+    /// 부모와 자식 세션이 나눠 쓰는 요청 번호. 응답 번호가 세션끼리 겹치지 않는다.
+    seq: Arc<AtomicI64>,
+    wake: Wake,
+    /// TCP 어댑터의 주소. 자식 세션은 같은 주소로 새로 붙는다.
+    address: Option<SocketAddr>,
+    /// 어댑터가 거꾸로 요청한 자식 세션(js-debug의 브라우저 페이지).
+    children: Vec<DebugSession>,
+    /// 어댑터가 확인한 중단점. `breakpoint` 이벤트가 번호로 바꾼 것을 고쳐 다시 알린다.
+    states: HashMap<PathBuf, Vec<BreakpointState>>,
+    /// 로컬 파일이 없는 스크립트를 담아 둔 파일 → 어댑터의 원래 소스. 그 파일의 중단점은 원래 소스로 건다.
+    sources: HashMap<PathBuf, Value>,
     pending: HashMap<i64, Pending>,
     capabilities: Capabilities,
     launch: Launch,
@@ -168,7 +184,24 @@ impl DebugSession {
         breakpoints: BTreeMap<PathBuf, Vec<Breakpoint>>,
         wake: impl Fn() + Send + Sync + 'static,
     ) -> Result<Self, String> {
+        Self::connect(
+            adapter,
+            launch,
+            breakpoints,
+            Arc::new(wake),
+            Arc::new(AtomicI64::new(1)),
+        )
+    }
+
+    fn connect(
+        adapter: &Adapter,
+        launch: Launch,
+        breakpoints: BTreeMap<PathBuf, Vec<Breakpoint>>,
+        wake: Wake,
+        seq: Arc<AtomicI64>,
+    ) -> Result<Self, String> {
         let stderr_tail = Arc::new(Mutex::new(VecDeque::new()));
+        let mut address = None;
         let (child, reader, writer): (
             Option<Child>,
             Box<dyn BufRead + Send>,
@@ -207,14 +240,14 @@ impl DebugSession {
                     return Err("디버그 어댑터의 출력을 열지 못했습니다".into());
                 };
                 keep_tail(stderr, &stderr_tail, |_| {});
-                let (found, address) = channel();
+                let (announce, announced) = channel();
                 keep_tail(stdout, &stderr_tail, move |line| {
                     if let Some(address) = listening_address(line) {
-                        let _ = found.send(address);
+                        let _ = announce.send(address);
                     }
                 });
-                let address = match address.recv_timeout(LISTEN_TIMEOUT) {
-                    Ok(address) => address,
+                let found = match announced.recv_timeout(LISTEN_TIMEOUT) {
+                    Ok(found) => found,
                     Err(_) => {
                         let _ = child.kill();
                         let tail: Vec<String> = lock(&stderr_tail).iter().cloned().collect();
@@ -225,13 +258,14 @@ impl DebugSession {
                         ));
                     }
                 };
-                let stream = match TcpStream::connect_timeout(&address, CONNECT_TIMEOUT) {
+                let stream = match TcpStream::connect_timeout(&found, CONNECT_TIMEOUT) {
                     Ok(stream) => stream,
                     Err(e) => {
                         let _ = child.kill();
-                        return Err(format!("디버그 어댑터({address})에 붙지 못했습니다: {e}"));
+                        return Err(format!("디버그 어댑터({found})에 붙지 못했습니다: {e}"));
                     }
                 };
+                address = Some(found);
                 let _ = stream.set_nodelay(true);
                 let reader = stream
                     .try_clone()
@@ -242,9 +276,10 @@ impl DebugSession {
                     Box::new(stream),
                 )
             }
-            Adapter::Tcp(address) => {
-                let stream = TcpStream::connect_timeout(address, CONNECT_TIMEOUT)
-                    .map_err(|e| format!("디버그 어댑터({address})에 붙지 못했습니다: {e}"))?;
+            Adapter::Tcp(at) => {
+                let stream = TcpStream::connect_timeout(at, CONNECT_TIMEOUT)
+                    .map_err(|e| format!("디버그 어댑터({at})에 붙지 못했습니다: {e}"))?;
+                address = Some(*at);
                 let _ = stream.set_nodelay(true);
                 let reader = stream
                     .try_clone()
@@ -254,7 +289,9 @@ impl DebugSession {
         };
 
         let (tx, incoming) = channel();
+        let reader_wake = wake.clone();
         thread::spawn(move || {
+            let wake = reader_wake;
             let mut reader = reader;
             // 끝나거나 읽을 수 없는 메시지면 연결이 끊긴 것으로 본다(틀이 깨지면 이어 읽을 수 없다).
             while let Ok(Some(body)) = read_message(&mut reader) {
@@ -274,7 +311,12 @@ impl DebugSession {
             writer,
             incoming,
             stderr_tail,
-            next_seq: 1,
+            seq,
+            wake,
+            address,
+            children: Vec::new(),
+            states: HashMap::new(),
+            sources: HashMap::new(),
             pending: HashMap::new(),
             capabilities: Capabilities::default(),
             launch,
@@ -292,13 +334,47 @@ impl DebugSession {
             "pathFormat": "path",
             "supportsVariableType": true,
             "supportsRunInTerminalRequest": false,
+            "supportsStartDebuggingRequest": true,
         });
         session.send_request("initialize", arguments, Pending::Initialize);
         Ok(session)
     }
 
+    /// 세션 전체의 상태: 끝났으면 끝, 아니면 멈춘 자식(없으면 마지막 자식)의 상태.
     pub fn state(&self) -> &State {
-        &self.state
+        if self.state == State::Terminated {
+            return &self.state;
+        }
+        &self.focus_ref().state
+    }
+
+    fn stopped_somewhere(&self) -> bool {
+        matches!(self.state, State::Stopped(_)) || self.children.iter().any(Self::stopped_somewhere)
+    }
+
+    /// 사용자 요청을 받을 세션: 멈춘 자식 → 멈춘 자신 → 마지막 자식 → 자신. None이면 자신.
+    fn focus_index(&self) -> Option<usize> {
+        if let Some(i) = self.children.iter().rposition(Self::stopped_somewhere) {
+            return Some(i);
+        }
+        if matches!(self.state, State::Stopped(_)) {
+            return None;
+        }
+        self.children.len().checked_sub(1)
+    }
+
+    fn focus(&mut self) -> &mut Self {
+        match self.focus_index() {
+            Some(i) => self.children[i].focus(),
+            None => self,
+        }
+    }
+
+    fn focus_ref(&self) -> &Self {
+        match self.focus_index() {
+            Some(i) => self.children[i].focus_ref(),
+            None => self,
+        }
     }
 
     pub fn capabilities(&self) -> &Capabilities {
@@ -307,8 +383,7 @@ impl DebugSession {
 
     /// 쓸 수 없으면(어댑터 종료) 버린다. 끊긴 것은 읽기 쪽이 [`DebugEvent::Closed`]로 알린다.
     fn send_request(&mut self, command: &str, arguments: Value, pending: Pending) -> i64 {
-        let seq = self.next_seq;
-        self.next_seq += 1;
+        let seq = self.seq.fetch_add(1, Ordering::Relaxed);
         let message = json!({
             "seq": seq,
             "type": "request",
@@ -326,8 +401,31 @@ impl DebugSession {
     }
 
     /// 요청을 보내고 번호를 돌려준다. 결과는 같은 번호의 [`DebugEvent::Response`]로 온다.
+    /// 자식 세션이 있으면 멈춘 자식에게 보낸다.
     pub fn request(&mut self, command: &str, arguments: Value) -> i64 {
-        self.send_request(command, arguments, Pending::User(command.to_owned()))
+        self.focus()
+            .send_request(command, arguments, Pending::User(command.to_owned()))
+    }
+
+    /// 불러온 스크립트 목록(`loadedSources`).
+    pub fn loaded_sources(&mut self) -> i64 {
+        self.request("loadedSources", json!({}))
+    }
+
+    /// 로컬 파일이 없는 소스의 내용(`source`).
+    pub fn source(&mut self, source: &Source) -> i64 {
+        self.request(
+            "source",
+            json!({ "source": source.to_json(), "sourceReference": source.source_reference }),
+        )
+    }
+
+    /// 어댑터의 소스를 로컬 파일 `local`에 담아 열었다. 그 파일의 중단점은 원래 소스로 건다.
+    pub fn map_source(&mut self, local: &Path, source: &Source) {
+        for child in &mut self.children {
+            child.map_source(local, source);
+        }
+        self.sources.insert(local.to_path_buf(), source.to_json());
     }
 
     pub fn threads(&mut self) -> i64 {
@@ -357,13 +455,14 @@ impl DebugSession {
     /// 실행을 이어 가는 명령(continue·next·stepIn·stepOut). 어댑터가 `continued`를 보내지 않는
     /// 경우가 있어 보내는 즉시 실행 중으로 본다.
     fn resume_with(&mut self, command: &str, thread_id: i64) {
-        self.send_request(
+        let target = self.focus();
+        target.send_request(
             command,
             json!({ "threadId": thread_id }),
             Pending::Internal(command.to_owned()),
         );
-        if self.state != State::Terminated {
-            self.state = State::Running;
+        if target.state != State::Terminated {
+            target.state = State::Running;
         }
     }
 
@@ -384,24 +483,33 @@ impl DebugSession {
     }
 
     pub fn pause(&mut self, thread_id: i64) {
-        self.send_request(
+        self.focus().send_request(
             "pause",
             json!({ "threadId": thread_id }),
             Pending::Internal("pause".into()),
         );
     }
 
-    /// 대상을 끝내고 연결을 닫게 한다. 끝나면 `Terminated`·`Closed`가 온다.
+    /// 대상을 끝내고 연결을 닫게 한다. 끝나면 `Terminated`·`Closed`가 온다. 붙은 대상(attach)은
+    /// 끝내지 않고 떨어지기만 한다(사용자의 브라우저·서버). 자식 세션부터 끝낸다(js-debug는 멈춘
+    /// 페이지가 남아 있으면 부모의 disconnect에 답하지 않는다).
     pub fn stop(&mut self) {
+        for child in &mut self.children {
+            child.stop();
+        }
+        let terminate = !self.launch.attach;
         self.send_request(
             "disconnect",
-            json!({ "terminateDebuggee": true }),
+            json!({ "terminateDebuggee": terminate }),
             Pending::Internal("disconnect".into()),
         );
     }
 
     /// 그 파일의 중단점을 바꾼다(빈 목록이면 모두 지운다). 시작 순서 전이면 모아 두었다가 보낸다.
     pub fn set_breakpoints(&mut self, path: &Path, breakpoints: Vec<Breakpoint>) {
+        for child in &mut self.children {
+            child.set_breakpoints(path, breakpoints.clone());
+        }
         self.breakpoints.insert(path.to_path_buf(), breakpoints);
         if self.configured {
             self.send_breakpoints(path.to_path_buf());
@@ -419,8 +527,13 @@ impl DebugSession {
                 None => json!({ "line": b.line }),
             })
             .collect();
+        let source = self
+            .sources
+            .get(&path)
+            .cloned()
+            .unwrap_or_else(|| json!({ "path": path }));
         let arguments = json!({
-            "source": { "path": path },
+            "source": source,
             "breakpoints": breakpoints,
             "sourceModified": false,
         });
@@ -430,9 +543,35 @@ impl DebugSession {
     /// 받은 메시지를 처리해 화면이 알아야 할 일로 바꾼다. 매 프레임 부른다.
     pub fn poll(&mut self) -> Vec<DebugEvent> {
         let mut events = Vec::new();
+        self.poll_own(&mut events);
+        // 자식의 시작·끝은 세션 전체의 일이 아니다. 끝난 자식은 빼고, 멈춰 있었으면 풀린 것으로 알린다.
+        let mut from_children = Vec::new();
+        self.children.retain_mut(|child| {
+            let mut ended = false;
+            for event in child.poll() {
+                match event {
+                    DebugEvent::Started | DebugEvent::Exited { .. } => {}
+                    DebugEvent::Terminated | DebugEvent::Closed(_) => ended = true,
+                    other => from_children.push(other),
+                }
+            }
+            if ended && child.stopped_somewhere() {
+                from_children.push(DebugEvent::Continued);
+            }
+            !ended
+        });
+        // 자식(페이지)이 있으면 중단점 확인은 자식의 것을 쓴다(부모는 늘 "아직 걸지 못함"이다).
+        if !self.children.is_empty() {
+            events.retain(|e| !matches!(e, DebugEvent::Breakpoints { .. }));
+        }
+        events.extend(from_children);
+        events
+    }
+
+    fn poll_own(&mut self, events: &mut Vec<DebugEvent>) {
         while let Ok(incoming) = self.incoming.try_recv() {
             match incoming {
-                Incoming::Message(message) => self.handle(&message, &mut events),
+                Incoming::Message(message) => self.handle(&message, events),
                 Incoming::Closed => {
                     self.state = State::Terminated;
                     let tail: Vec<String> = lock(&self.stderr_tail).iter().cloned().collect();
@@ -442,7 +581,6 @@ impl DebugSession {
                 }
             }
         }
-        events
     }
 
     fn handle(&mut self, message: &Value, events: &mut Vec<DebugEvent>) {
@@ -450,20 +588,58 @@ impl DebugSession {
         match text("type") {
             "response" => self.on_response(message, events),
             "event" => self.on_event(text("event"), message.get("body"), events),
-            // 어댑터가 거꾸로 보내는 요청(runInTerminal 등). 지원한다고 알리지 않았으므로 거절한다.
+            // 어댑터가 거꾸로 보내는 요청. 자식 세션(startDebugging)만 받고 나머지(runInTerminal 등)는
+            // 지원한다고 알리지 않았으므로 거절한다.
             "request" => {
-                let reply = json!({
+                let result = match text("command") {
+                    "startDebugging" => self
+                        .start_child(message.get("arguments").unwrap_or(&Value::Null))
+                        .inspect_err(|e| {
+                            events.push(DebugEvent::Error(format!(
+                                "디버그 자식 세션을 열지 못했습니다: {e}"
+                            )));
+                        }),
+                    _ => Err("Ferrite는 이 요청을 지원하지 않습니다".to_owned()),
+                };
+                let mut reply = json!({
                     "seq": 0,
                     "type": "response",
                     "request_seq": message.get("seq"),
-                    "success": false,
+                    "success": result.is_ok(),
                     "command": text("command"),
-                    "message": "Ferrite는 이 요청을 지원하지 않습니다",
                 });
+                if let Err(e) = result {
+                    reply["message"] = Value::from(e);
+                }
                 self.write(&reply);
             }
             _ => {}
         }
+    }
+
+    /// 어댑터가 요청한 자식 세션을 같은 주소로 열고 시작 순서를 밟게 한다.
+    fn start_child(&mut self, arguments: &Value) -> Result<(), String> {
+        let address = self
+            .address
+            .ok_or("표준 입출력 어댑터는 자식 세션을 열 수 없습니다")?;
+        let launch = Launch {
+            adapter_id: self.launch.adapter_id.clone(),
+            attach: arguments.get("request").and_then(Value::as_str) == Some("attach"),
+            arguments: arguments
+                .get("configuration")
+                .cloned()
+                .unwrap_or_else(|| json!({})),
+        };
+        let mut child = Self::connect(
+            &Adapter::Tcp(address),
+            launch,
+            self.breakpoints.clone(),
+            self.wake.clone(),
+            self.seq.clone(),
+        )?;
+        child.sources = self.sources.clone();
+        self.children.push(child);
+        Ok(())
     }
 
     fn on_response(&mut self, message: &Value, events: &mut Vec<DebugEvent>) {
@@ -508,6 +684,7 @@ impl DebugSession {
             }
             (Pending::Breakpoints(path), Ok(body)) => {
                 let states = types::breakpoint_states(&body);
+                self.states.insert(path.clone(), states.clone());
                 events.push(DebugEvent::Breakpoints { path, states });
             }
             (Pending::Breakpoints(path), Err(e)) => {
@@ -515,6 +692,13 @@ impl DebugSession {
                     "중단점을 걸지 못했습니다({}): {e}",
                     path.display()
                 )));
+            }
+            // 떨어지기를 마쳤으면 끝이다. js-debug는 연결을 닫지 않고 terminated도 보내지 않는다.
+            (Pending::Internal(command), Ok(_)) if command == "disconnect" => {
+                if self.state != State::Terminated {
+                    self.state = State::Terminated;
+                    events.push(DebugEvent::Terminated);
+                }
             }
             (Pending::Internal(_), Ok(_)) => {}
             (Pending::Internal(command), Err(e)) => {
@@ -584,6 +768,26 @@ impl DebugSession {
             "terminated" => {
                 self.state = State::Terminated;
                 events.push(DebugEvent::Terminated);
+            }
+            // 어댑터가 나중에 중단점을 걸었다(js-debug는 스크립트를 불러올 때 건다). 번호로 찾아 고친다.
+            "breakpoint" if text("reason").as_deref() == Some("changed") => {
+                let Some(changed) = body
+                    .get("breakpoint")
+                    .and_then(|b| serde_json::from_value::<BreakpointState>(b.clone()).ok())
+                    .filter(|b| b.id.is_some())
+                else {
+                    return;
+                };
+                for (path, states) in &mut self.states {
+                    if let Some(state) = states.iter_mut().find(|s| s.id == changed.id) {
+                        *state = changed;
+                        events.push(DebugEvent::Breakpoints {
+                            path: path.clone(),
+                            states: states.clone(),
+                        });
+                        break;
+                    }
+                }
             }
             _ => {}
         }

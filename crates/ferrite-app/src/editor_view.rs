@@ -81,6 +81,8 @@ pub struct EditorOptions<'a> {
     pub debug_line: Option<usize>,
     /// 실행할 수 있는 줄(0부터 순, `.http`의 요청 줄). 거터 왼쪽에 초록 ▶로 보인다.
     pub run_lines: &'a [usize],
+    /// 읽기 전용(디버그 어댑터에서 받은 스크립트). 고치는 입력은 버리고 이동·고르기·복사만 받는다.
+    pub read_only: bool,
 }
 
 /// 앱이 언어 서버 기능을 붙이는 데 쓰는 정보.
@@ -431,6 +433,19 @@ fn handle_keys(
     let now = Instant::now();
     let mut acted = false;
     for event in events {
+        let edits = match &event {
+            Event::Text(_) | Event::Paste(_) | Event::Cut | Event::Ime(_) => true,
+            Event::Key {
+                key,
+                pressed: true,
+                modifiers,
+                ..
+            } => edits_key(*key, *modifiers),
+            _ => false,
+        };
+        if opts.read_only && edits {
+            continue;
+        }
         acted |= match event {
             Event::Text(text) => {
                 buffer.insert(&text, now);
@@ -474,6 +489,13 @@ fn handle_keys(
         };
     }
     acted
+}
+
+/// 버퍼를 고치는 키인지(읽기 전용이면 버린다). [`handle_key`]의 고치는 키와 맞춘다.
+fn edits_key(key: Key, m: Modifiers) -> bool {
+    matches!(key, Key::Backspace | Key::Delete | Key::Enter | Key::Tab)
+        || (m.command && matches!(key, Key::Z | Key::Y | Key::Slash))
+        || (m.alt && matches!(key, Key::ArrowUp | Key::ArrowDown))
 }
 
 /// 키 하나를 처리했으면 true. macOS는 단어 이동이 Option, 줄 처음·끝이 Cmd다.

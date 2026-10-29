@@ -1,7 +1,8 @@
 name: 디버그 어댑터 실제 설치
 
-# 디버그 어댑터(debugpy·codelldb·delve·vscode-php-debug·java-debug)를 실제 배포처에서 받아 Ferrite 설치기로
-# 설치하고, 언어마다 예제의 중단점에서 멈춰 변수를 읽는다(3개 OS). 한 번에 약 120MB(jdt.ls 포함)를 받고 Go·PHP·Java를
+# 디버그 어댑터(debugpy·codelldb·delve·vscode-php-debug·java-debug·vscode-js-debug)를 실제 배포처에서 받아
+# Ferrite 설치기로 설치하고, 언어마다 예제의 중단점에서 멈춰 변수를 읽는다(3개 OS). js-debug는 러너의 Chrome을
+# 헤드리스로 띄워 외부 스크립트와 화면의 인라인 스크립트에서 멈춘다. 한 번에 약 120MB(jdt.ls 포함)를 받고 Go·PHP·Java를
 # 준비하느라 오래 걸리므로, 어댑터 목록·설치·연결 코드를 바꾼 PR에서만 돈다. 그 밖에는 수동 실행
 # ("Run workflow")과 매주 한 번(고정한 배포 파일이 사라지거나 바뀌었는지 확인).
 on:

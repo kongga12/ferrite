@@ -304,6 +304,7 @@ mod tests {
         save(&path, &broken).unwrap();
         assert!(load(Some(&path)).tiles.find_pane(&Pane::Editor).is_some());
 
-        std::fs::remove_dir_all(&dir).unwrap();
+        // Windows는 막 쓴 파일을 백신 검사 등이 잠깐 쥐어 지우기가 실패할 수 있다. 시험 결과와는 상관없다.
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

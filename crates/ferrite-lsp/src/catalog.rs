@@ -533,6 +533,25 @@ pub const ADAPTERS: &[Server] = &[
             bin: "extension/out/phpDebug.js",
         }]),
     },
+    Server {
+        // 브라우저(Chrome·Edge) 디버그. TCP로 듣는 DAP 서버이고, 페이지마다 자식 세션을 거꾸로
+        // 요청한다(startDebugging).
+        name: "js-debug",
+        languages: &["javascript"],
+        version: "1.140.0",
+        program: "js-debug",
+        args: &[],
+        launch: Launch::Runtime("node"),
+        source: Source::Release(&[Asset {
+            os: "",
+            arch: "",
+            url: "https://github.com/microsoft/vscode-js-debug/releases/download/v1.140.0/js-debug-dap-v1.140.0.tar.gz",
+            sha256: "27dab92937ec1ab35821ae955aac867544fe06a1b6307229049f2d789af10968",
+            size: 1_249_709,
+            archive: Archive::TarGz,
+            bin: "js-debug/src/dapDebugServer.js",
+        }]),
+    },
 ];
 
 /// 언어 서버와 디버그 어댑터 모두(설치 창 순서).

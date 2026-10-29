@@ -218,7 +218,97 @@ pub fn detect(file: Option<&Path>, root: &Path) -> Vec<DebugConfig> {
                 "env": { "XDEBUG_MODE": "debug,develop", "XDEBUG_CONFIG": "client_port=${port}" },
             }),
         )],
+        // js-debug가 브라우저를 띄우거나 이미 뜬 브라우저에 붙어, 화면 URL의 스크립트를 webapp 폴더의
+        // 파일과 맞춘다. JSP의 인라인 스크립트는 디버그 창의 "화면 스크립트"로 연다.
+        Some("js" | "mjs" | "jsx" | "ts" | "tsx" | "html" | "htm" | "jsp") => browser_configs(root),
         _ => Vec::new(),
+    }
+}
+
+/// 브라우저 디버그 구성: 띄우기(따로 둔 프로필)와 9222 포트로 연 브라우저에 붙기. 주소는 [`base_url`],
+/// 스크립트는 webapp 폴더(`src/main/webapp`·`WebContent`·`web`, 없으면 루트)의 파일과 맞춘다. 주소에
+/// 컨텍스트 경로(`/app`)가 있으면 그 아래 URL을 webapp 폴더로 맞춘다.
+fn browser_configs(root: &Path) -> Vec<DebugConfig> {
+    let url = base_url(root).unwrap_or_else(|| "http://localhost:8080".into());
+    let web_root = ["src/main/webapp", "WebContent", "web"]
+        .iter()
+        .find(|dir| root.join(dir).is_dir())
+        .map_or_else(
+            || "${workspaceFolder}".to_owned(),
+            |dir| format!("${{workspaceFolder}}/{dir}"),
+        );
+    let path = url.split_once("://").map_or(url.as_str(), |(_, rest)| rest);
+    let context = path
+        .find('/')
+        .and_then(|i| path[i + 1..].split('/').next())
+        .filter(|segment| !segment.is_empty());
+    let (kind, name) = browser();
+    let mut common = json!({ "type": kind, "webRoot": web_root });
+    if let Some(context) = context {
+        common["pathMapping"] = json!({ format!("/{context}/"): format!("{web_root}/") });
+    }
+    let mut launch = common.clone();
+    launch["url"] = json!(url);
+    let mut attach = common;
+    attach["port"] = json!(9222);
+    attach["urlFilter"] = json!(format!("{url}*"));
+    let config = |name: String, request: &str, arguments: Value| DebugConfig {
+        name,
+        adapter: "js-debug".into(),
+        request: request.into(),
+        arguments,
+        build: None,
+    };
+    vec![
+        config(format!("브라우저: {name}로 {url} 열기"), "launch", launch),
+        config(
+            format!("브라우저: 9222 포트로 연 {name}에 붙기(--remote-debugging-port=9222)"),
+            "attach",
+            attach,
+        ),
+    ]
+}
+
+/// 화면 주소: HTTP 요청의 환경 파일(루트나 `http/`의 `http-client.env.json`)에서 `dev`(없으면 첫) 환경의
+/// `baseUrl`.
+fn base_url(root: &Path) -> Option<String> {
+    ["http-client.env.json", "http/http-client.env.json"]
+        .iter()
+        .find_map(|name| {
+            let text = std::fs::read_to_string(root.join(name)).ok()?;
+            let envs: serde_json::Map<String, Value> =
+                serde_json::from_str(text.trim_start_matches('\u{feff}')).ok()?;
+            let env = envs.get("dev").or_else(|| envs.values().next())?;
+            let url = env.get("baseUrl")?.as_str()?.trim_end_matches('/');
+            (!url.is_empty()).then(|| url.to_owned())
+        })
+}
+
+/// js-debug의 브라우저 종류와 이름. Chrome이 있으면 Chrome, 없고 Edge가 있으면(Windows·macOS) Edge.
+/// Linux는 Chrome으로 둔다(js-debug가 Chrome·Chromium을 찾는다).
+fn browser() -> (&'static str, &'static str) {
+    let env = |key: &str| std::env::var_os(key).map(std::path::PathBuf::from);
+    let (chrome, edge) = if cfg!(windows) {
+        (
+            ["ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"]
+                .iter()
+                .filter_map(|key| env(key))
+                .any(|dir| dir.join("Google/Chrome/Application/chrome.exe").exists()),
+            env("ProgramFiles(x86)")
+                .is_some_and(|dir| dir.join("Microsoft/Edge/Application/msedge.exe").exists()),
+        )
+    } else if cfg!(target_os = "macos") {
+        (
+            Path::new("/Applications/Google Chrome.app").exists(),
+            Path::new("/Applications/Microsoft Edge.app").exists(),
+        )
+    } else {
+        (true, false)
+    };
+    if !chrome && edge {
+        ("pwa-msedge", "Edge")
+    } else {
+        ("pwa-chrome", "Chrome")
     }
 }
 
@@ -304,6 +394,49 @@ mod tests {
             arguments["env"]["XDEBUG_CONFIG"], "client_port=${port}",
             "어댑터가 바꿀 변수는 그대로 둔다"
         );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn 화면_파일로_브라우저_구성을_만들고_주소는_환경_파일에서_읽는다() {
+        let root =
+            std::env::temp_dir().join(format!("ferrite-debug-browser-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        // 환경 파일도 webapp 폴더도 없으면 기본 주소와 루트.
+        let configs = detect(Some(&root.join("index.html")), &root);
+        assert_eq!(configs.len(), 2);
+        assert_eq!(configs[0].adapter, "js-debug");
+        assert!(!configs[0].attach() && configs[1].attach());
+        let launch = configs[0].resolved_arguments(&root, None).unwrap();
+        assert_eq!(launch["url"], "http://localhost:8080");
+        assert_eq!(launch["webRoot"], json!(root.to_string_lossy()));
+        assert!(launch["type"].as_str().unwrap().starts_with("pwa-"));
+        assert!(launch.get("pathMapping").is_none());
+
+        // egov: 환경 파일의 dev baseUrl(컨텍스트 경로 /app), src/main/webapp.
+        std::fs::create_dir_all(root.join("http")).unwrap();
+        std::fs::create_dir_all(root.join("src/main/webapp")).unwrap();
+        std::fs::write(
+            root.join("http/http-client.env.json"),
+            "\u{feff}{\"prod\": {\"baseUrl\": \"https://a\"}, \"dev\": {\"baseUrl\": \"http://localhost:8080/app/\"}}",
+        )
+        .unwrap();
+        let configs = detect(Some(&root.join("WEB-INF/jsp/list.jsp")), &root);
+        let web_root = format!("{}/src/main/webapp", root.display());
+        let launch = configs[0].resolved_arguments(&root, None).unwrap();
+        assert_eq!(launch["url"], "http://localhost:8080/app");
+        assert_eq!(launch["webRoot"], json!(web_root));
+        assert_eq!(
+            launch["pathMapping"],
+            json!({ "/app/": format!("{web_root}/") })
+        );
+        let attach = configs[1].resolved_arguments(&root, None).unwrap();
+        assert_eq!(
+            (&attach["port"], &attach["urlFilter"]),
+            (&json!(9222), &json!("http://localhost:8080/app*"))
+        );
+        assert!(configs[0].name.contains("http://localhost:8080/app"));
         std::fs::remove_dir_all(&root).unwrap();
     }
 

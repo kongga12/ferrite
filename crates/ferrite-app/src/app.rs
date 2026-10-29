@@ -3153,6 +3153,7 @@ impl FerriteApp {
                     .http_runs
                     .as_ref()
                     .map_or(&[], |(_, lines)| lines.as_slice()),
+                read_only: self.debugger.is_stored(&doc.path),
             };
             let id = ui.make_persistent_id(&doc.path);
             // 에디터가 Enter를 받기 전에 가로챈다.
@@ -3419,6 +3420,17 @@ impl egui_tiles::Behavior<Pane> for Dock<'_> {
 impl eframe::App for FerriteApp {
     fn on_exit(&mut self) {
         self.updater.on_exit();
+        // 디버그 중이면 대상을 끝낸다(어댑터가 띄운 브라우저 등). 그 뒤 어댑터에서 받아 담아 둔 화면
+        // 스크립트와 어댑터 임시 폴더를 지운다. 브라우저가 늦게 끝나 폴더를 쥐고 있으면 잠깐 기다린다.
+        self.debugger.shutdown();
+        let _ = std::fs::remove_dir_all(crate::debug_ui::sources_dir());
+        let scratch = ferrite_dap::adapters::scratch_dir();
+        for _ in 0..20 {
+            if !scratch.exists() || std::fs::remove_dir_all(&scratch).is_ok() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(150));
+        }
         if let Some(path) = layout_path()
             && let Err(e) = dock::save(&path, &self.layout)
         {
@@ -6734,6 +6746,40 @@ mod tests {
             doc.buffer.pos_to_line_col(doc.buffer.selection().head),
             (1, 0)
         );
+        drop(harness);
+        remove_project(&dir);
+    }
+
+    #[test]
+    fn 어댑터에서_받은_화면_스크립트는_읽기_전용으로_연다() {
+        use egui::accesskit::Role;
+
+        let dir =
+            std::env::temp_dir().join(format!("ferrite-readonly-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("list.do_5_9.html");
+        let text = "<script>\ntick();\n</script>\n";
+        fs::write(&file, text).unwrap();
+        let mut harness = harness_builder()
+            .with_size(egui::vec2(1000.0, 700.0))
+            .build_eframe(|cc| FerriteApp::new(cc, Some(file.clone())));
+        harness.run_ok();
+        let path = harness.state().docs[0].path.clone();
+        harness.state_mut().debugger.mark_stored(path);
+        harness.get_by_role(Role::MultilineTextInput).focus();
+        harness.run_ok();
+        // 글자·지우기·줄 나누기는 버리고, 움직임은 받는다.
+        harness.get_by_role(Role::MultilineTextInput).type_text("x");
+        harness.key_press(Key::Backspace);
+        harness.key_press(Key::Enter);
+        harness.run_ok();
+        harness.key_press(Key::ArrowDown);
+        harness.run_ok();
+        let doc = &harness.state().docs[0];
+        assert_eq!(doc.buffer.text(), text);
+        assert!(!doc.is_dirty());
+        assert_eq!(doc.buffer.pos_to_line_col(doc.buffer.selection().head).0, 1);
         drop(harness);
         remove_project(&dir);
     }
