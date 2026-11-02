@@ -1953,7 +1953,7 @@ impl FerriteApp {
         // 어댑터 문제(설치 안 됨 등)는 빌드하기 전에 알린다.
         let adapter = match adapter {
             Some(adapter) => Ok(adapter),
-            None => ferrite_dap::adapters::resolve(&config.adapter, &servers_root(), root),
+            None => crate::debug_ui::resolve_adapter(&config.adapter, &servers_root(), root),
         };
         let started = adapter.and_then(|adapter| {
             self.debugger
@@ -7595,15 +7595,7 @@ mod tests {
         harness.state_mut().open_file(root.join("note.txt"));
         harness.run();
         harness.key_press_modifiers(Modifiers::COMMAND, Key::S);
-        harness.run();
-        assert!(
-            harness
-                .state()
-                .status
-                .contains("저장 시 작업 중: 출력 만들기"),
-            "{}",
-            harness.state().status
-        );
+        // "저장 시 작업 중"은 작업이 빨리 끝나면 같은 run 안에서 "완료"로 바뀌므로 끝난 것만 본다.
         assert!(
             run_until(&mut harness, |app| app.status
                 == "저장 시 작업 완료: 출력 만들기"),

@@ -98,18 +98,47 @@ impl Registry {
         self.languages.is_empty()
     }
 
-    /// 파일 이름이 같은 언어, 없으면 가장 긴 확장자가 맞는 언어.
+    /// 파일 이름이 같은 언어, 없으면 가장 긴 확장자가 맞는 언어. 확장이 맡지 않은 파일은 내장 언어
+    /// (Handlebars)로 본다.
     pub fn language_for(&self, path: &Path) -> Option<Arc<Language>> {
+        find(&self.languages, path).or_else(|| find(builtin(), path))
+    }
+}
+
+/// 내장 Handlebars 문법(egov 코드 생성 템플릿 `.hbs`). 확장의 문법이 아니라 이 판에서 쓴 것이다.
+const HANDLEBARS: &str = include_str!("handlebars.tmLanguage.json");
+
+/// 확장이 없어도 쓰는 언어. 확장 수에는 세지 않는다.
+fn builtin() -> &'static [Arc<Language>] {
+    static BUILTIN: OnceLock<Vec<Arc<Language>>> = OnceLock::new();
+    BUILTIN.get_or_init(|| {
+        let grammar: Value = serde_json::from_str(HANDLEBARS).expect("내장 Handlebars 문법");
+        let scope = grammar["scopeName"].as_str().unwrap_or_default().to_owned();
+        vec![Arc::new(Language {
+            id: "handlebars".into(),
+            name: "Handlebars".into(),
+            line_comment: None,
+            brackets: vec![('{', '}'), ('(', ')'), ('[', ']')],
+            scope: Some(scope.clone()),
+            grammars: Arc::new(HashMap::from([(scope, grammar)])),
+            grammar: OnceLock::new(),
+            extensions: vec![".hbs".into(), ".handlebars".into()],
+            filenames: Vec::new(),
+        })]
+    })
+}
+
+fn find(languages: &[Arc<Language>], path: &Path) -> Option<Arc<Language>> {
+    {
         let name = path.file_name()?.to_string_lossy();
-        if let Some(l) = self
-            .languages
+        if let Some(l) = languages
             .iter()
             .find(|l| l.filenames.iter().any(|f| *f == name))
         {
             return Some(Arc::clone(l));
         }
         let lower = name.to_lowercase();
-        self.languages
+        languages
             .iter()
             .filter_map(|l| {
                 let ext = l

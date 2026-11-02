@@ -2,7 +2,9 @@
 //! 인자 안의 `${file}`(열린 파일), `${fileDirname}`(그 폴더), `${workspaceFolder}`(프로젝트 루트)는
 //! 시작할 때 바꾼다. 그 밖의 `${…}`는 어댑터가 바꾸도록 그대로 둔다(php-debug의 `${port}`).
 
+use std::collections::BTreeMap;
 use std::io;
+use std::net::SocketAddr;
 use std::path::Path;
 
 use serde::Deserialize;
@@ -30,6 +32,23 @@ pub const CUSTOM_TEMPLATE: &str = r#"# Ferrite 디버그 구성. [[debug]]마다
 # adapter = "codelldb"
 # build = "cargo build --bin server"
 # arguments = { program = "${workspaceFolder}/target/debug/server", args = [] }
+
+# 목록 밖 어댑터(장비 제조사 디버거 등). [[debug]]의 adapter에 이 name을 쓴다.
+#   command  띄울 프로그램(PATH의 이름이나 경로, 상대 경로면 프로젝트 루트 기준)과 args
+#   address  TCP로 말하는 어댑터의 주소(IP:포트). command 없이 쓰면 이미 듣는 어댑터에 붙고,
+#            command와 함께 쓰면 띄운 뒤 그 주소가 열릴 때까지 기다렸다 붙는다
+#   command만 쓰면 표준 입출력으로 말한다. args의 ${workspaceFolder}는 프로젝트 루트로 바꾼다
+#
+# [[adapter]]
+# name = "gdb"
+# command = "gdb"
+# args = ["--interpreter=dap"]
+#
+# [[adapter]]
+# name = "제조사 디버거"
+# command = "C:/vendor/dap-server.exe"
+# args = ["--port", "4711"]
+# address = "127.0.0.1:4711"
 "#;
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]
@@ -98,6 +117,60 @@ fn resolve(value: &Value, root: &Path, file: Option<&Path>) -> Result<Value, Str
 struct CustomFile {
     #[serde(default)]
     debug: Vec<DebugConfig>,
+    #[serde(default)]
+    adapter: Vec<CustomAdapter>,
+}
+
+/// 사용자가 적은 디버그 어댑터(`[[adapter]]`).
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CustomAdapter {
+    pub name: String,
+    /// 띄울 프로그램. 없으면 `address`에 붙기만 한다.
+    #[serde(default)]
+    pub command: Option<String>,
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// TCP로 말하는 어댑터의 주소(`IP:포트`).
+    #[serde(default)]
+    pub address: Option<String>,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+}
+
+impl CustomAdapter {
+    /// 읽은 TCP 주소(없으면 표준 입출력).
+    pub fn socket(&self) -> Result<Option<SocketAddr>, String> {
+        self.address
+            .as_deref()
+            .map(|a| {
+                a.trim().parse().map_err(|_| {
+                    format!(
+                        "{CUSTOM_FILE}: address는 IP:포트입니다(예: 127.0.0.1:4711): {a} ({:?})",
+                        self.name
+                    )
+                })
+            })
+            .transpose()
+    }
+
+    /// `${workspaceFolder}`를 바꾼 인자.
+    pub fn resolved_args(&self, root: &Path) -> Vec<String> {
+        self.args
+            .iter()
+            .map(|a| a.replace("${workspaceFolder}", &root.to_string_lossy()))
+            .collect()
+    }
+}
+
+/// 사용자가 적은 디버그 어댑터를 읽는다. 파일이 없으면 빈 목록.
+pub fn load_adapters(root: &Path) -> Result<Vec<CustomAdapter>, String> {
+    let text = match std::fs::read_to_string(root.join(CUSTOM_FILE)) {
+        Ok(text) => text,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(format!("{CUSTOM_FILE}을 읽지 못했습니다: {e}")),
+    };
+    parse_custom(&text).map(|f| f.adapter)
 }
 
 /// 사용자 구성을 읽는다. 파일이 없으면 빈 목록, 잘못 적었으면 사용자에게 보일 오류.
@@ -107,10 +180,10 @@ pub fn load_custom(root: &Path) -> Result<Vec<DebugConfig>, String> {
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(format!("{CUSTOM_FILE}을 읽지 못했습니다: {e}")),
     };
-    parse_custom(&text)
+    parse_custom(&text).map(|f| f.debug)
 }
 
-fn parse_custom(text: &str) -> Result<Vec<DebugConfig>, String> {
+fn parse_custom(text: &str) -> Result<CustomFile, String> {
     let file: CustomFile = toml::from_str(text).map_err(|e| format!("{CUSTOM_FILE}: {e}"))?;
     for config in &file.debug {
         if config.name.trim().is_empty() || config.adapter.trim().is_empty() {
@@ -129,7 +202,24 @@ fn parse_custom(text: &str) -> Result<Vec<DebugConfig>, String> {
             ));
         }
     }
-    Ok(file.debug)
+    for adapter in &file.adapter {
+        if adapter.name.trim().is_empty() {
+            return Err(format!("{CUSTOM_FILE}: adapter의 name은 비울 수 없습니다"));
+        }
+        if adapter
+            .command
+            .as_deref()
+            .is_none_or(|c| c.trim().is_empty())
+            && adapter.address.is_none()
+        {
+            return Err(format!(
+                "{CUSTOM_FILE}: adapter에는 command나 address가 있어야 합니다({:?})",
+                adapter.name
+            ));
+        }
+        adapter.socket()?;
+    }
+    Ok(file)
 }
 
 /// 열린 파일(과 프로젝트 루트)로 만드는 구성.
@@ -438,6 +528,52 @@ mod tests {
     }
 
     #[test]
+    fn 사용자_어댑터를_읽고_잘못_적으면_알린다() {
+        let adapters = parse_custom(
+            r#"
+            [[adapter]]
+            name = "gdb"
+            command = "gdb"
+            args = ["--interpreter=dap", "--cd=${workspaceFolder}"]
+
+            [[adapter]]
+            name = "붙기만"
+            address = "127.0.0.1:4711"
+
+            [[adapter]]
+            name = "띄우고 붙기"
+            command = "tools/dap.exe"
+            address = "127.0.0.1:4712"
+            env = { VENDOR_HOME = "C:/vendor" }
+            "#,
+        )
+        .unwrap()
+        .adapter;
+        assert_eq!(adapters.len(), 3);
+        assert_eq!(adapters[0].socket(), Ok(None));
+        assert_eq!(
+            adapters[0].resolved_args(Path::new("/w")),
+            ["--interpreter=dap", "--cd=/w"]
+        );
+        assert_eq!(
+            adapters[1].socket(),
+            Ok(Some("127.0.0.1:4711".parse().unwrap()))
+        );
+        assert_eq!(adapters[2].env["VENDOR_HOME"], "C:/vendor");
+        assert!(
+            parse_custom(CUSTOM_TEMPLATE).unwrap().adapter.is_empty(),
+            "견본은 모두 주석"
+        );
+        assert!(
+            parse_custom("[[adapter]]\nname = \"a\"").is_err(),
+            "command·address 없음"
+        );
+        assert!(parse_custom("[[adapter]]\nname = \"a\"\naddress = \"localhost\"").is_err());
+        assert!(parse_custom("[[adapter]]\nname = \" \"\ncommand = \"x\"").is_err());
+        assert!(load_adapters(Path::new("없는-폴더")).unwrap().is_empty());
+    }
+
+    #[test]
     fn 사용자_구성을_읽고_잘못_적으면_알린다() {
         let configs = parse_custom(
             r#"
@@ -453,7 +589,8 @@ mod tests {
             arguments = { connect = { host = "127.0.0.1", port = 5678 } }
             "#,
         )
-        .unwrap();
+        .unwrap()
+        .debug;
         assert!(!configs[0].attach() && configs[1].attach());
         let arguments = configs[0]
             .resolved_arguments(Path::new("/w"), None)
@@ -463,7 +600,7 @@ mod tests {
         assert_eq!(configs[1].arguments["connect"]["port"], 5678);
 
         assert!(
-            parse_custom(CUSTOM_TEMPLATE).unwrap().is_empty(),
+            parse_custom(CUSTOM_TEMPLATE).unwrap().debug.is_empty(),
             "견본은 모두 주석"
         );
         assert!(

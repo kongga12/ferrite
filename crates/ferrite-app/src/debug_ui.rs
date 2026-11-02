@@ -11,7 +11,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use eframe::egui;
-use ferrite_core::debug_config::DebugConfig;
+use ferrite_core::debug_config::{self, CustomAdapter, DebugConfig};
 use ferrite_dap::{
     Adapter, Breakpoint, BreakpointState, DebugEvent, DebugSession, Launch, Scope, Source,
     StackFrame, State, Variable, adapters, types,
@@ -855,6 +855,61 @@ pub(crate) fn tail(text: &str, lines: usize) -> String {
     tail.join(" / ")
 }
 
+/// 구성의 어댑터를 띄울 방법. `debug.toml`의 `[[adapter]]`가 먼저이고, 없으면 목록의 어댑터(설치한 것,
+/// 없으면 PATH).
+pub(crate) fn resolve_adapter(name: &str, servers: &Path, root: &Path) -> Result<Adapter, String> {
+    let custom = debug_config::load_adapters(root)?;
+    match custom.iter().find(|a| a.name == name) {
+        Some(adapter) => custom_adapter(adapter, root),
+        None => adapters::resolve(name, servers, root),
+    }
+}
+
+/// 사용자 어댑터: command만이면 표준 입출력, address만이면 붙기, 둘 다면 띄우고 그 주소에 붙기.
+fn custom_adapter(adapter: &CustomAdapter, root: &Path) -> Result<Adapter, String> {
+    let address = adapter.socket()?;
+    let root_text = root.to_string_lossy();
+    let command = adapter
+        .command
+        .as_deref()
+        .map(|c| c.trim().replace("${workspaceFolder}", &root_text))
+        .filter(|c| !c.is_empty());
+    let program = match command {
+        None => None,
+        // 경로로 적었으면 프로젝트 루트 기준, 이름만 적었으면 PATH에서 찾는다.
+        Some(command) if command.contains(['/', '\\']) => Some(root.join(command)),
+        Some(command) => Some(ferrite_lsp::client::find_program(&command).ok_or_else(|| {
+            format!(
+                "디버그 어댑터 {}의 {command}을(를) PATH에서 찾지 못했습니다",
+                adapter.name
+            )
+        })?),
+    };
+    let args = adapter.resolved_args(root);
+    let env: Vec<(String, String)> = adapter.env.clone().into_iter().collect();
+    let cwd = Some(root.to_path_buf());
+    match (program, address) {
+        (Some(program), None) => Ok(Adapter::Stdio {
+            program,
+            args,
+            cwd,
+            env,
+        }),
+        (None, Some(address)) => Ok(Adapter::Tcp(address)),
+        (Some(program), Some(address)) => Ok(Adapter::Listening {
+            program,
+            args,
+            cwd,
+            env,
+            address: Some(address),
+        }),
+        (None, None) => Err(format!(
+            "디버그 어댑터 {}에는 command나 address가 있어야 합니다",
+            adapter.name
+        )),
+    }
+}
+
 /// 명령 줄을 실행할 플랫폼 셸(터미널의 실행 구성과 같다).
 pub(crate) fn shell(line: &str) -> Command {
     #[cfg(windows)]
@@ -936,6 +991,56 @@ impl Debugger {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn debug_toml의_사용자_어댑터를_먼저_고른다() {
+        let root = std::env::temp_dir().join(format!("ferrite-custom-dap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join(".ferrite")).unwrap();
+        std::fs::write(
+            root.join(".ferrite/debug.toml"),
+            "[[adapter]]\nname = \"vendor-stdio\"\ncommand = \"tools/dap\"\nargs = [\"--root\", \"${workspaceFolder}\"]\n\
+             env = { VENDOR = \"1\" }\n\n\
+             [[adapter]]\nname = \"vendor-tcp\"\naddress = \"127.0.0.1:4711\"\n\n\
+             [[adapter]]\nname = \"vendor-server\"\ncommand = \"${workspaceFolder}/tools/server\"\naddress = \"127.0.0.1:4712\"\n\n\
+             [[adapter]]\nname = \"없는 프로그램\"\ncommand = \"ferrite-no-such-dap\"\n",
+        )
+        .unwrap();
+        let servers = root.join("servers");
+        let resolve = |name: &str| resolve_adapter(name, &servers, &root);
+        match resolve("vendor-stdio").unwrap() {
+            Adapter::Stdio {
+                program, args, env, ..
+            } => {
+                assert_eq!(program, root.join("tools/dap"));
+                assert_eq!(
+                    args,
+                    ["--root".to_owned(), root.to_string_lossy().into_owned()]
+                );
+                assert_eq!(env, [("VENDOR".to_owned(), "1".to_owned())]);
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(matches!(
+            resolve("vendor-tcp").unwrap(),
+            Adapter::Tcp(a) if a.port() == 4711
+        ));
+        match resolve("vendor-server").unwrap() {
+            Adapter::Listening {
+                program, address, ..
+            } => {
+                assert_eq!(program, root.join("tools/server"));
+                assert_eq!(address.map(|a| a.port()), Some(4712));
+            }
+            other => panic!("{other:?}"),
+        }
+        let error = resolve("없는 프로그램").err().unwrap();
+        assert!(error.contains("ferrite-no-such-dap"), "{error}");
+        // 적지 않은 이름은 목록의 어댑터로 고른다.
+        let error = resolve("vendor-없음").err().unwrap();
+        assert!(error.contains("알 수 없는 디버그 어댑터"), "{error}");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 
     fn source(path: &str, reference: i64) -> Source {
         Source {

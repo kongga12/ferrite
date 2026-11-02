@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use ferrite_lsp::transport::{read_message, write_message};
 use serde_json::{Value, json};
@@ -50,12 +50,14 @@ pub enum Adapter {
     /// 이미 듣고 있는 어댑터에 붙는다(java-debug).
     Tcp(SocketAddr),
     /// 어댑터를 띄우고, 표준 출력에 알리는 주소("… listening at: 127.0.0.1:PORT")로 붙는다
-    /// (delve `dlv dap --listen=127.0.0.1:0`).
+    /// (delve `dlv dap --listen=127.0.0.1:0`). `address`를 주면 그 주소가 열릴 때까지 다시 붙어 본다
+    /// (사용자가 적은 어댑터).
     Listening {
         program: PathBuf,
         args: Vec<String>,
         cwd: Option<PathBuf>,
         env: Vec<(String, String)>,
+        address: Option<SocketAddr>,
     },
 }
 
@@ -232,6 +234,7 @@ impl DebugSession {
                 args,
                 cwd,
                 env,
+                address: fixed,
             } => {
                 let mut child = spawn(program, args, cwd.as_deref(), env)?;
                 let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take())
@@ -246,23 +249,41 @@ impl DebugSession {
                         let _ = announce.send(address);
                     }
                 });
-                let found = match announced.recv_timeout(LISTEN_TIMEOUT) {
-                    Ok(found) => found,
-                    Err(_) => {
-                        let _ = child.kill();
-                        let tail: Vec<String> = lock(&stderr_tail).iter().cloned().collect();
-                        return Err(format!(
-                            "{}이(가) 듣는 주소를 알리지 않았습니다: {}",
-                            program.display(),
-                            tail.join(" / ")
-                        ));
-                    }
+                let found = match fixed {
+                    Some(found) => *found,
+                    None => match announced.recv_timeout(LISTEN_TIMEOUT) {
+                        Ok(found) => found,
+                        Err(_) => {
+                            let _ = child.kill();
+                            let tail: Vec<String> = lock(&stderr_tail).iter().cloned().collect();
+                            return Err(format!(
+                                "{}이(가) 듣는 주소를 알리지 않았습니다: {}",
+                                program.display(),
+                                tail.join(" / ")
+                            ));
+                        }
+                    },
                 };
-                let stream = match TcpStream::connect_timeout(&found, CONNECT_TIMEOUT) {
-                    Ok(stream) => stream,
-                    Err(e) => {
-                        let _ = child.kill();
-                        return Err(format!("디버그 어댑터({found})에 붙지 못했습니다: {e}"));
+                // 정해 둔 주소는 어댑터가 뜨는 동안 열리지 않았을 수 있어, 어댑터가 살아 있는 동안 다시 붙어 본다.
+                let deadline = Instant::now() + LISTEN_TIMEOUT;
+                let stream = loop {
+                    match TcpStream::connect_timeout(&found, CONNECT_TIMEOUT) {
+                        Ok(stream) => break stream,
+                        Err(_)
+                            if fixed.is_some()
+                                && Instant::now() < deadline
+                                && matches!(child.try_wait(), Ok(None)) =>
+                        {
+                            thread::sleep(Duration::from_millis(100));
+                        }
+                        Err(e) => {
+                            let _ = child.kill();
+                            let tail: Vec<String> = lock(&stderr_tail).iter().cloned().collect();
+                            return Err(format!(
+                                "디버그 어댑터({found})에 붙지 못했습니다: {e} {}",
+                                tail.join(" / ")
+                            ));
+                        }
                     }
                 };
                 address = Some(found);
