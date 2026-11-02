@@ -1229,10 +1229,11 @@
   - 완료 조건 (1) egov 표본 프로젝트의 `mvn test` 결과 트리와 실패 줄: 확인해 보니 egov 템플릿에서는 되지 않았다. 그래서 건너뜀 알림과 켜기 단추를 더했다.
     - 확인(egov 5.0.0 웹 템플릿, surefire 3.5.2): pom의 maven-surefire-plugin 설정에 `<skipTests>true</skipTests>`가 있어 `mvn test`가 "Tests are skipped."로 끝난다. 설정에 직접 적은 값이라 `-DskipTests=false`로도 켜지지 않는다. 테스트 창은 "결과 보고서가 없습니다(컴파일 실패 등)"라고 보여 까닭을 알 수 없었다.
     - 결정(사용자): 알리고 켜기 단추. Maven 구성이 보고서 없이 끝나고 돌린 폴더의 pom.xml에 그 설정이 있으면 "테스트를 건너뛰었습니다: pom.xml의 maven-surefire-plugin 설정이 skipTests=true입니다(egov 템플릿 기본값)"와 [pom.xml에서 테스트 켜기]를 보인다. 누를 때만 그 요소를 지운다(그 줄에 그것만 있으면 줄째, `ferrite-core` `test_report::enable_tests`). Maven 기본으로 돌아가 패키징 때는 `-DskipTests`로 건너뛸 수 있다. 다른 플러그인(failsafe)의 같은 설정은 건드리지 않는다.
-    - 시험: 단위(찾기·지우기, CRLF, 한 줄에 같이 있는 것), 실제 egov 웹 템플릿(`templates.yml` 3개 OS): 템플릿 pom이 테스트를 건너뛰게 한 것을 찾아 지우고, 넣은 JUnit 5 테스트를 `mvn test`로 돌려 통과 1·실패 1, 실패 줄이 `SampleTest.java` 15줄이다.
+    - 시험: 단위(찾기·지우기, CRLF, 한 줄에 같이 있는 것), 실제 egov 웹 템플릿(`templates.yml` 3개 OS, 실행 41386606209): 템플릿 pom이 테스트를 건너뛰게 한 것을 찾아 지우고, 넣은 JUnit 5 테스트를 `mvn test`로 돌려 통과 1·실패 1, 실패 줄이 `SampleTest.java` 15줄이다.
     - 실제 앱(Windows, 릴리스 빌드): 웹 템플릿 프로젝트에서 [실행] → 건너뜀 알림과 단추 → [pom.xml에서 테스트 켜기] → [실행] → 통과 1·실패 1 트리, 실패를 두 번 눌러 15줄로 가는 것을 화면으로 확인했다.
   - 완료 조건 (2) SpotBugs SARIF가 문제 창에 뜬다: 9-2의 실제 SpotBugs 시험이 CI 3개 OS 전체 작업에서 통과했다.
-  - 완료 조건 (3) log4j 2.14.1 pom의 경고와 오프라인 DB: 9-3의 실제 시험이 CI 3개 OS 전체 작업에서 통과했다(실행 41367369739). egov 웹 템플릿에서도 의존성 113개(egov RTE가 끌어온 Spring 6.2.11·log4j 2.25.3 등)를 풀어 취약 41건을 egov 의존성 줄에 두고, 온라인과 받은 Maven DB의 결과가 같다(로컬, `templates.yml` 3개 OS).
+  - 완료 조건 (3) log4j 2.14.1 pom의 경고와 오프라인 DB: 9-3의 실제 시험이 CI 3개 OS 전체 작업에서 통과했다(실행 41367369739). egov 웹 템플릿에서도 의존성(로컬 113개, CI 111개)을 풀어 취약 41건(egov RTE가 끌어온 Spring 6.2.11·log4j 2.25.3 등)을 egov 의존성 줄에 두고, 온라인과 받은 Maven DB의 결과가 같다(로컬, `templates.yml` 3개 OS 실행 41386606209).
+  - CI 3개 OS 전체(실행 41386608513, `9076acc`) 통과.
   - 확인하지 못한 것: 화면으로 직접 본 것은 Windows뿐이다. Gradle 실제 실행은 돌리지 않았다.
 
 ### 백로그 — Phase 미정
