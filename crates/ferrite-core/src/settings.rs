@@ -1,5 +1,7 @@
 //! 사용자 설정(TOML). 파일에 없는 항목은 기본값을 쓴다.
 
+use std::collections::BTreeMap;
+
 use serde::Deserialize;
 
 use crate::buffer::Indent;
@@ -25,6 +27,15 @@ update_check = true
 
 # 업데이트 정보(latest.json) 주소. 비우면 공식 릴리스. 사내 미러를 쓸 때만 바꾼다.
 update_url = ""
+
+# 단축키 배치: "default"(VS Code식), "eclipse"(egov 개발환경·Eclipse식)
+keymap = "default"
+
+# 명령마다 키를 바꾼다. 명령 이름과 지금 키는 [보기 > 단축키 목록]에서 본다.
+# "Ctrl"은 macOS에서 Cmd다(실제 Ctrl은 "Control"). 키 여럿은 목록으로, 빈 값("")은 키를 뺀다.
+# [keys]
+# "edit.deleteLine" = "Ctrl+D"
+# "code.action" = ["Ctrl+1", "Alt+Enter"]
 "#;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
@@ -34,6 +45,36 @@ pub enum Theme {
     System,
     Dark,
     Light,
+}
+
+/// 단축키 배치의 바탕.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Keymap {
+    #[default]
+    Default,
+    Eclipse,
+}
+
+/// `[keys]`의 값: 키 하나 또는 여럿(`"Ctrl+S"`, `["Ctrl+.", "Alt+Enter"]`). 키 글은 앱이 읽는다.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(untagged)]
+pub enum Keys {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl Keys {
+    /// 적은 키들(빈 글은 뺀다. 그래서 `""`·`[]`은 키 없음).
+    pub fn list(&self) -> Vec<&str> {
+        match self {
+            Keys::One(key) => vec![key.as_str()],
+            Keys::Many(keys) => keys.iter().map(String::as_str).collect(),
+        }
+        .into_iter()
+        .filter(|k| !k.trim().is_empty())
+        .collect()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -46,6 +87,9 @@ pub struct Settings {
     pub indent_size: u8,
     pub update_check: bool,
     pub update_url: String,
+    pub keymap: Keymap,
+    /// 명령 이름(`"file.save"`) → 키. 배치의 키를 덮는다.
+    pub keys: BTreeMap<String, Keys>,
 }
 
 impl Default for Settings {
@@ -58,6 +102,8 @@ impl Default for Settings {
             indent_size: 4,
             update_check: true,
             update_url: String::new(),
+            keymap: Keymap::Default,
+            keys: BTreeMap::new(),
         }
     }
 }
@@ -120,6 +166,22 @@ mod tests {
         assert!(
             Settings::parse("fontsize = 12").is_err(),
             "오타를 조용히 무시하지 않는다"
+        );
+        assert!(Settings::parse("keymap = \"emacs\"").is_err());
+    }
+
+    #[test]
+    fn 단축키_배치와_명령별_키() {
+        let s = Settings::parse(
+            "keymap = \"eclipse\"\n[keys]\n\"edit.deleteLine\" = \"Ctrl+D\"\n\"code.action\" = [\"Ctrl+1\", \"Alt+Enter\"]\n\"file.openFolder\" = \"\"\n",
+        )
+        .unwrap();
+        assert_eq!(s.keymap, Keymap::Eclipse);
+        assert_eq!(s.keys["edit.deleteLine"].list(), ["Ctrl+D"]);
+        assert_eq!(s.keys["code.action"].list(), ["Ctrl+1", "Alt+Enter"]);
+        assert!(
+            s.keys["file.openFolder"].list().is_empty(),
+            "빈 값은 키 없음"
         );
     }
 }

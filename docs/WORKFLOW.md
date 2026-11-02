@@ -1243,12 +1243,27 @@
 | 기능 | 내용 | 크기 |
 |---|---|---|
 | EditorConfig | `.editorconfig`의 들여쓰기·줄바꿈·끝 공백·마지막 줄바꿈을 따른다. `charset`은 latin1·UTF-8·UTF-16만 정의되어 있어, CP949 감지·보존은 지금대로 둔다. | 작음 |
-| 단축키 설정·Eclipse 배치 | `settings.toml`에서 단축키를 바꾼다. egov 개발환경(Eclipse)에서 넘어온 사용자를 위해 Eclipse 단축키 배치를 고를 수 있게 한다. | 중간 |
 | 사용자 정의 DAP 어댑터 | `debug.toml`에 어댑터 실행 명령과 연결(표준 입출력·TCP)을 직접 적어 목록 밖 어댑터(장비 제조사 디버거 등)를 붙인다. 제조사가 DAP 어댑터를 함께 내주는 경우가 늘고 있다. | 작음 |
 | 저장 시 작업 | 저장한 파일이 패턴에 맞으면 명령(포매터, Sass 컴파일 등)을 돌린다. `.ferrite/run.toml`과 같은 틀이다. | 작음 |
 | TODO 목록 | `TODO`·`FIXME` 주석을 파일에서 찾기(3-1)로 모아 창에 보인다. | 작음 |
 | Handlebars 강조 | egov 코드 생성 템플릿(`.ferrite/templates/code/`)을 고칠 때 쓴다. | 작음 |
 | AI 에이전트 연동 | 개방 표준 둘. MCP 서버: 열린 파일·진단·디버거 상태를 외부 코딩 에이전트에 도구로 내준다. ACP(Agent Client Protocol) 클라이언트: 에이전트 프로세스를 띄워 패널에서 대화하고, 제안한 편집을 diff로 받는다. | 큼 |
+
+- [x] 단축키 설정·Eclipse 배치(2026-11-02) — 중간
+  - 결정(사용자): 자주 쓰는 편집 명령(줄 지우기·줄 복제·줄로 가기·단축키 목록)도 새로 만든다, 바꾸기는 settings.toml(`keymap`·`[keys]`)과 읽기 전용 단축키 목록 창
+  - 배치(`ferrite-app` `keymap`): 명령 35개마다 이름(`file.save`)·보일 이름·기본 배치(VS Code식)·Eclipse 배치의 키(여럿 가능)를 한 표에 둔다. 메뉴의 단축키 글도 이 배치에서 가져온다.
+    - Eclipse 배치: 찾기·바꾸기 `Ctrl+F`, 다음·이전 찾기 `Ctrl+K`·`Ctrl+Shift+K`, 줄로 가기 `Ctrl+L`, 줄 지우기 `Ctrl+D`, 줄 복제 `Ctrl+Alt+↓/↑`, 파일에서 찾기 `Ctrl+H`, 파일로 이동 `Ctrl+Shift+R`, 기호로 이동 `Ctrl+Shift+T`, 개요 `Ctrl+O`, 정의로 이동 `F3`, 참조 찾기 `Ctrl+Shift+G`, 문서 포맷 `Ctrl+Shift+F`, 이름 바꾸기 `Alt+Shift+R`, 빠른 수정 `Ctrl+1`, 실행 `Ctrl+F11`, 디버그 `F11`·계속 `F8`, 들어가기 `F5`·한 줄씩 `F6`·나오기 `F7`, 멈춤 `Ctrl+F2`, 중단점 `Ctrl+Shift+B`, 단축키 목록 `Ctrl+Shift+L`, 터미널 `Ctrl+Alt+Shift+T`. Eclipse에 없는 폴더 열기·소스 제어·일시 정지는 메뉴로.
+    - 새 명령의 기본 배치: 줄로 가기 `Ctrl+G`, 줄 지우기 `Ctrl+Shift+K`, 줄 복제 `Shift+Alt+↓/↑`, 단축키 목록 `Ctrl+Shift+L`. `[편집]`·`[보기]` 메뉴에도 넣었다.
+    - 키 글: `Ctrl+Shift+F`, `Control+Space`, `Alt+Up`, `Ctrl+.`. `Ctrl`은 macOS에서 Cmd, `Control`은 어느 OS에서나 실제 Ctrl. 대소문자를 가리지 않는다.
+    - 조합 키가 많은 것부터 맞춘다(egui는 덧붙은 Shift·Alt를 무시하고 맞추므로 `Shift+F5`를 `F5`보다 먼저).
+  - 설정(`ferrite-core` `settings`): `keymap = "default" | "eclipse"`, `[keys]`에 명령 이름 → 키 하나·목록(빈 값은 키 없음). 모르는 명령·키는 상태바와 목록 창에 알리고 나머지는 적용한다.
+  - 포커스: 줄 명령·줄로 가기는 에디터에 포커스가 있을 때만 받는다. 터미널에 포커스가 있으면 셸이 쓰는 Ctrl+글자(Shift·Alt 없이, Ctrl+D 입력 끝·Ctrl+L 화면 지우기·Ctrl+K·Ctrl+W 등)는 단축키로 가로채지 않는다(기본 배치에서도 바뀐 동작이다. macOS의 Cmd는 상관없다).
+  - 단축키 목록 창(`[보기 > 단축키 목록]`): 배치, 명령마다 보일 이름·설정 이름·키, 같은 키를 쓰는 다른 명령(겹침), 설정 오류, 찾기, [설정 열기].
+  - 검증
+    - 단위: 키 글 읽기, 두 배치 모두 모든 명령을 읽고 키가 겹치지 않음, 설정으로 덮기·빼기·잘못된 것 알림·맞추는 순서·겹침, 터미널 제어 키, 줄 지우기·복제(마지막 줄·여러 줄·실행 취소), 설정 읽기
+    - 창 시험(kittest): Eclipse 배치에서 에디터 포커스 없이는 `Ctrl+D`를 받지 않고, 포커스가 있으면 줄 지우기·`Ctrl+Alt+↓` 복제, `Ctrl+L` 줄로 가기(지금 줄을 채움, 범위 밖 오류), `Ctrl+Shift+L` 목록
+    - 실제 앱(Windows, 릴리스 빌드, `keymap = "eclipse"`): 단축키 목록 창(배치: Eclipse), 에디터에서 `Ctrl+D` 줄 지우기·`Ctrl+Alt+↓` 줄 복제·`Ctrl+L` 줄로 가기 창, `Ctrl+Alt+Shift+T`로 연 터미널에서 `Ctrl+L`이 셸로 가 화면이 지워지는 것을 화면으로 확인했다. 확인 뒤 설정 폴더를 지웠다.
+  - 확인하지 못한 것: macOS의 Cmd 배치는 시험으로만 확인했다.
 
 - 살폈지만 넣지 않은 것: 임베디드(MCU 플래시·시리얼 모니터·장비 설정 파일), 프레임워크별 지원(React·Vue·Angular 등, JS·TS 언어 서버로 기본은 된다), 린터 개별 연동(언어 서버나 저장 시 작업으로 된다), 원격 개발·컨테이너·SFTP 배포, 로컬 AI 완성 모델, 계정 기반 설정 동기화. egov 개발과 거리가 멀거나 크기에 비해 쓰임이 적다.
 
