@@ -287,6 +287,36 @@ pub fn with_report(tool: Tool, command: &str, dir: &Path) -> String {
     }
 }
 
+/// pom.xml의 maven-surefire-plugin 설정에 박힌 `<skipTests>true</skipTests>`의 바이트 범위. egov 템플릿의
+/// 기본값이고, 설정에 직접 적은 값이라 명령 줄(`-DskipTests=false`)로는 켤 수 없다.
+pub fn pom_skips_tests(pom: &str) -> Option<std::ops::Range<usize>> {
+    let doc = roxmltree::Document::parse(pom).ok()?;
+    let is = |n: roxmltree::Node, value: &str| n.text().map(str::trim) == Some(value);
+    doc.descendants()
+        .filter(|n| n.tag_name().name() == "plugin")
+        .filter(|p| {
+            p.children()
+                .any(|c| c.tag_name().name() == "artifactId" && is(c, "maven-surefire-plugin"))
+        })
+        .flat_map(|p| p.descendants())
+        .find(|n| n.tag_name().name() == "skipTests" && is(*n, "true"))
+        .map(|n| n.range())
+}
+
+/// 그 설정을 지운 pom(그 줄에 그것만 있으면 줄째). 그 뒤로는 Maven 기본대로 테스트를 돌리고,
+/// 건너뛰려면 `-DskipTests`를 쓴다.
+pub fn enable_tests(pom: &str) -> Option<String> {
+    let range = pom_skips_tests(pom)?;
+    let line_start = pom[..range.start].rfind('\n').map_or(0, |i| i + 1);
+    let line_end = pom[range.end..]
+        .find('\n')
+        .map_or(pom.len(), |i| range.end + i + 1);
+    let alone = pom[line_start..range.start].trim().is_empty()
+        && pom[range.end..line_end].trim().is_empty();
+    let cut = if alone { line_start..line_end } else { range };
+    Some(format!("{}{}", &pom[..cut.start], &pom[cut.end..]))
+}
+
 /// 이번 실행이 남긴 보고서 파일(`since` 뒤에 고친 것). Maven은 `target/surefire-reports`·
 /// `failsafe-reports`, Gradle은 `build/test-results`, pytest·CTest는 `dir`. Go는 표준 출력으로 준다.
 pub fn report_files(tool: Tool, root: &Path, dir: &Path, since: SystemTime) -> Vec<PathBuf> {

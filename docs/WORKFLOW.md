@@ -1157,7 +1157,7 @@
   - 실패를 누르면 그 테스트와 스택의 줄로 간다. 실패한 것만 다시 돌린다(Maven `-Dtest=`, pytest 노드 id 등).
 - 정적 분석 결과 보기(SARIF 2.1.0): 외부 도구(SpotBugs·PMD·Semgrep·clang 정적 분석기 등)가 낸 `.sarif`를 열어 문제 창에 넣는다. 도구를 돌리는 일은 실행 구성에 맡긴다.
 - 의존성 취약점 검사: `pom.xml`·`build.gradle`·`package-lock.json`·`requirements.txt`·`Cargo.lock`의 라이브러리 버전을 공개 취약점 DB(OSV)와 견주고, 고친 버전을 알린다.
-  - Maven은 전이 의존을 `mvn dependency:list`로 푼다. egov는 전이로 들어오는 로깅·Spring 라이브러리가 많다.
+  - Maven은 전이 의존을 `mvn dependency:tree`로 푼다. egov는 전이로 들어오는 로깅·Spring 라이브러리가 많다.
   - 결과는 문제 창과 그 의존성 줄의 경고로 보인다.
   - 인터넷이 막힌 PC는 생태계별 DB 묶음 파일을 다른 PC에서 받아 와 쓴다(언어 서버의 "파일에서…"와 같다).
 
@@ -1224,7 +1224,17 @@
     - 실제 도구(CI 3개 OS 전체 작업): `mvn dependency:tree`로 log4j-slf4j-impl 2.14.1의 전이 log4j-core 2.14.1을 풀어 직접 의존 줄에 두고, 온라인 OSV와 받은 Maven DB(약 10MB) 둘 다 CVE-2021-44228(고친 버전 2.15.0)을 찾는다.
     - 실제 앱(Windows, 릴리스 빌드): pom.xml(log4j-slf4j-impl 2.14.1)·requirements.txt·npm 잠금·Cargo.lock 예제를 온라인으로 검사해 의존성 8개·취약 56건, pom.xml 7줄 물결선과 상태바 "오류 3 · 경고 6". 오프라인은 [받기]로 Maven DB(10.5MB)를 받아 pom.xml 9건이 온라인과 같고, DB 없는 npm·PyPI·crates.io를 알린다. 확인 뒤 설정·DB 폴더를 지웠다.
   - 남은 것: Gradle 실제 실행은 돌리지 않았다(형식 표본으로 확인), 오프라인은 검사마다 묶음을 다 푼다(npm 220MB는 오래 걸린다. 느리면 들일 때 패키지별 색인)
-- [ ] 3개 OS 검증
+- [x] 3개 OS 검증(2026-11-02)
+  - 결정(사용자): 실제 egov 템플릿으로 확인한다(웹 템플릿 egovframe-web.zip 15.5MB를 받고, 의존성 이름·버전을 api.osv.dev에 묻고, Maven DB 10.5MB를 받는다). 로컬과 `templates.yml` 3개 OS.
+  - 완료 조건 (1) egov 표본 프로젝트의 `mvn test` 결과 트리와 실패 줄: 확인해 보니 egov 템플릿에서는 되지 않았다. 그래서 건너뜀 알림과 켜기 단추를 더했다.
+    - 확인(egov 5.0.0 웹 템플릿, surefire 3.5.2): pom의 maven-surefire-plugin 설정에 `<skipTests>true</skipTests>`가 있어 `mvn test`가 "Tests are skipped."로 끝난다. 설정에 직접 적은 값이라 `-DskipTests=false`로도 켜지지 않는다. 테스트 창은 "결과 보고서가 없습니다(컴파일 실패 등)"라고 보여 까닭을 알 수 없었다.
+    - 결정(사용자): 알리고 켜기 단추. Maven 구성이 보고서 없이 끝나고 돌린 폴더의 pom.xml에 그 설정이 있으면 "테스트를 건너뛰었습니다: pom.xml의 maven-surefire-plugin 설정이 skipTests=true입니다(egov 템플릿 기본값)"와 [pom.xml에서 테스트 켜기]를 보인다. 누를 때만 그 요소를 지운다(그 줄에 그것만 있으면 줄째, `ferrite-core` `test_report::enable_tests`). Maven 기본으로 돌아가 패키징 때는 `-DskipTests`로 건너뛸 수 있다. 다른 플러그인(failsafe)의 같은 설정은 건드리지 않는다.
+    - 시험: 단위(찾기·지우기, CRLF, 한 줄에 같이 있는 것), 실제 egov 웹 템플릿(`templates.yml` 3개 OS, 실행 41386606209): 템플릿 pom이 테스트를 건너뛰게 한 것을 찾아 지우고, 넣은 JUnit 5 테스트를 `mvn test`로 돌려 통과 1·실패 1, 실패 줄이 `SampleTest.java` 15줄이다.
+    - 실제 앱(Windows, 릴리스 빌드): 웹 템플릿 프로젝트에서 [실행] → 건너뜀 알림과 단추 → [pom.xml에서 테스트 켜기] → [실행] → 통과 1·실패 1 트리, 실패를 두 번 눌러 15줄로 가는 것을 화면으로 확인했다.
+  - 완료 조건 (2) SpotBugs SARIF가 문제 창에 뜬다: 9-2의 실제 SpotBugs 시험이 CI 3개 OS 전체 작업에서 통과했다.
+  - 완료 조건 (3) log4j 2.14.1 pom의 경고와 오프라인 DB: 9-3의 실제 시험이 CI 3개 OS 전체 작업에서 통과했다(실행 41367369739). egov 웹 템플릿에서도 의존성(로컬 113개, CI 111개)을 풀어 취약 41건(egov RTE가 끌어온 Spring 6.2.11·log4j 2.25.3 등)을 egov 의존성 줄에 두고, 온라인과 받은 Maven DB의 결과가 같다(로컬, `templates.yml` 3개 OS 실행 41386606209).
+  - CI 3개 OS 전체(실행 41386608513, `9076acc`) 통과.
+  - 확인하지 못한 것: 화면으로 직접 본 것은 Windows뿐이다. Gradle 실제 실행은 돌리지 않았다.
 
 ### 백로그 — Phase 미정
 

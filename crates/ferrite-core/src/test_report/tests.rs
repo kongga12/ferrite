@@ -334,3 +334,26 @@ fn 이번_실행의_보고서를_찾고_스택의_파일을_프로젝트에서_�
     }
     std::fs::remove_dir_all(&root).unwrap();
 }
+
+#[test]
+fn egov_pom의_skip_tests를_찾아_지운다() {
+    // egov 웹 템플릿(v5.0.7)의 surefire 설정 꼴. 관리 블록의 다른 플러그인은 건드리지 않는다.
+    let pom = "<project>\r\n  <build>\r\n    <plugins>\r\n      <plugin>\r\n        <artifactId>maven-failsafe-plugin</artifactId>\r\n        <configuration><skipTests>true</skipTests></configuration>\r\n      </plugin>\r\n      <plugin>\r\n        <groupId>org.apache.maven.plugins</groupId>\r\n        <artifactId>maven-surefire-plugin</artifactId>\r\n        <configuration>\r\n          <skipTests>true</skipTests>\r\n          <reportFormat>xml</reportFormat>\r\n        </configuration>\r\n      </plugin>\r\n    </plugins>\r\n  </build>\r\n</project>\r\n";
+    let range = pom_skips_tests(pom).unwrap();
+    assert_eq!(&pom[range], "<skipTests>true</skipTests>");
+    let enabled = enable_tests(pom).unwrap();
+    assert_eq!(
+        enabled,
+        pom.replace("          <skipTests>true</skipTests>\r\n", "")
+    );
+    assert_eq!(pom_skips_tests(&enabled), None);
+    assert!(enabled.contains("<configuration><skipTests>true</skipTests></configuration>"));
+    // 한 줄에 다른 것과 같이 있으면 그것만 지운다.
+    let inline = "<project><build><plugins><plugin><artifactId>maven-surefire-plugin</artifactId><configuration><skipTests>true</skipTests></configuration></plugin></plugins></build></project>";
+    assert_eq!(
+        enable_tests(inline).unwrap(),
+        inline.replace("<skipTests>true</skipTests>", "")
+    );
+    assert_eq!(pom_skips_tests("<project/>"), None);
+    assert_eq!(enable_tests("<project/>"), None);
+}
