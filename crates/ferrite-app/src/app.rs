@@ -10,7 +10,7 @@ use ferrite_core::buffer::{Buffer, Indent, Selection, detect_indent};
 use ferrite_core::settings::{self, Settings, Theme};
 use ferrite_core::syntax::{Lang, MAX_SYNTAX_BYTES, Syntax};
 use ferrite_core::text_file::{self, Encoding, LineEnding, TextContent, TextFileError};
-use ferrite_core::{fs_ops, search};
+use ferrite_core::{editorconfig, fs_ops, search};
 
 use crate::dock::{self, Pane};
 use crate::editor_view::{self, BreakpointMark, EditorOptions, EditorState, Styler};
@@ -301,6 +301,8 @@ struct Document {
     encoding: Encoding,
     line_ending: LineEnding,
     indent: Indent,
+    /// 이 파일의 EditorConfig(들여쓰기·탭 폭·줄바꿈·끝 공백·마지막 줄바꿈).
+    editorconfig: editorconfig::Properties,
     /// 마지막으로 열거나 저장한 시점의 버퍼 리비전.
     saved_revision: u64,
     /// 저장 인코딩·줄바꿈을 바꿨지만 아직 저장하지 않음.
@@ -347,6 +349,7 @@ impl Document {
             encoding: content.encoding,
             line_ending: content.line_ending,
             indent: default_indent,
+            editorconfig: Default::default(),
             saved_revision: 0,
             format_changed: false,
             lang,
@@ -373,7 +376,11 @@ impl Document {
         let head = self.buffer.selection().head;
         let mut buffer = Buffer::new(&content.text);
         buffer.move_to(head.min(buffer.len_chars()), false);
-        self.indent = detect_indent(buffer.rope(), default_indent);
+        // EditorConfig가 감지한 것보다 앞선다. 줄바꿈이 파일과 다르면 저장할 때 바꾼다.
+        self.editorconfig = editorconfig::properties(&self.path);
+        self.indent = self
+            .editorconfig
+            .indent(detect_indent(buffer.rope(), default_indent));
         self.syntax = self
             .lang
             .filter(|_| buffer.rope().len_bytes() <= MAX_SYNTAX_BYTES)
@@ -382,7 +389,7 @@ impl Document {
         self.saved_revision = buffer.revision();
         self.buffer = buffer;
         self.encoding = content.encoding;
-        self.line_ending = content.line_ending;
+        self.line_ending = self.editorconfig.end_of_line.unwrap_or(content.line_ending);
         self.format_changed = false;
         self.disk_hash = text_file::content_hash(bytes);
         self.external_change = false;
@@ -420,6 +427,18 @@ impl Document {
     }
 
     fn save(&mut self) -> Result<(), TextFileError> {
+        // EditorConfig의 끝 공백·마지막 줄바꿈을 버퍼에 고쳐 저장한다(실행 취소할 수 있다). 다른 이름으로
+        // 저장했거나 .editorconfig가 바뀌었을 수 있어 다시 읽는다. 노트북은 Jupyter가 쓴 모양을 지킨다.
+        self.editorconfig = editorconfig::properties(&self.path);
+        if self.notebook.is_none() {
+            let now = Instant::now();
+            if self.editorconfig.trim_trailing_whitespace == Some(true) {
+                self.buffer.trim_trailing_whitespace(now);
+            }
+            if let Some(wanted) = self.editorconfig.insert_final_newline {
+                self.buffer.set_final_newline(wanted, now);
+            }
+        }
         let content = TextContent {
             text: self.buffer.text(),
             encoding: self.encoding,
@@ -1092,6 +1111,16 @@ impl FerriteApp {
                 self.git.request_refresh();
                 if settings_path().is_some_and(|p| real_path(&p) == doc.path) {
                     self.settings_changed = true;
+                }
+                if doc.path.file_name().is_some_and(|n| n == ".editorconfig") {
+                    for doc in &mut self.docs {
+                        doc.editorconfig = editorconfig::properties(&doc.path);
+                        doc.indent = doc.editorconfig.indent(doc.indent);
+                        if let Some(eol) = doc.editorconfig.end_of_line {
+                            doc.line_ending = eol;
+                        }
+                    }
+                    self.status = "EditorConfig를 열린 파일에 다시 적용했습니다".into();
                 }
                 true
             }
@@ -3036,10 +3065,19 @@ impl FerriteApp {
                     if (doc.encoding, doc.line_ending) != before {
                         doc.format_changed = true;
                     }
-                    ui.label(match doc.indent {
+                    let indent = ui.label(match doc.indent {
                         Indent::Tabs => "탭".to_owned(),
                         Indent::Spaces(n) => format!("공백: {n}"),
                     });
+                    if !doc.editorconfig.files.is_empty() {
+                        let files: Vec<String> = doc
+                            .editorconfig
+                            .files
+                            .iter()
+                            .map(|f| f.display().to_string())
+                            .collect();
+                        indent.on_hover_text(format!("EditorConfig: {}", files.join(", ")));
+                    }
                     ui.label(match (doc.lang, &doc.syntax, &doc.ext) {
                         (Some(lang), Some(_), _) => lang.name().to_owned(),
                         (Some(lang), None, _) => {
@@ -3431,7 +3469,7 @@ impl FerriteApp {
                 })
                 .collect();
             let opts = EditorOptions {
-                tab_size: self.settings.tab_size,
+                tab_size: doc.editorconfig.tab_width.unwrap_or(self.settings.tab_size),
                 indent: doc.indent,
                 comment_token: doc
                     .lang
@@ -7445,6 +7483,50 @@ mod tests {
         harness.get_by_label("배치: Eclipse");
         harness.get_by_label("edit.deleteLine");
         harness.get_by_label("F11, F8");
+        drop(harness);
+        remove_project(&dir);
+    }
+
+    #[test]
+    fn editorconfig로_들여쓰기와_줄바꿈을_정하고_저장할_때_끝_공백과_마지막_줄바꿈을_맞춘다() {
+        let dir = std::env::temp_dir().join(format!("ferrite-ec-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("src")).unwrap();
+        fs::write(
+            dir.join(".editorconfig"),
+            "root = true\n[*]\nend_of_line = crlf\ntrim_trailing_whitespace = true\n\
+             insert_final_newline = true\n[*.java]\nindent_style = space\nindent_size = 2\n",
+        )
+        .unwrap();
+        // 파일은 공백 4칸 들여쓰기, LF, 끝 공백, 마지막 줄바꿈 없음
+        let file = dir.join("src/A.java");
+        fs::write(&file, "class A {  \n    int x;\t\n}").unwrap();
+        let mut harness = harness_builder()
+            .with_size(egui::vec2(1000.0, 700.0))
+            .build_eframe(|cc| FerriteApp::new(cc, Some(file.clone())));
+        harness.run();
+        {
+            let doc = &harness.state().docs[0];
+            assert_eq!(
+                doc.indent,
+                Indent::Spaces(2),
+                "EditorConfig가 감지보다 앞선다"
+            );
+            assert_eq!(doc.line_ending, LineEnding::CrLf);
+            assert!(!doc.is_dirty(), "열기만 해서는 고치지 않는다");
+        }
+        harness.get_by_label("공백: 2");
+        harness.key_press_modifiers(Modifiers::COMMAND, Key::S);
+        harness.run();
+        assert_eq!(
+            fs::read_to_string(&file).unwrap(),
+            "class A {\r\n    int x;\r\n}\r\n"
+        );
+        // 저장할 때 고친 것은 버퍼에도 있고 실행 취소할 수 있다.
+        assert_eq!(
+            harness.state().docs[0].buffer.text(),
+            "class A {\n    int x;\n}\n"
+        );
         drop(harness);
         remove_project(&dir);
     }

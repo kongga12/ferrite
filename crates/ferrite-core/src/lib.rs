@@ -2,6 +2,7 @@
 
 pub mod buffer;
 pub mod debug_config;
+pub mod editorconfig;
 pub mod files;
 pub mod fs_ops;
 pub mod git;

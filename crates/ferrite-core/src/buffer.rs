@@ -660,6 +660,42 @@ impl Buffer {
         );
     }
 
+    /// 줄 끝의 공백·탭을 지운다(EditorConfig `trim_trailing_whitespace`, 저장할 때).
+    pub fn trim_trailing_whitespace(&mut self, now: Instant) {
+        let edits: Vec<(Range<usize>, String)> = (0..self.line_count())
+            .filter_map(|l| {
+                let start = self.line_start(l);
+                let len = self.line_len(l);
+                let blank = (start..start + len)
+                    .rev()
+                    .take_while(|&i| matches!(self.rope.char(i), ' ' | '\t'))
+                    .count();
+                (blank > 0).then(|| (start + len - blank..start + len, String::new()))
+            })
+            .collect();
+        if !edits.is_empty() {
+            self.replace_ranges(edits, now);
+        }
+    }
+
+    /// 끝의 줄바꿈을 맞춘다(EditorConfig `insert_final_newline`): `wanted`면 없을 때 하나 붙이고, 아니면
+    /// 끝의 줄바꿈을 모두 지운다. 빈 글은 그대로 둔다.
+    pub fn set_final_newline(&mut self, wanted: bool, now: Instant) {
+        let len = self.len_chars();
+        let newlines = (0..len)
+            .rev()
+            .take_while(|&i| self.rope.char(i) == '\n')
+            .count();
+        let edit = if wanted {
+            (len > 0 && newlines == 0).then(|| (len..len, "\n".to_owned()))
+        } else {
+            (newlines > 0).then(|| (len - newlines..len, String::new()))
+        };
+        if let Some(edit) = edit {
+            self.replace_ranges(vec![edit], now);
+        }
+    }
+
     /// 선택한 줄(없으면 커서 줄)을 한 벌 더 넣는다. `down`이면 선택이 아래 벌로, 아니면 위 벌에 남는다.
     pub fn duplicate_lines(&mut self, down: bool, now: Instant) {
         let lines = self.selected_lines();
@@ -1050,6 +1086,27 @@ mod tests {
         assert_eq!(b.selection(), Selection { anchor: 0, head: 4 });
         b.undo();
         assert_eq!(b.text(), "a\nbc\nd");
+    }
+
+    #[test]
+    fn 끝_공백과_마지막_줄바꿈() {
+        let t0 = Instant::now();
+        let mut b = buf("a  \n\tb\t\n  \nc", 13, 13);
+        b.trim_trailing_whitespace(t0);
+        assert_eq!(b.text(), "a\n\tb\n\nc");
+        b.set_final_newline(true, t0);
+        assert_eq!(b.text(), "a\n\tb\n\nc\n");
+        b.set_final_newline(true, t0);
+        assert_eq!(b.text(), "a\n\tb\n\nc\n", "이미 있으면 그대로");
+        let mut b = buf("x\n\n\n", 0, 0);
+        b.set_final_newline(false, t0);
+        assert_eq!(b.text(), "x");
+        let mut b = buf("", 0, 0);
+        b.set_final_newline(true, t0);
+        assert_eq!(b.text(), "");
+        let mut b = buf("clean\n", 0, 0);
+        b.trim_trailing_whitespace(t0);
+        assert!(!b.undo(), "고칠 것이 없으면 실행 취소 단위도 없다");
     }
 
     #[test]
