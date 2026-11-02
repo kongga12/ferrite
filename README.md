@@ -28,6 +28,8 @@ Rust로 작성한 크로스플랫폼(Windows / macOS / Linux) 경량 IDE.
 - 통합 터미널(`` Ctrl+` ``): 탭 여러 개, Windows는 ConPTY(PowerShell), 한글 입출력, 256색·트루컬러, 복사(고른 글자)·붙여넣기. 터미널에 포커스가 있으면 셸이 쓰는 Ctrl+글자(Ctrl+D·Ctrl+L 등)는 셸로 간다.
 - 단축키(`보기 > 단축키 목록`): 기본(VS Code식)과 Eclipse 배치를 settings.toml의 `keymap = "eclipse"`로 고르고, `[keys]`에 명령마다 키를 적어 바꾼다(예: `"edit.deleteLine" = "Ctrl+D"`). 목록 창에서 지금 키와 겹침을 본다. 줄 지우기·줄 복제·줄로 가기도 있다.
 - EditorConfig: 프로젝트의 `.editorconfig`(들여쓰기·탭 폭·줄바꿈·끝 공백·마지막 줄바꿈)를 따른다. 줄바꿈과 끝 공백은 저장할 때 맞춘다. `charset`은 따르지 않고 CP949 감지·보존을 지금대로 둔다.
+- TODO 목록(`편집 > TODO 목록`): 프로젝트의 `TODO`·`FIXME`를 파일에서 찾기로 모아 보이고 누르면 그 줄로 간다.
+- 저장 시 작업: `.ferrite/run.toml`의 `[[on_save]]`에 패턴과 명령(`${file}` 등)을 적으면 맞는 파일을 저장할 때 창 없이 돌리고(포매터·Sass 컴파일 등) 결과를 상태바에 알린다.
 - 파일로 이동(`Ctrl+P`): 파일 이름 퍼지 검색. 파일에서 찾기(`Ctrl+Shift+F`): 프로젝트 전체 검색(대소문자·단어·정규식·파일 패턴, UTF-8·CP949 파일). 둘 다 `.gitignore`를 따른다.
 - 기호: 개요 창(`Ctrl+Shift+O`, 지금 파일의 기호 나무), 기호로 이동(`Ctrl+T`, 떠 있는 언어 서버 모두에서 찾기), 엔드포인트 창(`도구 > 엔드포인트`, 컨트롤러별 URL·HTTP 메서드. Spring Boot LS가 없는 egov 3.x는 내장 egov 서버가 `@RequestMapping` 계열을 모은다).
 - HTTP 요청 파일(`.http`): `###`로 나눈 요청을 거터 ▶나 `Ctrl+Enter`로 보내고 HTTP 응답 창에서 상태·걸린 시간·헤더·본문을 본다.

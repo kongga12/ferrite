@@ -59,6 +59,17 @@ impl FindInFiles {
         }
     }
 
+    /// TODO·FIXME 주석을 모은다(대소문자를 가리는 정규식, 파일 패턴 없이).
+    pub fn todo(&mut self, root: &Path, ctx: &egui::Context) {
+        self.query = TextQuery {
+            pattern: r"\b(TODO|FIXME)\b".to_owned(),
+            regex: true,
+            case_sensitive: true,
+            ..Default::default()
+        };
+        self.start(root, ctx);
+    }
+
     fn start(&mut self, root: &Path, ctx: &egui::Context) {
         self.stop();
         self.results.clear();

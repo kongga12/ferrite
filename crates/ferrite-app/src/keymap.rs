@@ -23,6 +23,7 @@ pub enum Command {
     DuplicateDown,
     DuplicateUp,
     FindInFiles,
+    Todo,
     QuickOpen,
     SymbolSearch,
     Outline,
@@ -144,6 +145,7 @@ const TABLE: &[Row] = &[
         &["Ctrl+Shift+F"],
         &["Ctrl+H"],
     ),
+    (Command::Todo, "search.todo", "TODO 목록", &[], &[]),
     (
         Command::QuickOpen,
         "search.quickOpen",

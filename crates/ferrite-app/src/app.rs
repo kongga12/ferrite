@@ -617,6 +617,8 @@ pub struct FerriteApp {
     editor_focused: bool,
     /// 단축키 목록 창과 그 찾기 글.
     keys_window: Option<String>,
+    /// 저장 시 작업(`.ferrite/run.toml`의 `[[on_save]]`).
+    on_save: crate::on_save::OnSave,
     /// jsconfig.json을 만들자고 할지 본 문서와 그 결과(화면 폴더). 문서가 바뀌면 다시 본다.
     jsconfig: Option<(PathBuf, Option<&'static str>)>,
     /// jsconfig.json 제안을 닫은 프로젝트 루트(앱이 켜진 동안).
@@ -701,6 +703,7 @@ impl FerriteApp {
             keys,
             editor_focused: false,
             keys_window: None,
+            on_save: crate::on_save::OnSave::new(&cc.egui_ctx),
             jsconfig: None,
             jsconfig_dismissed: Default::default(),
             watcher: FsWatcher::new(cc.egui_ctx.clone()).ok(),
@@ -1108,6 +1111,11 @@ impl FerriteApp {
                     self.hub.saved(&doc.path, lang, &doc.buffer, &mut doc.lsp);
                 }
                 self.status = format!("저장됨: {}", doc.path.display());
+                if let Some(root) = self.tree.as_ref().map(|t| t.root())
+                    && let Some(started) = self.on_save.saved(root, &doc.path)
+                {
+                    self.status = format!("{} · {started}", self.status);
+                }
                 self.git.request_refresh();
                 if settings_path().is_some_and(|p| real_path(&p) == doc.path) {
                     self.settings_changed = true;
@@ -1214,6 +1222,12 @@ impl FerriteApp {
                 doc.view.reveal_cursor();
             }
             Command::FindInFiles => self.open_find_in_files(),
+            Command::Todo => {
+                if let Some(root) = self.tree.as_ref().map(|t| t.root().to_path_buf()) {
+                    self.find_in_files.todo(&root, ctx);
+                    dock::show(&mut self.layout, Pane::Search);
+                }
+            }
             Command::QuickOpen => self.open_quick_open(ctx),
             Command::SymbolSearch => self.symbol_search.show(),
             Command::Outline => self.show_outline(),
@@ -2400,6 +2414,12 @@ impl FerriteApp {
                     if ui.add_enabled(project, item).clicked() {
                         ui.close();
                         self.open_find_in_files();
+                    }
+                    let item = egui::Button::new("TODO 목록")
+                        .shortcut_text(self.keys.text(&ctx, Command::Todo));
+                    if ui.add_enabled(project, item).clicked() {
+                        ui.close();
+                        self.run_command(&ctx, Command::Todo);
                     }
                     ui.separator();
                     let item = egui::Button::new("기호로 이동…")
@@ -3816,6 +3836,9 @@ impl eframe::App for FerriteApp {
         let root = self.tree.as_ref().map(|t| t.root().to_path_buf());
         self.sarif.poll(ctx, root.as_deref());
         self.vuln.poll();
+        if let Some(message) = self.on_save.poll() {
+            self.status = message;
+        }
         if std::mem::take(&mut self.settings_changed) {
             let (settings, error) = load_settings();
             self.keys = Keymap::new(settings.keymap, &settings.keys);
@@ -7526,6 +7549,80 @@ mod tests {
         assert_eq!(
             harness.state().docs[0].buffer.text(),
             "class A {\n    int x;\n}\n"
+        );
+        drop(harness);
+        remove_project(&dir);
+    }
+
+    #[test]
+    fn todo_목록을_모으고_저장_시_작업을_돌려_결과를_알린다() {
+        let dir = std::env::temp_dir().join(format!("ferrite-todo-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("web")).unwrap();
+        fs::create_dir_all(dir.join(".ferrite")).unwrap();
+        fs::write(
+            dir.join("A.java"),
+            "class A {\n    // TODO: 고치기\n    int todo; // 소문자는 아님\n}\n",
+        )
+        .unwrap();
+        fs::write(dir.join("web/b.js"), "/* FIXME 이것 */\nvar TODOS = 1;\n").unwrap();
+        fs::write(
+            dir.join(".ferrite/run.toml"),
+            "[[on_save]]\nname = \"출력 만들기\"\npattern = \"*.txt\"\n\
+             command = \"echo ok> ${fileBasenameNoExtension}.out\"\n\n\
+             [[on_save]]\nname = \"실패하는 작업\"\npattern = \"*.md\"\ncommand = \"exit 3\"\n",
+        )
+        .unwrap();
+        fs::write(dir.join("note.txt"), "x").unwrap();
+        fs::write(dir.join("bad.md"), "y").unwrap();
+        let mut harness = harness_builder()
+            .with_size(egui::vec2(1200.0, 800.0))
+            .build_eframe(|cc| FerriteApp::new(cc, Some(dir.clone())));
+        // TODO 목록은 기본 키가 없다. 설정으로 준 키로 연다.
+        let keys = std::collections::BTreeMap::from([(
+            "search.todo".to_owned(),
+            settings::Keys::One("F1".into()),
+        )]);
+        harness.state_mut().keys = Keymap::new(settings::Keymap::Default, &keys);
+        harness.run();
+        harness.key_press(Key::F1);
+        wait_for_label(&mut harness, "파일 2개에서 2개 찾음");
+        harness.get_by_label_contains("2: // TODO: 고치기");
+        harness.get_by_label_contains("1: /* FIXME 이것 */");
+
+        // 저장하면 맞는 작업을 숨겨 돌리고 끝나면 상태바에 알린다.
+        let root = harness.state().tree.as_ref().unwrap().root().to_path_buf();
+        harness.state_mut().open_file(root.join("note.txt"));
+        harness.run();
+        harness.key_press_modifiers(Modifiers::COMMAND, Key::S);
+        harness.run();
+        assert!(
+            harness
+                .state()
+                .status
+                .contains("저장 시 작업 중: 출력 만들기"),
+            "{}",
+            harness.state().status
+        );
+        assert!(
+            run_until(&mut harness, |app| app.status
+                == "저장 시 작업 완료: 출력 만들기"),
+            "{}",
+            harness.state().status
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("note.out")).unwrap().trim(),
+            "ok"
+        );
+        harness.state_mut().open_file(root.join("bad.md"));
+        harness.run();
+        harness.key_press_modifiers(Modifiers::COMMAND, Key::S);
+        assert!(
+            run_until(&mut harness, |app| app
+                .status
+                .starts_with("저장 시 작업 실패: 실패하는 작업(")),
+            "{}",
+            harness.state().status
         );
         drop(harness);
         remove_project(&dir);
