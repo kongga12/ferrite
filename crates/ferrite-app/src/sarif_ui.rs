@@ -247,24 +247,30 @@ fn severity(level: Level) -> Severity {
     }
 }
 
+/// 그 줄(0부터, 넘치면 마지막 줄)의 들여쓰기와 줄 끝을 뺀 글자 범위(문자 단위).
+pub(crate) fn line_range(rope: &Rope, line: usize) -> std::ops::Range<usize> {
+    let line = line.min(rope.len_lines().saturating_sub(1));
+    let start = rope.line_to_char(line);
+    let text = rope.line(line);
+    let mut len = text.len_chars();
+    while len > 0 && matches!(text.char(len - 1), '\n' | '\r') {
+        len -= 1;
+    }
+    let indent = text
+        .chars()
+        .take(len)
+        .take_while(|c| c.is_whitespace())
+        .count();
+    start + indent..start + len.max(indent)
+}
+
 /// 이 문서에 해당하는 결과를 에디터의 진단(문자 범위, 위치 순)으로 바꾼다. 열이 없으면 그 줄의 글자
 /// 부분을, 끝이 없으면 시작 줄 끝까지 칠한다.
 pub fn problems_for(findings: &[Finding], path: &Path, rope: &Rope) -> Vec<Problem> {
     let lines = rope.len_lines();
     let line_text_range = |line: usize| {
-        let line = line.min(lines.saturating_sub(1));
-        let start = rope.line_to_char(line);
-        let text = rope.line(line);
-        let mut len = text.len_chars();
-        while len > 0 && matches!(text.char(len - 1), '\n' | '\r') {
-            len -= 1;
-        }
-        let indent = text
-            .chars()
-            .take(len)
-            .take_while(|c| c.is_whitespace())
-            .count();
-        (start + indent, start + len.max(indent))
+        let range = line_range(rope, line);
+        (range.start, range.end)
     };
     let position = |line: usize, column: usize| {
         let line = line.min(lines.saturating_sub(1));

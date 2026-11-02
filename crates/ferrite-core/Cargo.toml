@@ -37,3 +37,7 @@ tree-sitter-toml-ng = "0.7.0"
 tree-sitter-typescript = "0.23.2"
 tree-sitter-xml = "0.7.0"
 tree-sitter-yaml = "0.7.2"
+# 취약점 DB(OSV) 조회와 오프라인 묶음. 다른 크레이트와 같은 판이다(flate2는 zip의 압축 백엔드를 고른다).
+flate2 = "1.1.10"
+ureq = { version = "3.5.0", default-features = false, features = ["rustls", "platform-verifier"] }
+zip = { version = "9.0.5", default-features = false, features = ["deflate-flate2"] }

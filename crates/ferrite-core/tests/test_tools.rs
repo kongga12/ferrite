@@ -385,3 +385,76 @@ fn spotbugs가_낸_sarif를_읽고_원본_파일을_찾는다() {
     );
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[test]
+#[ignore = "Maven으로 의존성 나무를 풀고(maven-dependency-plugin을 받는다) OSV에 온라인으로 묻고 Maven DB 묶음(약 10MB)을 받는다"]
+fn 전이_의존의_log4shell을_온라인과_오프라인_db가_찾는다() {
+    use ferrite_core::vuln::{Ecosystem, Finding, manifest, osv};
+
+    if !require("mvn -v") {
+        return;
+    }
+    let root = temp_dir("vuln");
+    std::fs::write(
+        root.join("pom.xml"),
+        r#"<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>com.example</groupId>
+  <artifactId>board</artifactId>
+  <version>1.0</version>
+  <dependencies>
+    <dependency>
+      <groupId>org.apache.logging.log4j</groupId>
+      <artifactId>log4j-slf4j-impl</artifactId>
+      <version>2.14.1</version>
+    </dependency>
+  </dependencies>
+</project>
+"#,
+    )
+    .unwrap();
+    let manifests = manifest::find(&root);
+    assert_eq!(manifests.len(), 1);
+    let tree = root.join("tree.txt");
+    let line = manifests[0].command(&root, &tree).unwrap();
+    assert!(run(&root, &line).0, "의존성 나무");
+    let deps = manifests[0]
+        .read(Some(&std::fs::read_to_string(&tree).unwrap()))
+        .unwrap();
+    let core = deps
+        .iter()
+        .find(|d| d.name == "org.apache.logging.log4j:log4j-core")
+        .expect("전이 의존 log4j-core");
+    assert_eq!(
+        (core.version.as_str(), core.line, core.via.as_deref()),
+        (
+            "2.14.1",
+            6,
+            Some("org.apache.logging.log4j:log4j-slf4j-impl")
+        )
+    );
+    let log4shell = |findings: &[Finding]| {
+        findings
+            .iter()
+            .find(|f| f.title() == "CVE-2021-44228")
+            .map(|f| {
+                (
+                    f.dependency.name.clone(),
+                    f.fixed.clone(),
+                    f.dependency.line,
+                )
+            })
+    };
+    let expected = Some((
+        "org.apache.logging.log4j:log4j-core".to_owned(),
+        Some("2.15.0".to_owned()),
+        6,
+    ));
+    let online = osv::findings(&osv::query_online(&deps).unwrap(), &deps);
+    assert_eq!(log4shell(&online), expected, "온라인");
+    let zip = root.join("osv").join("all.zip");
+    osv::download_database(Ecosystem::Maven, &zip, &mut |_, _| {}).unwrap();
+    let offline = osv::findings(&osv::query_offline(&zip, &deps).unwrap(), &deps);
+    assert_eq!(log4shell(&offline), expected, "오프라인");
+    let _ = std::fs::remove_dir_all(&root);
+}

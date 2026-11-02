@@ -14,4 +14,5 @@ pub mod settings;
 pub mod syntax;
 pub mod test_report;
 pub mod text_file;
+pub mod vuln;
 pub mod web;
