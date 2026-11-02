@@ -1628,6 +1628,7 @@ name = "ferrite-core"
 version = "0.1.0"
 dependencies = [
  "encoding_rs",
+ "flate2",
  "ignore",
  "nucleo-matcher",
  "regex",
@@ -1656,6 +1657,8 @@ dependencies = [
  "tree-sitter-typescript",
  "tree-sitter-xml",
  "tree-sitter-yaml",
+ "ureq",
+ "zip",
 ]
 
 [[package]]

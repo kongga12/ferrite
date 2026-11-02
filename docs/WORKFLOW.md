@@ -1202,7 +1202,28 @@
     - 실제 SpotBugs(CI 3개 OS 전체 작업): Maven으로 분석해 `spotbugsSarif.json`을 찾고, null 역참조(`NP_ALWAYS_NULL`)가 그 파일 12줄의 오류로, 메시지 틀이 채워져 나온다.
     - 실제 앱(Windows, 릴리스 빌드): SpotBugs가 낸 SARIF를 찾아 불러와 오류 1·경고 2·참고 1, 7·12줄 물결선, 상태바 "오류 1 · 경고 2", 눌러서 12줄로 가는 것을 화면으로 확인했다. 확인 뒤 설정 폴더를 지웠다.
   - 남은 것: PMD·Semgrep·clang의 실제 SARIF는 돌려 보지 않았다(SARIF 2.1.0 공통 형식과 기준 주소 처리로 읽는다)
-- [ ] 9-3 의존성 취약점 검사(OSV, 오프라인 DB) — 중간
+- [x] 9-3 의존성 취약점 검사(OSV, 오프라인 DB) — 중간
+  - 결정(사용자): 온라인(api.osv.dev, 이름·버전만 보내고 화면에 알린다)과 오프라인 DB(생태계별 OSV `all.zip`을 [받기] 또는 [파일에서…]) 둘 다, Maven·Gradle은 빌드 도구로 전이 의존까지 풀고 전이 의존은 끌어온 직접 의존의 줄에, 5개 생태계, 결과는 문제 창 [취약점]과 의존성 줄 물결선(SARIF와 같은 틀)
+  - 문제 창 [취약점 (N)]: [검사], 온라인·오프라인 DB 고르기. 오프라인은 생태계마다 받은 DB의 크기·받은 때와 [받기](크기 안내)·[파일에서…](인터넷이 막힌 곳).
+    - 의존성 개수와 심각도별 취약 개수, 빌드 도구 실패·DB 없는 생태계는 노란 글로 알린다.
+    - 의존성 파일별로 `줄 [심각도] CVE · 이름 버전 → 고친 버전 · 끌어온 것`, 누르면 그 줄로 간다. 말풍선은 OSV 이름과 요약.
+    - 열린 의존성 파일에는 물결선·말풍선(치명·높음은 오류, 보통·모름은 경고, 낮음은 참고), 상태바 개수에 들어간다.
+  - 의존성 읽기(`ferrite-core` `vuln::manifest`): 프로젝트에서 `pom.xml`(맨 위만, 모듈은 함께 풀린다)·`build.gradle(.kts)`·`package-lock.json`·`requirements*.txt`·`Cargo.lock`을 찾는다(빌드 결과 폴더는 뺀다).
+    - Maven: `mvn dependency:tree -DoutputFile=… -DappendOutput=true`의 나무를 읽고, 모듈마다 그 pom의 `<dependencies>` 아래 직접 의존 줄을 찾는다(없으면 관리 블록, 부모에서 온 것은 첫 줄).
+    - Gradle: `gradle -q dependencies`의 `runtimeClasspath` 나무(`->`로 고른 버전, `(*)`, 하위 프로젝트 `project :lib`). 래퍼(`mvnw`·`gradlew`)는 파일 폴더에서 프로젝트 루트까지 올라가며 찾는다.
+    - npm 잠금 v2·v3(`packages`의 `node_modules/…` 경로, 중첩은 끌어온 것)·v1(`dependencies` 나무), PyPI `==` 고정(환경 표시·해시·옵션 줄은 건너뛰고 이름은 PEP 503으로), Cargo는 crates.io에서 온 것만.
+  - OSV 대조(`vuln::osv`, `vuln::version`)
+    - 영향: `versions` 목록, `ECOSYSTEM`·`SEMVER` 범위의 `introduced`·`fixed`·`last_affected`(끝없는 구간 포함, `GIT`은 뺀다). 고친 버전은 그 버전이 든 구간의 것. 철회한 레코드는 뺀다.
+    - 버전 비교: 생태계마다 사전 배포 순서(Maven alpha < beta < milestone < rc < snapshot < 정식 < sp, PyPI dev < a < b < rc < 정식 < post, semver `-` 사전 배포와 `+` 빌드 정보). 끝의 0은 없는 것과 같다.
+    - 심각도: `database_specific.severity`(GitHub 권고), 없으면 CVSS v3 벡터로 기본 점수를 계산한다(RUSTSEC·PYSEC).
+    - 온라인은 `querybatch`(1000개씩, 같은 이름·버전은 한 번)로 해당 ID를 받고 레코드를 받는다. 오프라인은 묶음의 레코드마다 패키지 이름만 먼저 읽고 맞는 것만 다 읽는다.
+    - 한 취약점이 여러 DB의 레코드(GHSA·PYSEC·RUSTSEC)로 있어 ID·CVE가 겹치면 하나로 합친다(심각도는 높은 것, 고친 버전은 있는 것). 합치지 않으면 실제 예제에서 88건(모름 26)이 56건이 된다.
+  - 검증
+    - 단위: Log4Shell 레코드의 세 구간과 고친 버전, `versions`·`last_affected`·끝없는 구간·`GIT`·철회, CVSS v3 점수(10.0·9.8·5.9·6.1), 결과 정렬·중복·여러 DB의 같은 취약점 합치기, 오프라인 묶음 읽기·들이기, Maven 나무(모듈·관리 블록)·Gradle·npm v3·v1·requirements·Cargo.lock, 래퍼 찾기, 버전 비교
+    - 창 시험(kittest): 오프라인 DB로 검사 → 개수·DB 없는 생태계 알림·파일별 목록, 누르면 그 줄로, 물결선·상태바 개수
+    - 실제 도구(CI 3개 OS 전체 작업): `mvn dependency:tree`로 log4j-slf4j-impl 2.14.1의 전이 log4j-core 2.14.1을 풀어 직접 의존 줄에 두고, 온라인 OSV와 받은 Maven DB(약 10MB) 둘 다 CVE-2021-44228(고친 버전 2.15.0)을 찾는다.
+    - 실제 앱(Windows, 릴리스 빌드): pom.xml(log4j-slf4j-impl 2.14.1)·requirements.txt·npm 잠금·Cargo.lock 예제를 온라인으로 검사해 의존성 8개·취약 56건, pom.xml 7줄 물결선과 상태바 "오류 3 · 경고 6". 오프라인은 [받기]로 Maven DB(10.5MB)를 받아 pom.xml 9건이 온라인과 같고, DB 없는 npm·PyPI·crates.io를 알린다. 확인 뒤 설정·DB 폴더를 지웠다.
+  - 남은 것: Gradle 실제 실행은 돌리지 않았다(형식 표본으로 확인), 오프라인은 검사마다 묶음을 다 푼다(npm 220MB는 오래 걸린다. 느리면 들일 때 패키지별 색인)
 - [ ] 3개 OS 검증
 
 ### 백로그 — Phase 미정

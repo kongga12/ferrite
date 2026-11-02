@@ -35,6 +35,7 @@ mod terminal_ui;
 mod test_ui;
 mod theme;
 mod update_ui;
+mod vuln_ui;
 mod watcher;
 
 #[cfg(test)]

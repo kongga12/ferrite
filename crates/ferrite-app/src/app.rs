@@ -218,6 +218,23 @@ fn jdbc_dir() -> Option<PathBuf> {
     Some(dirs::data_local_dir()?.join("ferrite").join("jdbc"))
 }
 
+/// 받거나 들인 취약점 DB(OSV) 묶음을 두는 곳. 테스트는 사용자 폴더에 쓰지 않는다.
+fn osv_dir() -> Option<PathBuf> {
+    if cfg!(test) {
+        return None;
+    }
+    Some(dirs::data_local_dir()?.join("ferrite").join("osv"))
+}
+
+/// 문제 창이 보이는 것.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ProblemsView {
+    /// 현재 문서의 언어 서버 진단.
+    File,
+    Sarif,
+    Vuln,
+}
+
 /// 드라이버 jar를 찾는 로컬 Maven 저장소. 테스트는 사용자 저장소를 보지 않는다.
 fn maven_repository() -> Option<PathBuf> {
     if cfg!(test) {
@@ -337,9 +354,10 @@ struct Document {
     git_key: Option<(u64, u64)>,
     /// `.http` 파일이면 (센 버퍼 버전, 요청 줄). 거터에 ▶를 그린다.
     http_runs: Option<(u64, Vec<usize>)>,
-    /// 이 문서에 해당하는 정적 분석(SARIF) 결과(에디터 물결선)와 그것을 만든 (SARIF 세대, 버퍼 버전).
-    sarif_problems: Vec<ferrite_lsp::problem::Problem>,
-    sarif_key: Option<(u64, u64)>,
+    /// 이 문서에 해당하는 정적 분석(SARIF)·취약점 결과(에디터 물결선)와 그것을 만든
+    /// (SARIF 세대, 취약점 세대, 버퍼 버전).
+    analysis_problems: Vec<ferrite_lsp::problem::Problem>,
+    analysis_key: Option<(u64, u64, u64)>,
     /// .ipynb면 노트북 보기(버퍼 위에 셀을 보인다).
     notebook: Option<crate::notebook_ui::NotebookView>,
     /// tree-sitter 언어가 없는 파일의 언어 확장(플러그인 폴더)과 그 TextMate 강조.
@@ -373,8 +391,8 @@ impl Document {
             git_marks: Vec::new(),
             git_key: None,
             http_runs: None,
-            sarif_problems: Vec::new(),
-            sarif_key: None,
+            analysis_problems: Vec::new(),
+            analysis_key: None,
             notebook,
             ext: None,
             textmate: None,
@@ -603,9 +621,10 @@ pub struct FerriteApp {
     http_task: Option<crate::http_ui::Task>,
     /// 테스트 창(테스트 명령 실행, 결과 트리).
     tests: crate::test_ui::TestPanel,
-    /// 문제 창의 정적 분석(SARIF)과, 문제 창이 그것을 보이는지(아니면 현재 문서의 언어 서버 진단).
+    /// 문제 창의 정적 분석(SARIF)과 의존성 취약점, 문제 창이 무엇을 보이는지.
     sarif: crate::sarif_ui::SarifPanel,
-    problems_sarif: bool,
+    vuln: crate::vuln_ui::VulnPanel,
+    problems_view: ProblemsView,
     /// jsconfig.json을 만들자고 할지 본 문서와 그 결과(화면 폴더). 문서가 바뀌면 다시 본다.
     jsconfig: Option<(PathBuf, Option<&'static str>)>,
     /// jsconfig.json 제안을 닫은 프로젝트 루트(앱이 켜진 동안).
@@ -679,7 +698,8 @@ impl FerriteApp {
             http_task: None,
             tests: Default::default(),
             sarif: Default::default(),
-            problems_sarif: false,
+            vuln: crate::vuln_ui::VulnPanel::new(osv_dir()),
+            problems_view: ProblemsView::File,
             jsconfig: None,
             jsconfig_dismissed: Default::default(),
             watcher: FsWatcher::new(cc.egui_ctx.clone()).ok(),
@@ -2717,21 +2737,34 @@ impl FerriteApp {
         }
     }
 
-    /// "문제" 창: 현재 문서의 진단 또는 프로젝트의 정적 분석(SARIF). 항목을 누르면 그 위치로 이동한다.
+    /// "문제" 창: 현재 문서의 진단, 프로젝트의 정적 분석(SARIF) 또는 의존성 취약점. 항목을 누르면 그
+    /// 위치로 이동한다.
     fn problems_panel(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            ui.selectable_value(&mut self.problems_sarif, false, "이 파일");
+            ui.selectable_value(&mut self.problems_view, ProblemsView::File, "이 파일");
             ui.selectable_value(
-                &mut self.problems_sarif,
-                true,
+                &mut self.problems_view,
+                ProblemsView::Sarif,
                 format!("정적 분석 ({})", self.sarif.findings().len()),
             );
+            ui.selectable_value(
+                &mut self.problems_view,
+                ProblemsView::Vuln,
+                format!("취약점 ({})", self.vuln.findings().len()),
+            );
         });
-        if self.problems_sarif {
+        if self.problems_view != ProblemsView::File {
             let root = self.tree.as_ref().map(|t| t.root().to_path_buf());
-            if let Some(crate::sarif_ui::SarifAction::Go(path, line, column)) =
-                self.sarif.ui(ui, root.as_deref())
-            {
+            let go = if self.problems_view == ProblemsView::Sarif {
+                self.sarif.ui(ui, root.as_deref()).map(
+                    |crate::sarif_ui::SarifAction::Go(path, line, column)| (path, line, column),
+                )
+            } else {
+                self.vuln
+                    .ui(ui, root.as_deref())
+                    .map(|crate::vuln_ui::VulnAction::Go(path, line)| (path, line, 0))
+            };
+            if let Some((path, line, column)) = go {
                 self.open_file(path.clone());
                 if let Some(i) = self.active.filter(|&i| self.docs[i].path == path) {
                     let doc = &mut self.docs[i];
@@ -2791,7 +2824,7 @@ impl FerriteApp {
                         doc.lsp
                             .problems
                             .iter()
-                            .chain(&doc.sarif_problems)
+                            .chain(&doc.analysis_problems)
                             .filter(|p| p.severity == s)
                             .count()
                     };
@@ -3210,22 +3243,29 @@ impl FerriteApp {
                 });
                 doc.git_key = Some(key);
             }
-            let sarif_key = (self.sarif.generation(), doc.buffer.version());
-            if doc.sarif_key != Some(sarif_key) {
-                doc.sarif_problems = crate::sarif_ui::problems_for(
-                    self.sarif.findings(),
+            let analysis_key = (
+                self.sarif.generation(),
+                self.vuln.generation(),
+                doc.buffer.version(),
+            );
+            if doc.analysis_key != Some(analysis_key) {
+                let rope = doc.buffer.rope();
+                doc.analysis_problems =
+                    crate::sarif_ui::problems_for(self.sarif.findings(), &doc.path, rope);
+                doc.analysis_problems.extend(crate::vuln_ui::problems_for(
+                    self.vuln.findings(),
                     &doc.path,
-                    doc.buffer.rope(),
-                );
-                doc.sarif_key = Some(sarif_key);
+                    rope,
+                ));
+                doc.analysis_key = Some(analysis_key);
             }
-            // 언어 서버 진단과 정적 분석 결과를 위치 순으로 합친다(정적 분석이 없으면 그대로).
+            // 언어 서버 진단과 정적 분석·취약점 결과를 위치 순으로 합친다(없으면 그대로).
             let merged: Vec<ferrite_lsp::problem::Problem>;
-            let problems = if doc.sarif_problems.is_empty() {
+            let problems = if doc.analysis_problems.is_empty() {
                 &doc.lsp.problems
             } else {
                 let mut all = doc.lsp.problems.clone();
-                all.extend(doc.sarif_problems.iter().cloned());
+                all.extend(doc.analysis_problems.iter().cloned());
                 // 같은 자리면 심각한 것을 나중에 그려 위에 보이게 한다.
                 all.sort_by_key(|p| (p.range.start, std::cmp::Reverse(p.severity)));
                 merged = all;
@@ -3608,6 +3648,7 @@ impl eframe::App for FerriteApp {
         self.updater.poll();
         let root = self.tree.as_ref().map(|t| t.root().to_path_buf());
         self.sarif.poll(ctx, root.as_deref());
+        self.vuln.poll();
         if std::mem::take(&mut self.settings_changed) {
             let (settings, error) = load_settings();
             self.status = error.unwrap_or_else(|| "설정을 적용했습니다".into());
@@ -7077,7 +7118,7 @@ mod tests {
             .build_eframe(|cc| FerriteApp::new(cc, Some(dir.clone())));
         {
             let app = harness.state_mut();
-            app.problems_sarif = true;
+            app.problems_view = ProblemsView::Sarif;
             dock::show(&mut app.layout, Pane::Problems);
         }
         harness.run_ok();
@@ -7097,10 +7138,14 @@ mod tests {
                 (11, 0)
             );
             // 열린 파일에는 물결선(들여쓰기를 뺀 그 줄의 글자)으로도 보이고, 상태바 개수에 들어간다.
-            let ranges: Vec<_> = doc.sarif_problems.iter().map(|p| p.range.clone()).collect();
+            let ranges: Vec<_> = doc
+                .analysis_problems
+                .iter()
+                .map(|p| p.range.clone())
+                .collect();
             let line7 = doc.buffer.line_col_to_pos(6, 4);
             assert_eq!(ranges[0], line7..line7 + 8);
-            assert_eq!(doc.sarif_problems.len(), 2);
+            assert_eq!(doc.analysis_problems.len(), 2);
         }
         harness.get_by_label("오류 1 · 경고 1");
 
@@ -7113,7 +7158,91 @@ mod tests {
         );
         harness.run_ok();
         let app = harness.state();
-        assert_eq!(app.docs[app.active.unwrap()].sarif_problems.len(), 1);
+        assert_eq!(app.docs[app.active.unwrap()].analysis_problems.len(), 1);
+        drop(harness);
+        remove_project(&dir);
+    }
+
+    #[test]
+    fn 취약점_오프라인_db로_의존성을_검사해_줄로_가고_물결선을_보인다() {
+        use std::io::Write;
+
+        let dir = std::env::temp_dir().join(format!("ferrite-vuln-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("requirements.txt"),
+            "flask==2.0.0\nDjango==3.2.0\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.join("Cargo.lock"),
+            "[[package]]\nname = \"smallvec\"\nversion = \"1.6.0\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\n",
+        )
+        .unwrap();
+        // PyPI DB만 둔다(crates.io는 없어 검사하지 않았다고 알린다).
+        let db = dir.join(".osv");
+        fs::create_dir_all(db.join("PyPI")).unwrap();
+        let mut zip = zip::ZipWriter::new(fs::File::create(db.join("PyPI/all.zip")).unwrap());
+        zip.start_file(
+            "GHSA-rxjp-mfm9-w4wr.json",
+            zip::write::SimpleFileOptions::default(),
+        )
+        .unwrap();
+        zip.write_all(
+            br#"{"id": "GHSA-rxjp-mfm9-w4wr", "aliases": ["CVE-2021-31542"], "summary": "Path Traversal in Django",
+                "database_specific": {"severity": "HIGH"},
+                "affected": [{"package": {"ecosystem": "PyPI", "name": "Django"},
+                  "ranges": [{"type": "ECOSYSTEM", "events": [{"introduced": "3.2"}, {"fixed": "3.2.1"}]}]}]}"#,
+        )
+        .unwrap();
+        zip.finish().unwrap();
+
+        let mut harness = harness_builder()
+            .with_size(egui::vec2(1200.0, 1000.0))
+            .build_eframe(|cc| FerriteApp::new(cc, Some(dir.clone())));
+        {
+            let app = harness.state_mut();
+            app.vuln.db_dir = Some(db.clone());
+            app.vuln.set_online(false);
+            app.problems_view = ProblemsView::Vuln;
+            dock::show(&mut app.layout, Pane::Problems);
+        }
+        harness.run_ok();
+        harness.get_by_label("검사").click();
+        assert!(
+            run_until(&mut harness, |app| !app.vuln.is_scanning()),
+            "검사가 끝나지 않음"
+        );
+        harness.run_ok();
+        harness.get_by_label("의존성 3개 · 취약 1건(높음 1) · 오프라인 DB");
+        harness.get_by_label("crates.io DB가 없어 의존성 1개를 검사하지 않았습니다");
+        harness.get_by_label("requirements.txt (1)");
+        harness
+            .get_by_label("2  [높음] CVE-2021-31542 · django 3.2.0 → 3.2.1")
+            .click();
+        harness.run_ok();
+        let app = harness.state();
+        let doc = &app.docs[app.active.unwrap()];
+        assert!(
+            doc.path.ends_with("requirements.txt"),
+            "{}",
+            doc.path.display()
+        );
+        assert_eq!(
+            doc.buffer.pos_to_line_col(doc.buffer.selection().head),
+            (1, 0)
+        );
+        // 그 줄의 글자에 물결선을 긋고 상태바 개수에 들어간다.
+        let line = doc.buffer.line_col_to_pos(1, 0);
+        assert_eq!(doc.analysis_problems.len(), 1);
+        assert_eq!(doc.analysis_problems[0].range, line..line + 13);
+        assert!(
+            doc.analysis_problems[0]
+                .message
+                .contains("(3.2.1에서 고침)")
+        );
+        harness.get_by_label("오류 1 · 경고 0");
         drop(harness);
         remove_project(&dir);
     }
