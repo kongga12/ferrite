@@ -1,0 +1,52 @@
+{
+  "name": "Handlebars",
+  "scopeName": "text.html.handlebars",
+  "patterns": [
+    { "include": "#comment" },
+    { "include": "#mustache" },
+    { "include": "#html-comment" },
+    { "include": "#tag" }
+  ],
+  "repository": {
+    "comment": {
+      "patterns": [
+        { "begin": "\\{\\{~?!--", "end": "--~?\\}\\}", "name": "comment.block.handlebars" },
+        { "begin": "\\{\\{~?!", "end": "~?\\}\\}", "name": "comment.block.handlebars" }
+      ]
+    },
+    "html-comment": { "begin": "<!--", "end": "-->", "name": "comment.block.html" },
+    "mustache": {
+      "begin": "(\\{\\{\\{?~?)\\s*(?:([#^/>&]|else\\b)\\s*)?",
+      "beginCaptures": {
+        "1": { "name": "entity.name.tag.handlebars" },
+        "2": { "name": "keyword.control.handlebars" }
+      },
+      "end": "~?\\}\\}\\}?",
+      "endCaptures": { "0": { "name": "entity.name.tag.handlebars" } },
+      "patterns": [
+        { "match": "\\b(?:if|unless|each|with|else|lookup|log|as)\\b", "name": "keyword.control.handlebars" },
+        {
+          "begin": "\"",
+          "end": "\"",
+          "name": "string.quoted.double.handlebars",
+          "patterns": [{ "match": "\\\\.", "name": "constant.character.escape.handlebars" }]
+        },
+        { "begin": "'", "end": "'", "name": "string.quoted.single.handlebars" },
+        { "match": "-?\\b\\d+(?:\\.\\d+)?\\b", "name": "constant.numeric.handlebars" },
+        { "match": "\\b(?:true|false|null|undefined)\\b", "name": "constant.language.handlebars" },
+        { "match": "@[A-Za-z_]\\w*", "name": "variable.language.handlebars" },
+        { "match": "\\|[^|]*\\|", "name": "variable.parameter.handlebars" },
+        { "match": "[A-Za-z_$][\\w$-]*(?==)", "name": "entity.other.attribute-name.handlebars" },
+        {
+          "match": "(?:\\G|(?<=\\())[A-Za-z_$][\\w$-]*(?=\\s+[^\\s}~=|])",
+          "name": "entity.name.function.handlebars"
+        },
+        { "match": "[A-Za-z_$][\\w$.-]*(?:/[\\w$.-]+)*", "name": "variable.other.property.handlebars" }
+      ]
+    },
+    "tag": {
+      "match": "(</?)([A-Za-z][\\w:.-]*)",
+      "captures": { "2": { "name": "entity.name.tag.html" } }
+    }
+  }
+}

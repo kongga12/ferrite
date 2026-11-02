@@ -13,7 +13,7 @@ Rust로 작성한 크로스플랫폼(Windows / macOS / Linux) 경량 IDE.
 
 - 폴더 열기, 지연 로딩 프로젝트 트리(파일 감시로 자동 갱신), 탭 에디터
 - 실행(`Ctrl+F5`): Maven(egov `tomcat7:run`·`spring-boot:run`)·Gradle·cargo·go·CMake·Python·Composer 구성을 자동으로 찾고, `.ferrite/run.toml`에 직접 적은 구성과 함께 터미널 탭에서 돌린다.
-- 디버그(`F5`): 거터를 눌러 중단점(오른쪽 단추로 조건), 한 줄씩(`F10`)·들어가기(`F11`)·나오기(`Shift+F11`), 호출 스택·변수 트리·디버그 출력. 어댑터(debugpy·codelldb·delve·php-debug·java-debug·js-debug)는 `도구 > 언어 서버`에서 설치한다. Python·Rust(빌드 후)·Go·PHP·Java는 열린 파일로 구성을 만든다. egov 웹 프로젝트는 실행(`Ctrl+F5`)의 "`tomcat7:run` (디버그 5005)"으로 띄운 뒤 디버그의 "5005 포트에 붙기"로 붙는다.
+- 디버그(`F5`): 거터를 눌러 중단점(오른쪽 단추로 조건), 한 줄씩(`F10`)·들어가기(`F11`)·나오기(`Shift+F11`), 호출 스택·변수 트리·디버그 출력. 어댑터(debugpy·codelldb·delve·php-debug·java-debug·js-debug)는 `도구 > 언어 서버`에서 설치한다. 목록 밖 어댑터(장비 제조사 디버거 등)는 `.ferrite/debug.toml`의 `[[adapter]]`에 실행 명령(표준 입출력)이나 TCP 주소(`IP:포트`, 명령과 함께면 띄운 뒤 붙는다)를 적어 쓴다. Python·Rust(빌드 후)·Go·PHP·Java는 열린 파일로 구성을 만든다. egov 웹 프로젝트는 실행(`Ctrl+F5`)의 "`tomcat7:run` (디버그 5005)"으로 띄운 뒤 디버그의 "5005 포트에 붙기"로 붙는다.
   - 브라우저 JS(js-debug, Node 필요): `.js`·`.jsp`·`.html`을 열고 F5. Chrome(없으면 Edge)을 따로 둔 프로필로 띄우거나, `--remote-debugging-port=9222`로 연 브라우저에 붙는다. 화면 주소는 HTTP 요청 환경 파일의 `baseUrl`(없으면 `http://localhost:8080`), 스크립트는 `src/main/webapp`(또는 `WebContent`)의 파일과 맞춘다(컨텍스트 경로 포함).
   - JSP의 인라인 스크립트는 프로젝트 파일과 줄이 맞지 않으므로, 디버그 창의 "화면 스크립트"에서 브라우저가 받은 화면을 읽기 전용으로 열어 중단점을 건다.
 - 테스트(`실행 > 테스트`): 실행 구성의 `mvn test`·`gradle test`·`pytest`·`ctest`·`go test`를 돌리고 보고서(JUnit XML, `go test -json`)를 읽어 결과 트리(통과·실패·건너뜀, 걸린 시간)로 보인다. 실패의 스택을 누르면 그 테스트 줄로 가고, [실패만 다시]로 실패한 것만 다시 돌린다. egov 템플릿처럼 pom의 surefire 설정이 `skipTests=true`면(명령 줄로는 켤 수 없다) 건너뛴 까닭을 알리고 [pom.xml에서 테스트 켜기]로 그 줄을 지운다.
@@ -62,7 +62,7 @@ Rust로 작성한 크로스플랫폼(Windows / macOS / Linux) 경량 IDE.
   - 문서 포맷, 기호 이름 바꾸기(여러 파일), 코드 액션(빠른 수정·리팩터링)
 - egov CRUD 코드 생성(`도구 > egov CRUD 코드 생성`): DDL을 붙여 넣으면 VO·Mapper(인터페이스·XML)·Service·ServiceImpl·Controller·JSP·테스트를 만든다.
   - egov 3.x·4.x, Oracle·Tibero·PostgreSQL·MariaDB·CUBRID SQL. 매퍼 위치·이름, JSP 폴더, 인코딩(UTF-8·MS949)은 프로젝트에서 찾는다.
-  - 공식 VS Code 확장과 같은 템플릿 문맥이라, 공식·직접 고친 Handlebars 템플릿을 `.ferrite/templates/code/`에 두면 그것으로 만든다.
+  - 공식 VS Code 확장과 같은 템플릿 문맥이라, 공식·직접 고친 Handlebars 템플릿을 `.ferrite/templates/code/`에 두면 그것으로 만든다. `.hbs` 템플릿은 내장 Handlebars 강조로 열린다.
 - egov 설정 파일 생성(`도구 > egov 설정 파일 생성`): Datasource·Transaction·ID 생성·Logging(log4j2)·Scheduling(Quartz)·Cache(Ehcache)·Property 21종을 XML·Java Config·YAML·properties로 만든다.
   - 만든 설정은 실제 Spring(egov 3.x·4.x)에서 띄워 확인했다. DB별 기본값과 프로젝트의 `${Globals.…}` 키를 쓴다.
 - 새 egov 프로젝트(`도구 > 새 egov 프로젝트`): 공식 VS Code 확장 v5.0.7의 템플릿 22종(웹·템플릿·Boot·MSA·모바일·배치·AI RAG, egov 5)으로 프로젝트를 만든다.

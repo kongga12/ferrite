@@ -58,6 +58,7 @@ pub fn resolve(name: &str, servers: &Path, cwd: &Path) -> Result<Adapter, String
             args,
             cwd,
             env,
+            address: None,
         }
     } else {
         Adapter::Stdio {

@@ -563,3 +563,73 @@ fn 거꾸로_요청한_자식_세션에서_멈추고_페이지_스크립트에_�
     });
     root.join().expect("부모 세션 각본이 어긋남");
 }
+
+/// 잠깐 살아 있다 끝나는 프로그램(사용자 어댑터 대신 띄운다).
+fn short_lived(seconds: u32) -> (PathBuf, Vec<String>) {
+    if cfg!(windows) {
+        (
+            PathBuf::from("cmd"),
+            vec![
+                "/c".into(),
+                format!("ping -n {} 127.0.0.1 > nul", seconds + 1),
+            ],
+        )
+    } else {
+        (
+            PathBuf::from("sh"),
+            vec!["-c".into(), format!("sleep {seconds}")],
+        )
+    }
+}
+
+#[test]
+fn 띄운_어댑터가_정해_둔_주소를_늦게_열어도_붙고_먼저_끝나면_바로_실패한다() {
+    // 빈 포트를 얻어 닫아 두고, 어댑터를 띄운 뒤에 그 포트를 연다(제조사 어댑터가 뜨는 동안).
+    let address = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap();
+    let late = thread::spawn(move || {
+        thread::sleep(Duration::from_millis(700));
+        let listener = TcpListener::bind(address).unwrap();
+        let (stream, _) = listener.accept().unwrap();
+        // 붙어서 첫 요청을 받으면 된다(나머지 시작 순서는 poll이 진행한다).
+        fake_on(stream).expect("initialize");
+    });
+    let (program, args) = short_lived(5);
+    let adapter = Adapter::Listening {
+        program,
+        args,
+        cwd: None,
+        env: Vec::new(),
+        address: Some(address),
+    };
+    let launch = || Launch {
+        adapter_id: "vendor".into(),
+        attach: true,
+        arguments: json!({}),
+    };
+    let session = DebugSession::start(&adapter, launch(), BTreeMap::new(), || {}).unwrap();
+    late.join().expect("가짜 어댑터 각본이 어긋남");
+    drop(session);
+
+    // 어댑터가 주소를 열지 않고 끝나면 기다리지 않는다.
+    let (program, args) = short_lived(0);
+    let adapter = Adapter::Listening {
+        program,
+        args,
+        cwd: None,
+        env: Vec::new(),
+        address: Some(address),
+    };
+    let started = Instant::now();
+    let error = DebugSession::start(&adapter, launch(), BTreeMap::new(), || {})
+        .err()
+        .expect("실패해야 한다");
+    assert!(error.contains(&address.to_string()), "{error}");
+    assert!(
+        started.elapsed() < Duration::from_secs(15),
+        "{:?}",
+        started.elapsed()
+    );
+}

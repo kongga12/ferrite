@@ -337,3 +337,34 @@ fn 펜스_코드_블록은_안쪽_문법으로_칠하고_같은_펜스로_닫는
     assert!(got[3].is_empty());
     assert_eq!(got[4], [s("# after", Keyword)]);
 }
+
+#[test]
+fn 내장_handlebars_문법으로_템플릿을_칠한다() {
+    // 확장이 없어도 `.hbs`는 내장 언어로 보고, 확장 수에는 세지 않는다.
+    let registry = Registry::default();
+    assert!(registry.is_empty());
+    let hbs = registry
+        .language_for(Path::new("templates/controller.HBS"))
+        .unwrap();
+    assert_eq!(hbs.name, "Handlebars");
+    assert!(registry.language_for(Path::new("a.java")).is_none());
+    let got = spans(
+        hbs.grammar().unwrap(),
+        "{{!-- 주석 --}}<div class=\"x\">{{#if user.name}}{{camelCase name \"x\" 3}}{{/if}}</div>\n\
+         public class {{className}}Controller {}\n",
+    );
+    assert_eq!(got[0][0], s("{{!-- 주석 --}}", Comment));
+    assert!(got[0].contains(&s("div", Tag)));
+    assert!(got[0].contains(&s("#if", Keyword)));
+    assert!(got[0].contains(&s("/if", Keyword)));
+    assert!(got[0].contains(&s("user.name", Property)));
+    assert!(got[0].contains(&s("camelCase", Function)));
+    assert!(
+        got[0].contains(&s("name", Property)),
+        "도우미의 인자는 함수가 아니다: {got:?}"
+    );
+    assert!(got[0].contains(&s("\"x\"", Highlight::String)));
+    assert!(got[0].contains(&s("3", Constant)));
+    assert!(got[1].contains(&s("className", Property)));
+    assert!(got[1].contains(&s("{{", Tag)));
+}

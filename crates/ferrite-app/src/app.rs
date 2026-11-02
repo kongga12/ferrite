@@ -1953,7 +1953,7 @@ impl FerriteApp {
         // 어댑터 문제(설치 안 됨 등)는 빌드하기 전에 알린다.
         let adapter = match adapter {
             Some(adapter) => Ok(adapter),
-            None => ferrite_dap::adapters::resolve(&config.adapter, &servers_root(), root),
+            None => crate::debug_ui::resolve_adapter(&config.adapter, &servers_root(), root),
         };
         let started = adapter.and_then(|adapter| {
             self.debugger
