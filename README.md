@@ -27,6 +27,7 @@ Rust로 작성한 크로스플랫폼(Windows / macOS / Linux) 경량 IDE.
 - Git(`Ctrl+Shift+G`): 거터에 변경 줄 표시(저장 전 편집 포함), 상태바에 브랜치, 소스 제어 창에서 diff·스테이지·커밋·푸시·브랜치 전환(git CLI)
 - 통합 터미널(`` Ctrl+` ``): 탭 여러 개, Windows는 ConPTY(PowerShell), 한글 입출력, 256색·트루컬러, 복사(고른 글자)·붙여넣기. 터미널에 포커스가 있으면 셸이 쓰는 Ctrl+글자(Ctrl+D·Ctrl+L 등)는 셸로 간다.
 - 단축키(`보기 > 단축키 목록`): 기본(VS Code식)과 Eclipse 배치를 settings.toml의 `keymap = "eclipse"`로 고르고, `[keys]`에 명령마다 키를 적어 바꾼다(예: `"edit.deleteLine" = "Ctrl+D"`). 목록 창에서 지금 키와 겹침을 본다. 줄 지우기·줄 복제·줄로 가기도 있다.
+- AI 에이전트 연결(`도구 > AI 에이전트 연결(MCP)…`): 켜면 이 PC(127.0.0.1)에서 MCP 서버로 듣고, 토큰을 아는 코딩 에이전트(Claude Code 등)가 열린 파일(저장하지 않은 내용 포함)·활성 에디터·진단·디버거 상태를 읽는다. 파일은 바꾸지 않는다. 에이전트에 넣을 명령과 JSON 설정을 창에서 복사하며, settings.toml의 `mcp_server = true`면 앱을 켤 때 함께 켠다.
 - EditorConfig: 프로젝트의 `.editorconfig`(들여쓰기·탭 폭·줄바꿈·끝 공백·마지막 줄바꿈)를 따른다. 줄바꿈과 끝 공백은 저장할 때 맞춘다. `charset`은 따르지 않고 CP949 감지·보존을 지금대로 둔다.
 - TODO 목록(`편집 > TODO 목록`): 프로젝트의 `TODO`·`FIXME`를 파일에서 찾기로 모아 보이고 누르면 그 줄로 간다.
 - 저장 시 작업: `.ferrite/run.toml`의 `[[on_save]]`에 패턴과 명령(`${file}` 등)을 적으면 맞는 파일을 저장할 때 창 없이 돌리고(포매터·Sass 컴파일 등) 결과를 상태바에 알린다.

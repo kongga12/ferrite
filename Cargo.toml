@@ -21,6 +21,7 @@ ferrite-update = { path = "crates/ferrite-update" }
 ferrite-plugin = { path = "crates/ferrite-plugin" }
 ferrite-textmate = { path = "crates/ferrite-textmate" }
 ferrite-http = { path = "crates/ferrite-http" }
+ferrite-mcp = { path = "crates/ferrite-mcp" }
 eframe = "0.37"
 egui_kittest = { version = "0.37", features = ["eframe"] }
 encoding_rs = "0.8"

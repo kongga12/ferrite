@@ -180,6 +180,14 @@ fn jdbc_dir() -> Option<PathBuf> {
     Some(dirs::data_local_dir()?.join("ferrite").join("jdbc"))
 }
 
+/// MCP 토큰 파일(설정 폴더). 시험은 사용자 폴더에 쓰지 않는다.
+fn mcp_token_path() -> Option<PathBuf> {
+    if cfg!(test) {
+        return None;
+    }
+    Some(dirs::config_dir()?.join("ferrite").join("mcp-token"))
+}
+
 /// 설정의 단축키 오류(상태바에 알린다).
 fn keys_error(keys: &Keymap) -> Option<String> {
     (!keys.errors.is_empty()).then(|| format!("단축키 설정: {}", keys.errors.join(" · ")))
@@ -619,6 +627,8 @@ pub struct FerriteApp {
     keys_window: Option<String>,
     /// 저장 시 작업(`.ferrite/run.toml`의 `[[on_save]]`).
     on_save: crate::on_save::OnSave,
+    /// AI 에이전트 연결(MCP 서버).
+    mcp: crate::mcp_ui::McpPanel,
     /// jsconfig.json을 만들자고 할지 본 문서와 그 결과(화면 폴더). 문서가 바뀌면 다시 본다.
     jsconfig: Option<(PathBuf, Option<&'static str>)>,
     /// jsconfig.json 제안을 닫은 프로젝트 루트(앱이 켜진 동안).
@@ -663,6 +673,7 @@ impl FerriteApp {
             ),
         };
         let settings_failed = settings_error.is_some();
+        let mcp_start = settings.mcp_server.then_some(settings.mcp_port);
         let mut app = Self {
             tree,
             docs: Vec::new(),
@@ -704,6 +715,7 @@ impl FerriteApp {
             editor_focused: false,
             keys_window: None,
             on_save: crate::on_save::OnSave::new(&cc.egui_ctx),
+            mcp: crate::mcp_ui::McpPanel::new(mcp_token_path()),
             jsconfig: None,
             jsconfig_dismissed: Default::default(),
             watcher: FsWatcher::new(cc.egui_ctx.clone()).ok(),
@@ -740,6 +752,11 @@ impl FerriteApp {
         }
         if let Some(file) = file {
             app.open_file(file);
+        }
+        if let Some(port) = mcp_start
+            && let Err(e) = app.mcp.start(port)
+        {
+            app.status = format!("AI 에이전트 연결(MCP)을 켜지 못했습니다: {e}");
         }
         // 테스트는 밖에 묻지 않는다.
         if !cfg!(test) {
@@ -1256,6 +1273,107 @@ impl FerriteApp {
                     self.toggle_breakpoint(&path, line);
                 }
             }
+        }
+    }
+
+    /// 에이전트(MCP)가 읽을 상태: 열린 문서(내용은 바뀐 것만 다시 옮긴다), 활성 에디터, 진단(열린 문서의
+    /// 언어 서버·정적 분석·취약점, 열지 않은 파일의 정적 분석·취약점), 디버거.
+    fn mcp_snapshot(&mut self) -> ferrite_mcp::Snapshot {
+        use ferrite_lsp::problem::Severity as S;
+        let text = |p: &Path| p.display().to_string();
+        let severity = |s: S| {
+            match s {
+                S::Error => "error",
+                S::Warning => "warning",
+                S::Info => "info",
+                S::Hint => "hint",
+            }
+            .to_owned()
+        };
+        let mut documents = Vec::new();
+        let mut diagnostics = Vec::new();
+        for (i, doc) in self.docs.iter().enumerate() {
+            let content = self
+                .mcp
+                .text(&doc.path, doc.buffer.version(), || doc.buffer.text());
+            documents.push(ferrite_mcp::Document {
+                path: text(&doc.path),
+                language: match (doc.lang, &doc.ext) {
+                    (Some(lang), _) => lang.name().to_owned(),
+                    (None, Some(ext)) => ext.name.clone(),
+                    (None, None) => "일반 텍스트".to_owned(),
+                },
+                dirty: doc.is_dirty(),
+                active: self.active == Some(i),
+                lines: doc.buffer.line_count(),
+                text: content,
+            });
+            for problem in doc.lsp.problems.iter().chain(&doc.analysis_problems) {
+                let start = problem.range.start.min(doc.buffer.len_chars());
+                let (line, column) = doc.buffer.pos_to_line_col(start);
+                diagnostics.push(ferrite_mcp::Diagnostic {
+                    path: text(&doc.path),
+                    line: line + 1,
+                    column: column + 1,
+                    severity: severity(problem.severity),
+                    message: problem.message.clone(),
+                    source: problem.source.clone(),
+                });
+            }
+        }
+        let open = |p: &Path| self.docs.iter().any(|d| d.path == p);
+        for finding in self.sarif.findings() {
+            if let Some(path) = finding.path.as_deref().filter(|p| !open(p)) {
+                diagnostics.push(ferrite_mcp::Diagnostic {
+                    path: text(path),
+                    line: finding.line.max(1) as usize,
+                    column: finding.column.max(1) as usize,
+                    severity: format!("{:?}", finding.level).to_lowercase(),
+                    message: format!("{} ({})", finding.message, finding.rule),
+                    source: finding.tool.clone(),
+                });
+            }
+        }
+        for finding in self.vuln.findings() {
+            let dependency = &finding.dependency;
+            if !open(&dependency.file) {
+                diagnostics.push(ferrite_mcp::Diagnostic {
+                    path: text(&dependency.file),
+                    line: dependency.line + 1,
+                    column: 1,
+                    severity: finding.severity.label().to_owned(),
+                    message: format!(
+                        "{} {} {}: {}{}",
+                        finding.title(),
+                        dependency.name,
+                        dependency.version,
+                        finding.summary,
+                        finding
+                            .fixed
+                            .as_ref()
+                            .map(|f| format!(" ({f}에서 고침)"))
+                            .unwrap_or_default()
+                    ),
+                    source: "OSV".into(),
+                });
+            }
+        }
+        let active = self.active.map(|i| {
+            let doc = &self.docs[i];
+            let (line, column) = doc.buffer.pos_to_line_col(doc.buffer.selection().head);
+            ferrite_mcp::Active {
+                path: text(&doc.path),
+                line: line + 1,
+                column: column + 1,
+                selection: doc.buffer.selected_text(),
+            }
+        });
+        ferrite_mcp::Snapshot {
+            root: self.tree.as_ref().map(|t| text(t.root())),
+            active,
+            documents,
+            diagnostics,
+            debug: self.debugger.mcp_state(),
         }
     }
 
@@ -2577,6 +2695,10 @@ impl FerriteApp {
                         ui.close();
                         self.git.toggle();
                     }
+                    if ui.button("AI 에이전트 연결(MCP)…").clicked() {
+                        ui.close();
+                        self.mcp.show();
+                    }
                     if ui.button("언어 서버…").clicked() {
                         ui.close();
                         self.servers.show();
@@ -3839,6 +3961,10 @@ impl eframe::App for FerriteApp {
         if let Some(message) = self.on_save.poll() {
             self.status = message;
         }
+        if self.mcp.due() {
+            let snapshot = self.mcp_snapshot();
+            self.mcp.publish(snapshot);
+        }
         if std::mem::take(&mut self.settings_changed) {
             let (settings, error) = load_settings();
             self.keys = Keymap::new(settings.keymap, &settings.keys);
@@ -3900,6 +4026,7 @@ impl eframe::App for FerriteApp {
         }
         self.name_prompt_dialog(ui.ctx());
         self.delete_dialog(ui.ctx());
+        self.mcp.ui(ui.ctx(), self.settings.mcp_port);
         self.keys_window(ui.ctx());
         if let Some(action) = self.servers.ui(&ctx) {
             self.start_server_action(action, &ctx);
@@ -7615,6 +7742,105 @@ mod tests {
                 .starts_with("저장 시 작업 실패: 실패하는 작업(")),
             "{}",
             harness.state().status
+        );
+        drop(harness);
+        remove_project(&dir);
+    }
+
+    /// MCP 서버에 JSON-RPC 요청 하나를 보내 응답을 받는다(에이전트처럼).
+    fn mcp_call(
+        address: std::net::SocketAddr,
+        token: &str,
+        body: serde_json::Value,
+    ) -> serde_json::Value {
+        use std::io::{Read, Write};
+        let body = body.to_string();
+        let mut stream = std::net::TcpStream::connect(address).unwrap();
+        write!(
+            stream,
+            "POST /mcp HTTP/1.1\r\nHost: {address}\r\nAuthorization: Bearer {token}\r\n\
+             Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        let (_, body) = response.split_once("\r\n\r\n").unwrap();
+        serde_json::from_str(body).unwrap()
+    }
+
+    #[test]
+    fn mcp로_에이전트가_열린_파일의_저장_안_한_내용과_활성_에디터와_디버거_상태를_읽는다() {
+        use egui::accesskit::Role;
+        use serde_json::json;
+
+        let dir = std::env::temp_dir().join(format!("ferrite-mcp-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("A.java");
+        fs::write(&file, "class A {}\n").unwrap();
+        let mut harness = harness_builder()
+            .with_size(egui::vec2(1000.0, 700.0))
+            .build_eframe(|cc| FerriteApp::new(cc, Some(file.clone())));
+        harness.state_mut().mcp.start(0).unwrap();
+        harness.run();
+        harness.get_by_role(Role::MultilineTextInput).focus();
+        harness.run();
+        harness
+            .get_by_role(Role::MultilineTextInput)
+            .type_text("// 메모 ");
+        harness.run();
+        assert_eq!(
+            harness.state().docs[0].buffer.text(),
+            "// 메모 class A {}\n"
+        );
+        // 스냅샷은 0.2초마다 새로 넣는다.
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        harness.run();
+        let (address, token) = {
+            let mcp = &harness.state().mcp;
+            (mcp.address().unwrap(), mcp.token().unwrap().to_owned())
+        };
+        let call = |id: i64, name: &str, arguments: serde_json::Value| {
+            let answer = mcp_call(
+                address,
+                &token,
+                json!({ "jsonrpc": "2.0", "id": id, "method": "tools/call", "params": { "name": name, "arguments": arguments } }),
+            );
+            answer["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        };
+        assert_eq!(
+            call(1, "read_open_file", json!({ "path": "A.java" })),
+            "// 메모 class A {}\n",
+            "디스크가 아니라 저장하지 않은 버퍼를 읽는다"
+        );
+        let files: serde_json::Value =
+            serde_json::from_str(&call(2, "list_open_files", json!({}))).unwrap();
+        assert_eq!(
+            (
+                files["files"][0]["dirty"].as_bool(),
+                files["files"][0]["language"].as_str()
+            ),
+            (Some(true), Some("Java"))
+        );
+        let active: serde_json::Value =
+            serde_json::from_str(&call(3, "get_active_editor", json!({}))).unwrap();
+        assert_eq!(
+            (active["line"].as_i64(), active["column"].as_i64()),
+            (Some(1), Some(7))
+        );
+        assert_eq!(
+            call(4, "get_debug_state", json!({})),
+            "디버그 세션이 없습니다"
+        );
+        // 끄면 더 듣지 않는다.
+        harness.state_mut().mcp.stop();
+        assert!(
+            std::net::TcpStream::connect_timeout(&address, std::time::Duration::from_millis(500))
+                .is_err()
         );
         drop(harness);
         remove_project(&dir);

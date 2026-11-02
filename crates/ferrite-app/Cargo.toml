@@ -21,6 +21,7 @@ ferrite-dap.workspace = true
 ferrite-db.workspace = true
 ferrite-egov.workspace = true
 ferrite-http.workspace = true
+ferrite-mcp.workspace = true
 ferrite-lsp.workspace = true
 ferrite-notebook.workspace = true
 ferrite-term.workspace = true
