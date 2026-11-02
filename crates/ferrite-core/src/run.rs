@@ -29,6 +29,17 @@ pub const CUSTOM_TEMPLATE: &str = r#"# Ferrite 실행 구성. [[run]]마다 하�
 # name = "톰캣으로 실행(JDK 8)"
 # command = "mvn tomcat7:run"
 # env = { JAVA_HOME = "C:/Program Files/Java/jdk1.8.0_202" }
+
+# 저장 시 작업. 저장한 파일이 pattern에 맞으면 command를 창 없이 돌리고 결과를 상태바에 알린다.
+#   pattern 프로젝트 루트 기준 글롭. `/`가 없으면 어느 폴더든(`*.scss`)
+#   command ${file} ${relativeFile} ${fileDirname} ${fileBasename} ${fileBasenameNoExtension}
+#           ${fileExtname} ${workspaceFolder}를 저장한 파일로 바꾼다. 공백이 든 경로는 "${file}"처럼 감싼다
+#   cwd·env 실행 구성과 같다
+#
+# [[on_save]]
+# name = "Sass"
+# pattern = "src/main/webapp/**/*.scss"
+# command = "sass \"${file}\" \"${fileDirname}/${fileBasenameNoExtension}.css\""
 "#;
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
@@ -69,6 +80,82 @@ impl RunConfig {
 struct CustomFile {
     #[serde(default)]
     run: Vec<RunConfig>,
+    #[serde(default)]
+    on_save: Vec<SaveTask>,
+}
+
+/// 저장 시 작업(`[[on_save]]`).
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SaveTask {
+    pub name: String,
+    /// 프로젝트 루트 기준 글롭. `/`가 없으면 어느 폴더든.
+    pub pattern: String,
+    /// 셸이 실행할 명령 줄. `${file}` 등을 저장한 파일로 바꾼다.
+    pub command: String,
+    #[serde(default)]
+    pub cwd: Option<PathBuf>,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+}
+
+impl SaveTask {
+    /// 저장한 파일이 패턴에 맞는지(프로젝트 밖 파일은 맞지 않는다).
+    pub fn matches(&self, root: &Path, path: &Path) -> bool {
+        let Ok(relative) = path.strip_prefix(root) else {
+            return false;
+        };
+        let relative: Vec<String> = relative
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .collect();
+        let pattern = if self.pattern.contains('/') {
+            self.pattern.trim_start_matches('/').to_owned()
+        } else {
+            format!("**/{}", self.pattern)
+        };
+        globset::GlobBuilder::new(&pattern)
+            .literal_separator(true)
+            .build()
+            .is_ok_and(|g| g.compile_matcher().is_match(relative.join("/")))
+    }
+
+    /// 저장한 파일로 바꾼 명령 줄(이름은 VS Code의 작업 변수와 같다).
+    pub fn command_for(&self, root: &Path, path: &Path) -> String {
+        let text = |p: &Path| p.to_string_lossy().into_owned();
+        let name = |p: Option<&std::ffi::OsStr>| p.map(|n| n.to_string_lossy().into_owned());
+        let relative = path.strip_prefix(root).unwrap_or(path);
+        let extension = name(path.extension()).map(|e| format!(".{e}"));
+        [
+            ("${workspaceFolder}", text(root)),
+            ("${relativeFile}", text(relative)),
+            (
+                "${fileDirname}",
+                path.parent().map(text).unwrap_or_default(),
+            ),
+            (
+                "${fileBasenameNoExtension}",
+                name(path.file_stem()).unwrap_or_default(),
+            ),
+            (
+                "${fileBasename}",
+                name(path.file_name()).unwrap_or_default(),
+            ),
+            ("${fileExtname}", extension.unwrap_or_default()),
+            ("${file}", text(path)),
+        ]
+        .iter()
+        .fold(self.command.clone(), |line, (key, value)| {
+            line.replace(key, value)
+        })
+    }
+
+    pub fn working_directory(&self, root: &Path) -> PathBuf {
+        match &self.cwd {
+            Some(cwd) => root.join(cwd),
+            None => root.to_path_buf(),
+        }
+    }
 }
 
 /// 사용자 구성을 읽는다. 파일이 없으면 빈 목록, 잘못 적었으면 사용자에게 보일 오류.
@@ -78,10 +165,20 @@ pub fn load_custom(root: &Path) -> Result<Vec<RunConfig>, String> {
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(format!("{CUSTOM_FILE}을 읽지 못했습니다: {e}")),
     };
-    parse_custom(&text)
+    parse_custom(&text).map(|f| f.run)
 }
 
-fn parse_custom(text: &str) -> Result<Vec<RunConfig>, String> {
+/// 저장 시 작업을 읽는다. 파일이 없으면 빈 목록, 잘못 적었으면 사용자에게 보일 오류.
+pub fn load_on_save(root: &Path) -> Result<Vec<SaveTask>, String> {
+    let text = match std::fs::read_to_string(root.join(CUSTOM_FILE)) {
+        Ok(text) => text,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(format!("{CUSTOM_FILE}을 읽지 못했습니다: {e}")),
+    };
+    parse_custom(&text).map(|f| f.on_save)
+}
+
+fn parse_custom(text: &str) -> Result<CustomFile, String> {
     let file: CustomFile = toml::from_str(text).map_err(|e| format!("{CUSTOM_FILE}: {e}"))?;
     if let Some(bad) = file
         .run
@@ -93,7 +190,15 @@ fn parse_custom(text: &str) -> Result<Vec<RunConfig>, String> {
             bad.name
         ));
     }
-    Ok(file.run)
+    if let Some(bad) = file.on_save.iter().find(|t| {
+        t.name.trim().is_empty() || t.pattern.trim().is_empty() || t.command.trim().is_empty()
+    }) {
+        return Err(format!(
+            "{CUSTOM_FILE}: on_save의 name·pattern·command는 비울 수 없습니다(name = {:?})",
+            bad.name
+        ));
+    }
+    Ok(file)
 }
 
 /// 프로젝트 루트의 표지 파일을 보고 구성을 만든다. 하위 폴더는 보지 않는다(필요하면 사용자 구성의 `cwd`).
@@ -353,14 +458,15 @@ mod tests {
             env = { JAVA_HOME = "C:/jdk8" }
             "#,
         )
-        .unwrap();
+        .unwrap()
+        .run;
         assert_eq!(configs.len(), 1);
         assert_eq!(configs[0].env["JAVA_HOME"], "C:/jdk8");
         let root = Path::new("project");
         assert_eq!(configs[0].working_directory(root), root.join("web"));
 
         assert!(
-            parse_custom(CUSTOM_TEMPLATE).unwrap().is_empty(),
+            parse_custom(CUSTOM_TEMPLATE).is_ok_and(|f| f.run.is_empty() && f.on_save.is_empty()),
             "견본은 모두 주석"
         );
         assert!(
@@ -373,5 +479,59 @@ mod tests {
             "모르는 키"
         );
         assert!(load_custom(Path::new("없는-폴더")).unwrap().is_empty());
+    }
+
+    #[test]
+    fn 저장_시_작업의_패턴과_변수() {
+        let file = parse_custom(
+            r#"
+            [[on_save]]
+            name = "Sass"
+            pattern = "src/main/webapp/**/*.scss"
+            command = "sass \"${file}\" \"${fileDirname}/${fileBasenameNoExtension}.css\""
+
+            [[on_save]]
+            name = "prettier"
+            pattern = "*.{js,jsp}"
+            command = "prettier --write ${relativeFile} # ${fileBasename} ${fileExtname} ${workspaceFolder}"
+            cwd = "web"
+            "#,
+        )
+        .unwrap();
+        let [sass, prettier] = &file.on_save[..] else {
+            panic!("둘이어야 한다");
+        };
+        let root = Path::new("/p");
+        let scss = root.join("src/main/webapp/css/site.scss");
+        assert!(sass.matches(root, &scss));
+        assert!(
+            !sass.matches(root, &root.join("site.scss")),
+            "/가 있으면 루트 기준"
+        );
+        assert!(!sass.matches(Path::new("/other"), &scss), "프로젝트 밖");
+        let dir = scss.parent().unwrap().to_string_lossy().into_owned();
+        assert_eq!(
+            sass.command_for(root, &scss),
+            format!("sass \"{}\" \"{dir}/site.css\"", scss.display())
+        );
+        let jsp = root.join("web/WEB-INF/jsp/list.jsp");
+        assert!(prettier.matches(root, &jsp), "/가 없으면 어느 폴더든");
+        assert!(!prettier.matches(root, &root.join("a.java")));
+        assert_eq!(
+            prettier.command_for(root, &jsp),
+            format!(
+                "prettier --write {} # list.jsp .jsp {}",
+                Path::new("web/WEB-INF/jsp/list.jsp").display(),
+                root.display()
+            )
+        );
+        assert_eq!(prettier.working_directory(root), root.join("web"));
+        assert!(
+            parse_custom("[[on_save]]\nname = \"a\"\npattern = \"\"\ncommand = \"x\"").is_err()
+        );
+        assert!(
+            parse_custom("[[on_save]]\nname = \"a\"\ncommand = \"x\"").is_err(),
+            "pattern 빠짐"
+        );
     }
 }

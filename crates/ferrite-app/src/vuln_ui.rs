@@ -4,7 +4,6 @@
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
@@ -470,30 +469,16 @@ fn scan(
 
 /// 빌드 도구를 셸로 돌려 표준 출력을 받는다. 실패하면 출력의 끝 몇 줄을 알린다.
 fn run(dir: &Path, line: &str) -> Result<String, String> {
-    let mut command = crate::debug_ui::shell(line);
-    command
-        .current_dir(dir)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    ferrite_lsp::client::hide_console(&mut command);
-    let output = command
-        .output()
+    let output = crate::debug_ui::run_hidden(line, dir, &Default::default())
         .map_err(|e| format!("`{line}`을(를) 띄우지 못했습니다: {e}"))?;
-    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     if output.status.success() {
-        return Ok(stdout);
+        return Ok(output.stdout);
     }
-    let text = stdout + &String::from_utf8_lossy(&output.stderr);
-    let mut tail: Vec<&str> = text
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .rev()
-        .take(3)
-        .collect();
-    tail.reverse();
-    Err(format!("`{line}` 실패: {}", tail.join(" / ")))
+    let text = output.stdout + &output.stderr;
+    Err(format!(
+        "`{line}` 실패: {}",
+        crate::debug_ui::tail(&text, 3)
+    ))
 }
 
 fn mb(bytes: u64) -> f64 {

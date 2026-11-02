@@ -801,25 +801,58 @@ impl Debugger {
     }
 }
 
-/// 빌드 명령을 플랫폼 셸로 돌려 출력(UTF-8·CP949)을 모은다. 실패(0이 아닌 종료 코드)면 Err.
+/// 빌드 명령을 플랫폼 셸로 돌려 출력을 모은다. 실패(0이 아닌 종료 코드)면 Err.
 fn run_build(line: &str, dir: &Path) -> Result<String, String> {
-    let mut command = shell(line);
-    command.current_dir(dir);
-    ferrite_lsp::client::hide_console(&mut command);
-    let output = command
-        .output()
+    let output = run_hidden(line, dir, &BTreeMap::new())
         .map_err(|e| format!("빌드 명령을 실행하지 못했습니다: {e}\n"))?;
-    let decode = |bytes: &[u8]| {
-        ferrite_core::text_file::decode(bytes)
-            .map(|c| c.text)
-            .unwrap_or_else(|_| String::from_utf8_lossy(bytes).into_owned())
-    };
-    let text = decode(&output.stdout) + &decode(&output.stderr);
+    let text = output.stdout + &output.stderr;
     if output.status.success() {
         Ok(text)
     } else {
         Err(format!("{text}[빌드 실패: {}]\n", output.status))
     }
+}
+
+/// 숨겨 돌린 명령의 결과. 출력은 UTF-8·CP949를 가려 읽는다.
+pub(crate) struct Output {
+    pub status: std::process::ExitStatus,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+/// 명령 줄을 콘솔 창 없이 플랫폼 셸로 돌려 끝날 때까지 기다린다(빌드·의존성 풀기·저장 시 작업).
+pub(crate) fn run_hidden(
+    line: &str,
+    dir: &Path,
+    env: &BTreeMap<String, String>,
+) -> std::io::Result<Output> {
+    let mut command = shell(line);
+    command.current_dir(dir).envs(env);
+    ferrite_lsp::client::hide_console(&mut command);
+    let output = command.output()?;
+    let decode = |bytes: &[u8]| {
+        ferrite_core::text_file::decode(bytes)
+            .map(|c| c.text)
+            .unwrap_or_else(|_| String::from_utf8_lossy(bytes).into_owned())
+    };
+    Ok(Output {
+        status: output.status,
+        stdout: decode(&output.stdout),
+        stderr: decode(&output.stderr),
+    })
+}
+
+/// 출력의 끝 몇 줄(빈 줄은 빼고 ` / `로 잇는다). 실패를 한 줄로 알릴 때.
+pub(crate) fn tail(text: &str, lines: usize) -> String {
+    let mut tail: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .rev()
+        .take(lines)
+        .collect();
+    tail.reverse();
+    tail.join(" / ")
 }
 
 /// 명령 줄을 실행할 플랫폼 셸(터미널의 실행 구성과 같다).
