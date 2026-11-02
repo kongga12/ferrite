@@ -5,7 +5,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use eframe::egui::{self, Key, KeyboardShortcut, Modifiers, ViewportCommand};
+use eframe::egui::{self, Key, Modifiers, ViewportCommand};
 use ferrite_core::buffer::{Buffer, Indent, Selection, detect_indent};
 use ferrite_core::settings::{self, Settings, Theme};
 use ferrite_core::syntax::{Lang, MAX_SYNTAX_BYTES, Syntax};
@@ -16,6 +16,7 @@ use crate::dock::{self, Pane};
 use crate::editor_view::{self, BreakpointMark, EditorOptions, EditorState, Styler};
 use crate::file_tree::{FileTree, TreeAction};
 use crate::find_bar::{FindAction, FindBar};
+use crate::keymap::{Command, Keymap};
 use crate::lsp_hub::{DocSync, HubUpdate, LspHub, ServerState};
 use crate::lsp_ui::{ActionMenu, CompletionPopup, Pending, ReferenceList, word_at, word_start};
 use crate::servers::{ServerAction, ServerManager, install_hint};
@@ -33,49 +34,6 @@ use ferrite_lsp::position::PositionEncoding;
 use ferrite_lsp::problem::Severity;
 use serde_json::Value;
 
-// Modifiers::COMMAND는 macOS에서 Cmd, 그 외 OS에서 Ctrl로 동작한다.
-const OPEN_FOLDER: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::O);
-const SAVE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::S);
-const CLOSE_TAB: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::W);
-const FIND: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::F);
-const REPLACE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::H);
-const FIND_NEXT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::F3);
-const FIND_PREV: KeyboardShortcut = KeyboardShortcut::new(Modifiers::SHIFT, Key::F3);
-const NEW_FILE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::N);
-const SAVE_AS: KeyboardShortcut =
-    KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::S);
-// 자동완성은 macOS에서도 실제 Ctrl 키다(Cmd+Space는 OS 검색).
-const COMPLETE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::CTRL, Key::Space);
-const GOTO_DEFINITION: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::F12);
-const FIND_REFERENCES: KeyboardShortcut = KeyboardShortcut::new(Modifiers::SHIFT, Key::F12);
-const FORMAT: KeyboardShortcut =
-    KeyboardShortcut::new(Modifiers::SHIFT.plus(Modifiers::ALT), Key::F);
-const RENAME_SYMBOL: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::F2);
-// 코드 액션: Ctrl+.와 Alt+Enter 두 가지 습관을 모두 받는다.
-const CODE_ACTION: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Period);
-const CODE_ACTION_ALT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::ALT, Key::Enter);
-const QUICK_OPEN: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::P);
-const SYMBOL_SEARCH: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::T);
-/// `.http` 파일에서 커서가 든 요청을 보낸다.
-const RUN_REQUEST: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Enter);
-const OUTLINE: KeyboardShortcut =
-    KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::O);
-const SOURCE_CONTROL: KeyboardShortcut =
-    KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::G);
-// 터미널은 VS Code처럼 macOS에서도 실제 Ctrl+`다.
-const TOGGLE_TERMINAL: KeyboardShortcut = KeyboardShortcut::new(Modifiers::CTRL, Key::Backtick);
-// macOS의 Cmd+F5는 VoiceOver를 켜므로 모든 OS에서 Ctrl을 쓴다.
-const RUN: KeyboardShortcut = KeyboardShortcut::new(Modifiers::CTRL, Key::F5);
-// 디버그. egui는 덧붙은 Shift를 무시하고 맞추므로 Shift 조합을 먼저 확인한다.
-const DEBUG: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::F5);
-const DEBUG_STOP: KeyboardShortcut = KeyboardShortcut::new(Modifiers::SHIFT, Key::F5);
-const DEBUG_PAUSE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::F6);
-const TOGGLE_BREAKPOINT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::F9);
-const STEP_OVER: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::F10);
-const STEP_IN: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::F11);
-const STEP_OUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::SHIFT, Key::F11);
-const FIND_IN_FILES: KeyboardShortcut =
-    KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::F);
 /// 마우스가 한 자리에 이만큼 머물면 호버 정보를 요청한다.
 const HOVER_DELAY: std::time::Duration = std::time::Duration::from_millis(400);
 
@@ -157,6 +115,10 @@ enum NameTarget {
     Symbol {
         pos: usize,
     },
+    /// 활성 문서의 줄로 가기. 줄 수.
+    Line {
+        lines: usize,
+    },
 }
 
 struct NamePrompt {
@@ -216,6 +178,11 @@ fn jdbc_dir() -> Option<PathBuf> {
         return None;
     }
     Some(dirs::data_local_dir()?.join("ferrite").join("jdbc"))
+}
+
+/// 설정의 단축키 오류(상태바에 알린다).
+fn keys_error(keys: &Keymap) -> Option<String> {
+    (!keys.errors.is_empty()).then(|| format!("단축키 설정: {}", keys.errors.join(" · ")))
 }
 
 /// 받거나 들인 취약점 DB(OSV) 묶음을 두는 곳. 테스트는 사용자 폴더에 쓰지 않는다.
@@ -625,6 +592,12 @@ pub struct FerriteApp {
     sarif: crate::sarif_ui::SarifPanel,
     vuln: crate::vuln_ui::VulnPanel,
     problems_view: ProblemsView,
+    /// 단축키 배치(설정의 keymap·[keys]).
+    keys: Keymap,
+    /// 지난 프레임에 에디터가 키보드 포커스를 가졌는지(에디터 전용 단축키).
+    editor_focused: bool,
+    /// 단축키 목록 창과 그 찾기 글.
+    keys_window: Option<String>,
     /// jsconfig.json을 만들자고 할지 본 문서와 그 결과(화면 폴더). 문서가 바뀌면 다시 본다.
     jsconfig: Option<(PathBuf, Option<&'static str>)>,
     /// jsconfig.json 제안을 닫은 프로젝트 루트(앱이 켜진 동안).
@@ -642,6 +615,7 @@ impl FerriteApp {
         }
         let (settings, settings_error) = load_settings();
         apply_settings(&cc.egui_ctx, &settings);
+        let keys = Keymap::new(settings.keymap, &settings.keys);
         let start = start.map(|p| real_path(&p));
         let file = start.as_ref().filter(|p| p.is_file()).cloned();
         let project = match &file {
@@ -658,10 +632,13 @@ impl FerriteApp {
                 None,
                 // Context::format_shortcut은 macOS에서 ⌘ 기호를 그릴 수 있는지 글꼴로 확인하는데, 첫 프레임 전에는
                 // 글꼴이 없어 패닉한다. 그래서 기호 대신 이름(Cmd·Ctrl)으로 직접 만든다.
-                format!(
-                    "폴더를 열어 시작하세요 ({})",
-                    OPEN_FOLDER.format(&egui::ModifierNames::NAMES, cfg!(target_os = "macos"))
-                ),
+                match keys.keys(Command::OpenFolder).next() {
+                    Some(shortcut) => format!(
+                        "폴더를 열어 시작하세요 ({})",
+                        shortcut.format(&egui::ModifierNames::NAMES, cfg!(target_os = "macos"))
+                    ),
+                    None => "폴더를 열어 시작하세요".to_owned(),
+                },
             ),
         };
         let settings_failed = settings_error.is_some();
@@ -671,7 +648,9 @@ impl FerriteApp {
             active: None,
             pending_close: None,
             allow_close: false,
-            status: settings_error.unwrap_or(status),
+            status: settings_error
+                .or_else(|| keys_error(&keys))
+                .unwrap_or(status),
             find: None,
             quick_open: Default::default(),
             find_in_files: Default::default(),
@@ -700,6 +679,9 @@ impl FerriteApp {
             sarif: Default::default(),
             vuln: crate::vuln_ui::VulnPanel::new(osv_dir()),
             problems_view: ProblemsView::File,
+            keys,
+            editor_focused: false,
+            keys_window: None,
             jsconfig: None,
             jsconfig_dismissed: Default::default(),
             watcher: FsWatcher::new(cc.egui_ctx.clone()).ok(),
@@ -797,11 +779,16 @@ impl FerriteApp {
             NameTarget::NewFolder(_) => "새 폴더",
             NameTarget::Rename(_) => "이름 바꾸기",
             NameTarget::Symbol { .. } => "기호 이름 바꾸기 (모든 사용처)",
+            NameTarget::Line { .. } => "줄로 가기",
+        };
+        let label = match prompt.target {
+            NameTarget::Line { lines } => format!("줄 번호 (1~{lines})"),
+            _ => "이름".to_owned(),
         };
         let (mut submit, mut cancel) = (false, false);
         let modal = egui::Modal::new(egui::Id::unique("name_prompt")).show(ctx, |ui| {
             ui.heading(title);
-            let label = ui.label("이름");
+            let label = ui.label(label);
             let field = ui
                 .add(egui::TextEdit::singleline(&mut prompt.name).desired_width(320.0))
                 .labelled_by(label.id);
@@ -825,6 +812,25 @@ impl FerriteApp {
             return;
         }
         let name = prompt.name.trim_end_matches(['\r', '\n']).to_owned();
+        if let NameTarget::Line { lines } = prompt.target {
+            match name.trim().parse::<usize>() {
+                Ok(line) if (1..=lines).contains(&line) => {
+                    self.name_prompt = None;
+                    if let Some(i) = self.active {
+                        let doc = &mut self.docs[i];
+                        let pos = doc.buffer.line_col_to_pos(line - 1, 0);
+                        doc.buffer.move_to(pos, false);
+                        doc.view.reveal_cursor();
+                        self.focus_editor = true;
+                    }
+                }
+                _ => {
+                    prompt.error = Some(format!("1~{lines} 사이의 줄 번호를 입력하세요"));
+                    prompt.focus = true;
+                }
+            }
+            return;
+        }
         // 기호 이름 바꾸기는 파일 작업이 아니라 언어 서버에 맡긴다(결과는 응답에서 적용).
         if let NameTarget::Symbol { pos } = prompt.target {
             if name.trim().is_empty() {
@@ -837,7 +843,7 @@ impl FerriteApp {
             return;
         }
         let result = match &prompt.target {
-            NameTarget::Symbol { .. } => return,
+            NameTarget::Symbol { .. } | NameTarget::Line { .. } => return,
             NameTarget::NewFile(dir) => fs_ops::create_file(dir, &name).map(|p| (None, p)),
             NameTarget::NewFolder(dir) => fs_ops::create_dir(dir, &name).map(|p| (None, p)),
             NameTarget::Rename(old) => fs_ops::rename(old, &name).map(|p| (Some(old.clone()), p)),
@@ -1118,109 +1124,194 @@ impl FerriteApp {
     }
 
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
-        if ctx.input_mut(|i| i.consume_shortcut(&OPEN_FOLDER)) {
-            self.open_folder_dialog();
+        // 지난 프레임의 포커스로 거른다: 에디터 전용 명령은 에디터에 포커스가 있을 때만, 터미널에
+        // 포커스가 있으면 셸이 쓰는 Ctrl+글자는 터미널에 둔다.
+        let editor = std::mem::take(&mut self.editor_focused);
+        let terminal = self.terminal.take_focused();
+        let finding = self.find.is_some();
+        let pressed = self.keys.pressed(ctx, |command, shortcut| {
+            // `.http` 요청 보내기는 에디터가 그 파일에서 받는다.
+            command != Command::SendRequest
+                && (editor || !command.editor_only())
+                && (finding || !matches!(command, Command::FindNext | Command::FindPrevious))
+                && !(terminal && crate::keymap::is_terminal_control(shortcut))
+        });
+        for command in pressed {
+            self.run_command(ctx, command);
         }
-        if ctx.input_mut(|i| i.consume_shortcut(&NEW_FILE)) {
-            self.new_file_dialog();
-        }
-        // Ctrl+S는 Shift가 더 눌린 입력과도 맞으므로, Shift가 붙은 단축키를 먼저 확인한다.
-        if ctx.input_mut(|i| i.consume_shortcut(&SAVE_AS))
-            && let Some(i) = self.active
-        {
-            self.save_as_dialog(i);
-        }
-        if ctx.input_mut(|i| i.consume_shortcut(&SAVE))
-            && let Some(i) = self.active
-        {
-            self.save(i);
-        }
-        if ctx.input_mut(|i| i.consume_shortcut(&CLOSE_TAB))
-            && let Some(i) = self.active
-        {
-            self.request_close_tab(i);
-        }
-        if ctx.input_mut(|i| i.consume_shortcut(&SYMBOL_SEARCH)) {
-            self.symbol_search.show();
-        }
-        if ctx.input_mut(|i| i.consume_shortcut(&OUTLINE)) {
-            self.show_outline();
-        }
-        if ctx.input_mut(|i| i.consume_shortcut(&QUICK_OPEN)) {
-            self.open_quick_open(ctx);
-        }
-        if ctx.input_mut(|i| i.consume_shortcut(&TOGGLE_TERMINAL)) {
-            self.toggle_terminal();
-        }
-        if ctx.input_mut(|i| i.consume_shortcut(&RUN)) {
-            self.open_run_picker(ctx);
-        }
-        if ctx.input_mut(|i| i.consume_shortcut(&DEBUG_STOP)) {
-            self.debugger.stop();
-        }
-        if ctx.input_mut(|i| i.consume_shortcut(&DEBUG)) {
-            self.debug_continue_or_start(ctx);
-        }
-        if ctx.input_mut(|i| i.consume_shortcut(&DEBUG_PAUSE)) {
-            self.debugger.pause();
-        }
-        if ctx.input_mut(|i| i.consume_shortcut(&STEP_OUT)) {
-            self.debugger.resume(crate::debug_ui::Step::Out);
-        }
-        if ctx.input_mut(|i| i.consume_shortcut(&STEP_IN)) {
-            self.debugger.resume(crate::debug_ui::Step::In);
-        }
-        if ctx.input_mut(|i| i.consume_shortcut(&STEP_OVER)) {
-            self.debugger.resume(crate::debug_ui::Step::Over);
-        }
-        if ctx.input_mut(|i| i.consume_shortcut(&TOGGLE_BREAKPOINT))
-            && let Some(i) = self.active
-        {
-            let doc = &self.docs[i];
-            let line = doc.buffer.pos_to_line_col(doc.buffer.selection().head).0 + 1;
-            let path = doc.path.clone();
-            self.toggle_breakpoint(&path, line);
-        }
-        if ctx.input_mut(|i| i.consume_shortcut(&SOURCE_CONTROL)) {
-            self.git.toggle();
-        }
-        // Ctrl+F가 Ctrl+Shift+F에도 맞으므로 먼저 확인한다.
-        if ctx.input_mut(|i| i.consume_shortcut(&FIND_IN_FILES)) {
-            self.open_find_in_files();
-        }
-        for (shortcut, replace) in [(FIND, false), (REPLACE, true)] {
-            if ctx.input_mut(|i| i.consume_shortcut(&shortcut)) {
-                self.open_find(replace);
+    }
+
+    /// 단축키나 메뉴의 명령을 한다.
+    fn run_command(&mut self, ctx: &egui::Context, command: Command) {
+        use crate::debug_ui::Step;
+        match command {
+            Command::NewFile => self.new_file_dialog(),
+            Command::OpenFolder => self.open_folder_dialog(),
+            Command::Save => {
+                if let Some(i) = self.active {
+                    self.save(i);
+                }
+            }
+            Command::SaveAs => {
+                if let Some(i) = self.active {
+                    self.save_as_dialog(i);
+                }
+            }
+            Command::CloseTab => {
+                if let Some(i) = self.active {
+                    self.request_close_tab(i);
+                }
+            }
+            Command::Find => self.open_find(false),
+            Command::Replace => self.open_find(true),
+            Command::FindNext => self.run_find_action(FindAction::Next),
+            Command::FindPrevious => self.run_find_action(FindAction::Prev),
+            Command::GotoLine => self.open_goto_line(),
+            Command::DeleteLine | Command::DuplicateDown | Command::DuplicateUp => {
+                let Some(i) = self.active else {
+                    return;
+                };
+                // 디버거가 받아 둔 소스는 읽기 전용이다.
+                if self.debugger.is_stored(&self.docs[i].path) {
+                    return;
+                }
+                let doc = &mut self.docs[i];
+                let now = Instant::now();
+                match command {
+                    Command::DeleteLine => doc.buffer.delete_lines(now),
+                    Command::DuplicateDown => doc.buffer.duplicate_lines(true, now),
+                    _ => doc.buffer.duplicate_lines(false, now),
+                }
+                doc.view.reveal_cursor();
+            }
+            Command::FindInFiles => self.open_find_in_files(),
+            Command::QuickOpen => self.open_quick_open(ctx),
+            Command::SymbolSearch => self.symbol_search.show(),
+            Command::Outline => self.show_outline(),
+            Command::Terminal => self.toggle_terminal(),
+            Command::SourceControl => self.git.toggle(),
+            Command::Keys => self.keys_window = Some(String::new()),
+            Command::Complete => self.request_at_cursor(LspRequest::Completion(None)),
+            Command::Definition => self.request_at_cursor(LspRequest::Definition),
+            Command::References => self.request_at_cursor(LspRequest::References),
+            Command::Format => self.request_at_cursor(LspRequest::Format),
+            Command::Rename => self.open_symbol_rename(),
+            Command::CodeAction => self.request_at_cursor(LspRequest::CodeActions),
+            Command::SendRequest => {}
+            Command::Run => self.open_run_picker(ctx),
+            Command::Debug => self.debug_continue_or_start(ctx),
+            Command::DebugStop => self.debugger.stop(),
+            Command::DebugPause => self.debugger.pause(),
+            Command::StepOver => self.debugger.resume(Step::Over),
+            Command::StepIn => self.debugger.resume(Step::In),
+            Command::StepOut => self.debugger.resume(Step::Out),
+            Command::Breakpoint => {
+                if let Some(i) = self.active {
+                    let doc = &self.docs[i];
+                    let line = doc.buffer.pos_to_line_col(doc.buffer.selection().head).0 + 1;
+                    let path = doc.path.clone();
+                    self.toggle_breakpoint(&path, line);
+                }
             }
         }
-        if self.find.is_some() {
-            if ctx.input_mut(|i| i.consume_shortcut(&FIND_PREV)) {
-                self.run_find_action(FindAction::Prev);
-            }
-            if ctx.input_mut(|i| i.consume_shortcut(&FIND_NEXT)) {
-                self.run_find_action(FindAction::Next);
-            }
+    }
+
+    /// 활성 문서의 줄 번호를 묻는다(지금 줄을 채워 둔다).
+    fn open_goto_line(&mut self) {
+        let Some(i) = self.active else {
+            return;
+        };
+        let buffer = &self.docs[i].buffer;
+        let line = buffer.pos_to_line_col(buffer.selection().head).0 + 1;
+        self.name_prompt = Some(NamePrompt {
+            target: NameTarget::Line {
+                lines: buffer.line_count(),
+            },
+            name: line.to_string(),
+            error: None,
+            focus: true,
+        });
+    }
+
+    /// 단축키 목록 창: 배치, 명령마다 키와 겹침, 설정의 오류. 바꾸기는 settings.toml로.
+    fn keys_window(&mut self, ctx: &egui::Context) {
+        let Some(filter) = &mut self.keys_window else {
+            return;
+        };
+        let mut open = true;
+        let mut open_settings = false;
+        let keys = &self.keys;
+        egui::Window::new("단축키 목록")
+            .open(&mut open)
+            .default_size([560.0, 480.0])
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(match keys.preset {
+                        settings::Keymap::Default => "배치: 기본(VS Code식)",
+                        settings::Keymap::Eclipse => "배치: Eclipse",
+                    });
+                    if ui.button("설정 열기").clicked() {
+                        open_settings = true;
+                    }
+                });
+                ui.weak(
+                    "settings.toml의 keymap(\"default\"·\"eclipse\")과 [keys]로 바꿉니다. \
+                     예: \"edit.deleteLine\" = \"Ctrl+D\"",
+                );
+                for error in &keys.errors {
+                    ui.colored_label(ui.visuals().error_fg_color, error);
+                }
+                let label = ui.label("찾기");
+                ui.add(egui::TextEdit::singleline(filter).hint_text("명령·이름·키"))
+                    .labelled_by(label.id);
+                ui.separator();
+                let needle = filter.to_lowercase();
+                egui::ScrollArea::vertical()
+                    .auto_shrink(false)
+                    .show(ui, |ui| {
+                        egui::Grid::new("keys_grid")
+                            .striped(true)
+                            .num_columns(4)
+                            .show(ui, |ui| {
+                                for (command, shortcuts, clashes) in keys.rows() {
+                                    let text = shortcuts
+                                        .iter()
+                                        .map(|s| ctx.format_shortcut(s))
+                                        .collect::<Vec<_>>()
+                                        .join(", ");
+                                    let shown = [command.label(), command.id(), text.as_str()]
+                                        .iter()
+                                        .any(|s| s.to_lowercase().contains(&needle));
+                                    if !shown {
+                                        continue;
+                                    }
+                                    ui.label(command.label());
+                                    ui.weak(command.id());
+                                    if text.is_empty() {
+                                        ui.weak("(없음)");
+                                    } else {
+                                        ui.label(text);
+                                    }
+                                    if clashes.is_empty() {
+                                        ui.label("");
+                                    } else {
+                                        let names: Vec<&str> =
+                                            clashes.iter().map(|c| c.label()).collect();
+                                        ui.colored_label(
+                                            ui.visuals().warn_fg_color,
+                                            format!("겹침: {}", names.join(", ")),
+                                        );
+                                    }
+                                    ui.end_row();
+                                }
+                            });
+                    });
+            });
+        if !open {
+            self.keys_window = None;
         }
-        // Shift가 붙은 단축키를 먼저 확인한다(F12가 Shift+F12에도 맞으므로).
-        if ctx.input_mut(|i| i.consume_shortcut(&FIND_REFERENCES)) {
-            self.request_at_cursor(LspRequest::References);
-        }
-        if ctx.input_mut(|i| i.consume_shortcut(&GOTO_DEFINITION)) {
-            self.request_at_cursor(LspRequest::Definition);
-        }
-        if ctx.input_mut(|i| i.consume_shortcut(&COMPLETE)) {
-            self.request_at_cursor(LspRequest::Completion(None));
-        }
-        if ctx.input_mut(|i| i.consume_shortcut(&FORMAT)) {
-            self.request_at_cursor(LspRequest::Format);
-        }
-        if ctx.input_mut(|i| i.consume_shortcut(&RENAME_SYMBOL)) {
-            self.open_symbol_rename();
-        }
-        if ctx
-            .input_mut(|i| i.consume_shortcut(&CODE_ACTION) || i.consume_shortcut(&CODE_ACTION_ALT))
-        {
-            self.request_at_cursor(LspRequest::CodeActions);
+        if open_settings {
+            self.open_settings();
         }
     }
 
@@ -2184,20 +2275,21 @@ impl FerriteApp {
         egui::Panel::top("menu_bar").show(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button("파일", |ui| {
-                    let new_file =
-                        egui::Button::new("새 파일…").shortcut_text(ctx.format_shortcut(&NEW_FILE));
+                    let new_file = egui::Button::new("새 파일…")
+                        .shortcut_text(self.keys.text(&ctx, Command::NewFile));
                     if ui.add(new_file).clicked() {
                         ui.close();
                         self.new_file_dialog();
                     }
                     let open = egui::Button::new("폴더 열기…")
-                        .shortcut_text(ctx.format_shortcut(&OPEN_FOLDER));
+                        .shortcut_text(self.keys.text(&ctx, Command::OpenFolder));
                     if ui.add(open).clicked() {
                         ui.close();
                         self.open_folder_dialog();
                     }
                     ui.separator();
-                    let save = egui::Button::new("저장").shortcut_text(ctx.format_shortcut(&SAVE));
+                    let save = egui::Button::new("저장")
+                        .shortcut_text(self.keys.text(&ctx, Command::Save));
                     if ui.add_enabled(self.active.is_some(), save).clicked()
                         && let Some(i) = self.active
                     {
@@ -2205,15 +2297,15 @@ impl FerriteApp {
                         self.save(i);
                     }
                     let save_as = egui::Button::new("다른 이름으로 저장…")
-                        .shortcut_text(ctx.format_shortcut(&SAVE_AS));
+                        .shortcut_text(self.keys.text(&ctx, Command::SaveAs));
                     if ui.add_enabled(self.active.is_some(), save_as).clicked()
                         && let Some(i) = self.active
                     {
                         ui.close();
                         self.save_as_dialog(i);
                     }
-                    let close =
-                        egui::Button::new("탭 닫기").shortcut_text(ctx.format_shortcut(&CLOSE_TAB));
+                    let close = egui::Button::new("탭 닫기")
+                        .shortcut_text(self.keys.text(&ctx, Command::CloseTab));
                     if ui.add_enabled(self.active.is_some(), close).clicked()
                         && let Some(i) = self.active
                     {
@@ -2240,60 +2332,88 @@ impl FerriteApp {
                     }
                 });
                 ui.menu_button("편집", |ui| {
-                    for (label, shortcut, replace) in
-                        [("찾기", FIND, false), ("바꾸기", REPLACE, true)]
-                    {
+                    for (label, shortcut, replace) in [
+                        ("찾기", Command::Find, false),
+                        ("바꾸기", Command::Replace, true),
+                    ] {
                         let item =
-                            egui::Button::new(label).shortcut_text(ctx.format_shortcut(&shortcut));
+                            egui::Button::new(label).shortcut_text(self.keys.text(&ctx, shortcut));
                         if ui.add_enabled(self.active.is_some(), item).clicked() {
                             ui.close();
                             self.open_find(replace);
                         }
                     }
                     ui.separator();
+                    for command in [
+                        Command::GotoLine,
+                        Command::DeleteLine,
+                        Command::DuplicateDown,
+                        Command::DuplicateUp,
+                    ] {
+                        let item = egui::Button::new(command.label())
+                            .shortcut_text(self.keys.text(&ctx, command));
+                        if ui.add_enabled(self.active.is_some(), item).clicked() {
+                            ui.close();
+                            self.run_command(&ctx, command);
+                            self.focus_editor = true;
+                        }
+                    }
+                    ui.separator();
                     let project = self.tree.is_some();
                     let item = egui::Button::new("파일로 이동…")
-                        .shortcut_text(ctx.format_shortcut(&QUICK_OPEN));
+                        .shortcut_text(self.keys.text(&ctx, Command::QuickOpen));
                     if ui.add_enabled(project, item).clicked() {
                         ui.close();
                         self.open_quick_open(&ctx);
                     }
                     let item = egui::Button::new("파일에서 찾기…")
-                        .shortcut_text(ctx.format_shortcut(&FIND_IN_FILES));
+                        .shortcut_text(self.keys.text(&ctx, Command::FindInFiles));
                     if ui.add_enabled(project, item).clicked() {
                         ui.close();
                         self.open_find_in_files();
                     }
                     ui.separator();
                     let item = egui::Button::new("기호로 이동…")
-                        .shortcut_text(ctx.format_shortcut(&SYMBOL_SEARCH));
+                        .shortcut_text(self.keys.text(&ctx, Command::SymbolSearch));
                     if ui.add(item).clicked() {
                         ui.close();
                         self.symbol_search.show();
                     }
-                    let item =
-                        egui::Button::new("개요").shortcut_text(ctx.format_shortcut(&OUTLINE));
+                    let item = egui::Button::new("개요")
+                        .shortcut_text(self.keys.text(&ctx, Command::Outline));
                     if ui.add(item).clicked() {
                         ui.close();
                         self.show_outline();
                     }
                 });
                 ui.menu_button("코드", |ui| {
-                    let items: [(&str, KeyboardShortcut, Option<LspRequest>); 6] = [
-                        ("정의로 이동", GOTO_DEFINITION, Some(LspRequest::Definition)),
-                        ("참조 찾기", FIND_REFERENCES, Some(LspRequest::References)),
-                        ("자동완성", COMPLETE, Some(LspRequest::Completion(None))),
+                    let items: [(&str, Command, Option<LspRequest>); 6] = [
                         (
-                            "코드 액션 (Alt+Enter)",
-                            CODE_ACTION,
+                            "정의로 이동",
+                            Command::Definition,
+                            Some(LspRequest::Definition),
+                        ),
+                        (
+                            "참조 찾기",
+                            Command::References,
+                            Some(LspRequest::References),
+                        ),
+                        (
+                            "자동완성",
+                            Command::Complete,
+                            Some(LspRequest::Completion(None)),
+                        ),
+                        (
+                            "코드 액션",
+                            Command::CodeAction,
                             Some(LspRequest::CodeActions),
                         ),
-                        ("문서 포맷", FORMAT, Some(LspRequest::Format)),
-                        ("기호 이름 바꾸기", RENAME_SYMBOL, None),
+                        ("문서 포맷", Command::Format, Some(LspRequest::Format)),
+                        ("기호 이름 바꾸기", Command::Rename, None),
                     ];
                     for (label, shortcut, request) in items {
                         let item =
-                            egui::Button::new(label).shortcut_text(ctx.format_shortcut(&shortcut));
+                            egui::Button::new(label).shortcut_text(self.keys.text(&ctx, shortcut));
                         if ui.add_enabled(self.active.is_some(), item).clicked() {
                             ui.close();
                             match request {
@@ -2304,6 +2424,12 @@ impl FerriteApp {
                     }
                 });
                 ui.menu_button("보기", |ui| {
+                    let item = egui::Button::new("단축키 목록")
+                        .shortcut_text(self.keys.text(&ctx, Command::Keys));
+                    if ui.add(item).clicked() {
+                        ui.close();
+                        self.keys_window = Some(String::new());
+                    }
                     if ui.button("창 배치 초기화").clicked() {
                         ui.close();
                         self.find_in_files.stop();
@@ -2313,7 +2439,8 @@ impl FerriteApp {
                 });
                 ui.menu_button("실행", |ui| {
                     let project = self.tree.is_some();
-                    let item = egui::Button::new("실행…").shortcut_text(ctx.format_shortcut(&RUN));
+                    let item = egui::Button::new("실행…")
+                        .shortcut_text(self.keys.text(&ctx, Command::Run));
                     if ui.add_enabled(project, item).clicked() {
                         ui.close();
                         self.open_run_picker(&ctx);
@@ -2340,7 +2467,8 @@ impl FerriteApp {
                     } else {
                         "디버그 시작…"
                     };
-                    let item = egui::Button::new(label).shortcut_text(ctx.format_shortcut(&DEBUG));
+                    let item = egui::Button::new(label)
+                        .shortcut_text(self.keys.text(&ctx, Command::Debug));
                     if ui
                         .add_enabled(project && (stopped || !debugging), item)
                         .clicked()
@@ -2349,26 +2477,26 @@ impl FerriteApp {
                         self.debug_continue_or_start(&ctx);
                     }
                     let steps = [
-                        ("한 줄씩", STEP_OVER, crate::debug_ui::Step::Over),
-                        ("들어가기", STEP_IN, crate::debug_ui::Step::In),
-                        ("나오기", STEP_OUT, crate::debug_ui::Step::Out),
+                        ("한 줄씩", Command::StepOver, crate::debug_ui::Step::Over),
+                        ("들어가기", Command::StepIn, crate::debug_ui::Step::In),
+                        ("나오기", Command::StepOut, crate::debug_ui::Step::Out),
                     ];
                     for (label, shortcut, step) in steps {
                         let item =
-                            egui::Button::new(label).shortcut_text(ctx.format_shortcut(&shortcut));
+                            egui::Button::new(label).shortcut_text(self.keys.text(&ctx, shortcut));
                         if ui.add_enabled(stopped, item).clicked() {
                             ui.close();
                             self.debugger.resume(step);
                         }
                     }
                     let item = egui::Button::new("디버그 멈춤")
-                        .shortcut_text(ctx.format_shortcut(&DEBUG_STOP));
+                        .shortcut_text(self.keys.text(&ctx, Command::DebugStop));
                     if ui.add_enabled(debugging, item).clicked() {
                         ui.close();
                         self.debugger.stop();
                     }
                     let item = egui::Button::new("중단점 켜기/끄기")
-                        .shortcut_text(ctx.format_shortcut(&TOGGLE_BREAKPOINT));
+                        .shortcut_text(self.keys.text(&ctx, Command::Breakpoint));
                     if ui.add_enabled(self.active.is_some(), item).clicked() {
                         ui.close();
                         if let Some(i) = self.active {
@@ -2389,13 +2517,13 @@ impl FerriteApp {
                 });
                 ui.menu_button("도구", |ui| {
                     let item = egui::Button::new("터미널")
-                        .shortcut_text(ctx.format_shortcut(&TOGGLE_TERMINAL));
+                        .shortcut_text(self.keys.text(&ctx, Command::Terminal));
                     if ui.add(item).clicked() {
                         ui.close();
                         self.toggle_terminal();
                     }
                     let item = egui::Button::new("소스 제어")
-                        .shortcut_text(ctx.format_shortcut(&SOURCE_CONTROL));
+                        .shortcut_text(self.keys.text(&ctx, Command::SourceControl));
                     if ui.add(item).clicked() {
                         ui.close();
                         self.git.toggle();
@@ -3339,7 +3467,7 @@ impl FerriteApp {
             // 에디터가 Enter를 받기 전에 가로챈다.
             if doc.http_runs.is_some()
                 && ui.memory(|m| m.has_focus(id))
-                && ui.input_mut(|i| i.consume_shortcut(&RUN_REQUEST))
+                && ui.input_mut(|i| self.keys.consume(i, Command::SendRequest))
             {
                 let line = doc.buffer.pos_to_line_col(doc.buffer.selection().head).0;
                 run_request = Some((doc.path.clone(), line));
@@ -3358,6 +3486,7 @@ impl FerriteApp {
                 ui.ctx().request_repaint();
             }
             let focused = output.response.has_focus();
+            self.editor_focused |= focused;
             if let Some(tab) = active_tab {
                 output.response.labelled_by(tab);
             }
@@ -3651,7 +3780,10 @@ impl eframe::App for FerriteApp {
         self.vuln.poll();
         if std::mem::take(&mut self.settings_changed) {
             let (settings, error) = load_settings();
-            self.status = error.unwrap_or_else(|| "설정을 적용했습니다".into());
+            self.keys = Keymap::new(settings.keymap, &settings.keys);
+            self.status = error
+                .or_else(|| keys_error(&self.keys))
+                .unwrap_or_else(|| "설정을 적용했습니다".into());
             apply_settings(ctx, &settings);
             self.settings = settings;
         }
@@ -3707,6 +3839,7 @@ impl eframe::App for FerriteApp {
         }
         self.name_prompt_dialog(ui.ctx());
         self.delete_dialog(ui.ctx());
+        self.keys_window(ui.ctx());
         if let Some(action) = self.servers.ui(&ctx) {
             self.start_server_action(action, &ctx);
         }
@@ -7243,6 +7376,75 @@ mod tests {
                 .contains("(3.2.1에서 고침)")
         );
         harness.get_by_label("오류 1 · 경고 0");
+        drop(harness);
+        remove_project(&dir);
+    }
+
+    #[test]
+    fn eclipse_배치로_줄을_지우고_복제하고_줄로_가며_단축키_목록을_본다() {
+        use egui::accesskit::Role;
+
+        let dir = std::env::temp_dir().join(format!("ferrite-keys-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("a.txt");
+        fs::write(&file, "one\ntwo\nthree\n").unwrap();
+        let mut harness = harness_builder()
+            .with_size(egui::vec2(1000.0, 700.0))
+            .build_eframe(|cc| FerriteApp::new(cc, Some(file.clone())));
+        harness.state_mut().keys = Keymap::new(settings::Keymap::Eclipse, &Default::default());
+        harness.run();
+        // 에디터 전용 명령은 에디터에 포커스가 있을 때만 받는다.
+        harness.key_press_modifiers(Modifiers::COMMAND, Key::D);
+        harness.run();
+        assert_eq!(harness.state().docs[0].buffer.text(), "one\ntwo\nthree\n");
+        harness.get_by_role(Role::MultilineTextInput).focus();
+        harness.run();
+        harness.key_press_modifiers(Modifiers::COMMAND, Key::D);
+        harness.run();
+        assert_eq!(harness.state().docs[0].buffer.text(), "two\nthree\n");
+        harness.key_press_modifiers(Modifiers::COMMAND.plus(Modifiers::ALT), Key::ArrowDown);
+        harness.run();
+        {
+            let buffer = &harness.state().docs[0].buffer;
+            assert_eq!(buffer.text(), "two\ntwo\nthree\n");
+            assert_eq!(buffer.pos_to_line_col(buffer.selection().head), (1, 0));
+        }
+
+        // 줄로 가기(Eclipse Ctrl+L): 지금 줄을 채워 두고, 범위 밖은 오류.
+        harness.key_press_modifiers(Modifiers::COMMAND, Key::L);
+        harness.run();
+        let field = |h: &Harness<'_, FerriteApp>| {
+            h.get_by_role_and_label(Role::TextInput, "줄 번호 (1~4)")
+                .value()
+                .unwrap_or_default()
+        };
+        assert_eq!(field(&harness), "2");
+        harness.key_press_modifiers(Modifiers::COMMAND, Key::A);
+        harness
+            .get_by_role_and_label(Role::TextInput, "줄 번호 (1~4)")
+            .type_text("9");
+        harness.key_press(Key::Enter);
+        harness.run();
+        harness.get_by_label("1~4 사이의 줄 번호를 입력하세요");
+        harness.key_press_modifiers(Modifiers::COMMAND, Key::A);
+        harness
+            .get_by_role_and_label(Role::TextInput, "줄 번호 (1~4)")
+            .type_text("3");
+        harness.key_press(Key::Enter);
+        harness.run();
+        assert!(harness.state().name_prompt.is_none());
+        {
+            let buffer = &harness.state().docs[0].buffer;
+            assert_eq!(buffer.pos_to_line_col(buffer.selection().head), (2, 0));
+        }
+
+        // 단축키 목록(Ctrl+Shift+L): 배치와 명령 이름·키.
+        harness.key_press_modifiers(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::L);
+        harness.run();
+        harness.get_by_label("배치: Eclipse");
+        harness.get_by_label("edit.deleteLine");
+        harness.get_by_label("F11, F8");
         drop(harness);
         remove_project(&dir);
     }

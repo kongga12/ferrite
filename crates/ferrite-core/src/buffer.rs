@@ -629,6 +629,63 @@ impl Buffer {
         );
     }
 
+    /// 선택한 줄(없으면 커서 줄)을 지운다. 커서는 그 자리에 온 줄의 같은 열(줄이 짧으면 끝)로 간다.
+    pub fn delete_lines(&mut self, now: Instant) {
+        let lines = self.selected_lines();
+        let head = self.selection.head;
+        let col = head - self.line_start(self.rope.char_to_line(head));
+        // 마지막 줄까지 지우면 앞 줄의 줄바꿈을 지운다(앞 줄이 커서 줄이 된다).
+        // (지울 범위, 지운 뒤 커서 줄의 시작과 길이)
+        let (range, (start, len)) = if lines.end < self.line_count() {
+            let start = self.line_start(lines.start);
+            (
+                start..self.line_start(lines.end),
+                (start, self.line_len(lines.end)),
+            )
+        } else if lines.start > 0 {
+            let prev = lines.start - 1;
+            (
+                self.line_start(lines.start) - 1..self.len_chars(),
+                (self.line_start(prev), self.line_len(prev)),
+            )
+        } else {
+            (0..self.len_chars(), (0, 0))
+        };
+        let pos = start + col.min(len);
+        self.transact(
+            vec![(range, String::new())],
+            Selection::caret(pos),
+            EditKind::Other,
+            now,
+        );
+    }
+
+    /// 선택한 줄(없으면 커서 줄)을 한 벌 더 넣는다. `down`이면 선택이 아래 벌로, 아니면 위 벌에 남는다.
+    pub fn duplicate_lines(&mut self, down: bool, now: Instant) {
+        let lines = self.selected_lines();
+        let text = (lines.start..lines.end)
+            .map(|l| self.line_text(l))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let end = self.line_start(lines.end - 1) + self.line_len(lines.end - 1);
+        let sel = self.selection;
+        let after = if down {
+            let shift = text.chars().count() + 1;
+            Selection {
+                anchor: sel.anchor + shift,
+                head: sel.head + shift,
+            }
+        } else {
+            sel
+        };
+        self.transact(
+            vec![(end..end, format!("\n{text}"))],
+            after,
+            EditKind::Other,
+            now,
+        );
+    }
+
     pub fn undo(&mut self) -> bool {
         let Some(tx) = self.undo.pop() else {
             return false;
@@ -954,6 +1011,45 @@ mod tests {
         assert_eq!(b.text(), "one\nthree\ntwo");
         b.undo();
         assert_eq!(b.text(), "one\ntwo\nthree");
+    }
+
+    #[test]
+    fn 줄_지우기와_복제() {
+        let t0 = Instant::now();
+        // 가운데 줄: 다음 줄이 올라오고 커서는 같은 열(짧으면 끝)
+        let mut b = buf("one\ntwo\nx", 6, 6); // two의 o
+        b.delete_lines(t0);
+        assert_eq!(b.text(), "one\nx");
+        assert_eq!(b.selection(), Selection::caret(5));
+        b.undo();
+        assert_eq!(b.text(), "one\ntwo\nx");
+        // 여러 줄 선택(다음 줄 처음에서 끝나면 그 줄은 빼고), 마지막 줄은 앞 줄의 줄바꿈과 함께
+        let mut b = buf("a\nbb\ncc\n", 2, 8);
+        b.delete_lines(t0);
+        assert_eq!(b.text(), "a\n");
+        let mut b = buf("a\nbb", 3, 3);
+        b.delete_lines(t0);
+        assert_eq!(b.text(), "a");
+        assert_eq!(b.selection(), Selection::caret(1));
+        let mut b = buf("only", 2, 2);
+        b.delete_lines(t0);
+        assert_eq!(
+            (b.text().as_str(), b.selection()),
+            ("", Selection::caret(0))
+        );
+
+        // 아래로 복제는 선택이 새 벌로, 위로 복제는 위 벌에 남는다.
+        let mut b = buf("a\nbc\nd", 3, 4); // bc의 c를 고름
+        b.duplicate_lines(true, t0);
+        assert_eq!(b.text(), "a\nbc\nbc\nd");
+        assert_eq!(b.selected_text(), "c");
+        assert_eq!(b.selection().range(), 6..7);
+        let mut b = buf("a\nbc\nd", 0, 4);
+        b.duplicate_lines(false, t0);
+        assert_eq!(b.text(), "a\nbc\na\nbc\nd");
+        assert_eq!(b.selection(), Selection { anchor: 0, head: 4 });
+        b.undo();
+        assert_eq!(b.text(), "a\nbc\nd");
     }
 
     #[test]

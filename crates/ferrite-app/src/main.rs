@@ -18,6 +18,7 @@ mod fonts;
 mod frame_ui;
 mod git_ui;
 mod http_ui;
+mod keymap;
 mod lsp_hub;
 mod lsp_ui;
 mod mapper_db;

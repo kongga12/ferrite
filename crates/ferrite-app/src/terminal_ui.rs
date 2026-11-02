@@ -29,6 +29,8 @@ pub struct TerminalPanel {
     active: usize,
     next_number: usize,
     focus: bool,
+    /// 이번 프레임에 화면이 키보드 포커스를 가졌는지(앱이 단축키를 거를 때 다음 프레임에 본다).
+    focused: bool,
     error: Option<String>,
     /// 끌어서 고르기 시작한 칸(줄, 열).
     drag_from: Option<(usize, usize)>,
@@ -51,6 +53,11 @@ impl TerminalPanel {
             self.tabs.len(),
             self.error
         )
+    }
+
+    /// 지난 프레임에 화면이 키보드 포커스를 가졌는지(읽으면 지운다).
+    pub fn take_focused(&mut self) -> bool {
+        std::mem::take(&mut self.focused)
     }
 
     /// 다음에 그릴 때 화면에 키보드 포커스를 준다.
@@ -204,6 +211,7 @@ impl TerminalPanel {
             }
         }
         let focused = response.has_focus();
+        self.focused = focused;
         if focused {
             send_input(ui, id, &tab.terminal);
         }

@@ -25,7 +25,8 @@ Rust로 작성한 크로스플랫폼(Windows / macOS / Linux) 경량 IDE.
 - 노트북(`.ipynb`): 셀(코드·마크다운·원본)을 고치고 더하고 옮기고 지우며, 저장된 출력(글, PNG 그림, 오류, HTML 요약)을 본다. Jupyter가 쓴 모양 그대로 저장해 고치지 않은 셀은 바이트까지 그대로 남는다. [JSON 보기]로 원래 글을 고친다. 코드 셀은 Jupyter 커널(ipykernel 등)로 실행한다(Shift+Enter, 모두 실행, 멈춤, 커널 다시 시작). Python은 노트북 위 폴더의 `.venv`·`venv`나 PATH에서 찾는다. [DataFrame 보기]로 커널의 pandas DataFrame을 그리드로 본다(보이는 행만 페이지로 받고, 머리글을 눌러 정렬).
 - 도킹 창: 프로젝트·에디터·터미널·문제·검색·참조를 탭으로 묶는다. 탭을 끌어 옆·위아래로 나눈다. 배치는 다음 실행 때 되살아난다(`보기 > 창 배치 초기화`).
 - Git(`Ctrl+Shift+G`): 거터에 변경 줄 표시(저장 전 편집 포함), 상태바에 브랜치, 소스 제어 창에서 diff·스테이지·커밋·푸시·브랜치 전환(git CLI)
-- 통합 터미널(`` Ctrl+` ``): 탭 여러 개, Windows는 ConPTY(PowerShell), 한글 입출력, 256색·트루컬러, 복사(고른 글자)·붙여넣기
+- 통합 터미널(`` Ctrl+` ``): 탭 여러 개, Windows는 ConPTY(PowerShell), 한글 입출력, 256색·트루컬러, 복사(고른 글자)·붙여넣기. 터미널에 포커스가 있으면 셸이 쓰는 Ctrl+글자(Ctrl+D·Ctrl+L 등)는 셸로 간다.
+- 단축키(`보기 > 단축키 목록`): 기본(VS Code식)과 Eclipse 배치를 settings.toml의 `keymap = "eclipse"`로 고르고, `[keys]`에 명령마다 키를 적어 바꾼다(예: `"edit.deleteLine" = "Ctrl+D"`). 목록 창에서 지금 키와 겹침을 본다. 줄 지우기·줄 복제·줄로 가기도 있다.
 - 파일로 이동(`Ctrl+P`): 파일 이름 퍼지 검색. 파일에서 찾기(`Ctrl+Shift+F`): 프로젝트 전체 검색(대소문자·단어·정규식·파일 패턴, UTF-8·CP949 파일). 둘 다 `.gitignore`를 따른다.
 - 기호: 개요 창(`Ctrl+Shift+O`, 지금 파일의 기호 나무), 기호로 이동(`Ctrl+T`, 떠 있는 언어 서버 모두에서 찾기), 엔드포인트 창(`도구 > 엔드포인트`, 컨트롤러별 URL·HTTP 메서드. Spring Boot LS가 없는 egov 3.x는 내장 egov 서버가 `@RequestMapping` 계열을 모은다).
 - HTTP 요청 파일(`.http`): `###`로 나눈 요청을 거터 ▶나 `Ctrl+Enter`로 보내고 HTTP 응답 창에서 상태·걸린 시간·헤더·본문을 본다.
