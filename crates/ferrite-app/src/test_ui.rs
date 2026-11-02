@@ -17,6 +17,17 @@ use serde_json::Value;
 /// 출력 창에 남길 최대 글자 수(넘으면 앞에서 버린다).
 const OUTPUT_LIMIT: usize = 1 << 20;
 
+/// pom.xml의 surefire `skipTests=true`를 지운다(UTF-8 파일만).
+fn enable_tests(pom: &Path) -> Result<(), String> {
+    let bytes =
+        std::fs::read(pom).map_err(|e| format!("{}을(를) 읽지 못했습니다: {e}", pom.display()))?;
+    let text = String::from_utf8(bytes)
+        .map_err(|_| "pom.xml이 UTF-8이 아니어서 고치지 않았습니다".to_owned())?;
+    let enabled = test_report::enable_tests(&text)
+        .ok_or_else(|| "pom.xml에서 skipTests 설정을 찾지 못했습니다".to_owned())?;
+    std::fs::write(pom, enabled).map_err(|e| format!("{}에 쓰지 못했습니다: {e}", pom.display()))
+}
+
 /// pytest·CTest 보고서를 쓰는 폴더(이 앱 프로세스의 것). 앱을 닫을 때 지운다.
 pub fn reports_dir() -> PathBuf {
     std::env::temp_dir().join(format!("ferrite-test-reports-{}", std::process::id()))
@@ -71,6 +82,8 @@ pub struct TestPanel {
     selected: Option<usize>,
     output: String,
     status: Option<(String, bool)>,
+    /// 테스트를 건너뛰게 하는 pom.xml(egov 템플릿의 `skipTests=true`). [pom.xml에서 테스트 켜기]를 보인다.
+    skipping: Option<PathBuf>,
 }
 
 impl TestPanel {
@@ -152,6 +165,7 @@ impl TestPanel {
             let _ = tx.send(Msg::Done(code));
             wake.request_repaint();
         });
+        self.skipping = None;
         self.output = format!("> {line}\n");
         self.view = View::Output;
         self.status = Some((format!("실행 중: {}", config.name), false));
@@ -271,12 +285,31 @@ impl TestPanel {
         let seconds = running.started.1.elapsed().as_secs_f64();
         let code = code.map_or_else(|| "끊김".to_owned(), |c| c.to_string());
         let stopped = if running.stopped { "멈춤 · " } else { "" };
+        // egov 템플릿은 pom이 테스트를 건너뛰게 해 보고서가 없다. 까닭을 알리고 켜기를 권한다.
+        if !found_any
+            && running.tool == Tool::Maven
+            && let Some((_, _, dir)) = &self.last
+        {
+            let pom = dir.join("pom.xml");
+            if std::fs::read_to_string(&pom)
+                .is_ok_and(|text| test_report::pom_skips_tests(&text).is_some())
+            {
+                self.skipping = Some(pom);
+            }
+        }
         self.status = Some(if found_any {
             (
                 format!(
                     "{stopped}통과 {passed} · 실패 {failed} · 건너뜀 {skipped} · {seconds:.1}초 · 종료 코드 {code}"
                 ),
                 failed > 0,
+            )
+        } else if self.skipping.is_some() {
+            (
+                "테스트를 건너뛰었습니다: pom.xml의 maven-surefire-plugin 설정이 skipTests=true입니다\
+                 (egov 템플릿 기본값). 명령 줄로는 켤 수 없습니다."
+                    .to_owned(),
+                true,
             )
         } else {
             (
@@ -381,6 +414,24 @@ impl TestPanel {
                 ui.visuals().weak_text_color()
             };
             ui.colored_label(color, text);
+        }
+        if let Some(pom) = self.skipping.clone()
+            && ui
+                .button("pom.xml에서 테스트 켜기")
+                .on_hover_text(
+                    "pom.xml의 <skipTests>true</skipTests>를 지웁니다. 그 뒤로 mvn test·package가 \
+                     테스트를 돌리고, 건너뛰려면 -DskipTests를 씁니다.",
+                )
+                .clicked()
+        {
+            self.skipping = None;
+            self.status = Some(match enable_tests(&pom) {
+                Ok(()) => (
+                    "pom.xml에서 테스트를 켰습니다. [실행]을 다시 누르세요.".to_owned(),
+                    false,
+                ),
+                Err(e) => (e, true),
+            });
         }
         ui.separator();
 
