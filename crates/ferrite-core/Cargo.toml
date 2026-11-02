@@ -8,6 +8,8 @@ publish.workspace = true
 
 [dependencies]
 encoding_rs.workspace = true
+# EditorConfig 절의 글롭. ignore가 이미 쓰는 판이다.
+globset = "0.4.20"
 ignore = "0.4.33"
 nucleo-matcher = "0.3.1"
 regex = "1.13.1"
