@@ -1286,6 +1286,7 @@
     - 알게 된 것: 이 어댑터 판은 `fs/read_text_file`·`fs/write_text_file`를 부르지 않는다. Claude Code가 자기 도구로 디스크를 직접 읽고 쓰고, 편집 diff는 권한 요청에 붙여 보인다. 그래서 Claude Code에서는 diff 카드의 [받기] 대신 권한 카드의 diff를 보고 허락하면 에이전트가 디스크에 쓰고, Ferrite는 파일 감시로 열린 문서를 다시 읽는다(저장 안 한 변경이 있으면 충돌로 알린다). 에이전트가 저장 안 한 버퍼를 보려면 MCP(`read_open_file`)를 쓴다.
     - 알게 된 것: Claude Code의 권한 모드(사용자 설정 `permissions.defaultMode`)가 `auto`·`acceptEdits`면 묻지 않고 고친다. 이 PC의 설정이 `auto`라 처음 시험에서는 권한 요청 없이 고쳐졌다. 시험은 시험 폴더의 `.claude/settings.local.json`에 `default`를 두어 묻게 하고, 두 길(클라이언트에 쓰기를 맡김, 권한 뒤 직접 씀)을 다 받는다.
   - 내장 Claude Code 항목을 바뀐 npm 이름으로 고쳤다.
+  - CI 3개 OS 전체(실행 41561435959, `ff7522c`) 통과.
   - 확인하지 못한 것: 실제 에이전트와는 `ferrite-acp`로 대화했고 앱의 에이전트 창으로는 하지 않았다(창은 가짜 에이전트 창 시험으로 확인). MCP의 진단·디버거 상태는 실제 HTTP 시험과 창 시험으로만 확인했다. 실제 에이전트 확인은 Windows뿐이다.
 
 ### 백로그 — Phase 미정
