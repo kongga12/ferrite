@@ -106,6 +106,13 @@ impl McpPanel {
         self.server.is_some() && self.published.is_none_or(|at| at.elapsed() >= REFRESH)
     }
 
+    /// 켜져 있는데 아직 때가 아니면 남은 시간. 그때 한 번 더 그려 마지막 바뀜도 스냅샷에 넣는다
+    /// (창이 가만히 있으면 프레임이 돌지 않아, 간격 안에 생긴 바뀜이 들어가지 않는다).
+    pub fn until_due(&self) -> Option<Duration> {
+        let at = self.published.filter(|_| self.server.is_some())?;
+        REFRESH.checked_sub(at.elapsed())
+    }
+
     /// 문서 내용(버전이 같으면 앞서 옮긴 것을 다시 쓴다).
     pub fn text(&mut self, path: &Path, version: u64, text: impl FnOnce() -> String) -> Arc<str> {
         match self.texts.get(path) {

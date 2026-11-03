@@ -128,6 +128,33 @@ struct NamePrompt {
     focus: bool,
 }
 
+/// 시험 폴더를 지운다. 서버 프로세스 등이 작업 폴더를 아직 쥐고 있으면(Windows는 쓰는 중인 폴더를
+/// 못 지운다) 잠깐씩 다시 해 본다. 다른 스레드에서 지우고 10초만
+/// 기다린다: Windows에서 파일 감시·DB 스레드가 그 폴더의 핸들을 닫는 중에 지우면, 폴더의 다음 항목
+/// 읽기(`FindNextFileW`)가 드물게(수백 번에 한 번) 돌아오지 않아 시험이 끝나지 않았다.
+/// 그때는 폴더를 남기고 시험을 끝낸다.
+#[cfg(test)]
+pub(crate) fn remove_project(dir: &std::path::Path) {
+    let dir = dir.to_path_buf();
+    let (done, wait) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for _ in 0..50 {
+            match std::fs::remove_dir_all(&dir) {
+                Ok(()) => break,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => break,
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(100)),
+            }
+        }
+        let _ = done.send(());
+    });
+    if wait
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .is_err()
+    {
+        eprintln!("시험 폴더를 10초 안에 지우지 못해 남깁니다");
+    }
+}
+
 /// OS별 설정 파일 위치(Windows `%APPDATA%`, macOS `~/Library/Application Support`, Linux `~/.config`).
 /// 언어 서버 매니저가 서버를 설치하는 곳. Windows `%LOCALAPPDATA%\ferrite\servers`,
 /// macOS `~/Library/Application Support/ferrite/servers`, Linux `~/.local/share/ferrite/servers`.
@@ -3054,6 +3081,7 @@ impl FerriteApp {
     /// 열린 문서를 언어 서버와 맞추고, 서버에서 온 진단·메시지를 반영한다.
     fn sync_language_servers(&mut self) {
         self.hub.set_root(self.tree.as_ref().map(FileTree::root));
+        self.hub.forward_disk_changes();
         for doc in &mut self.docs {
             if let Some(lang) = doc.lang {
                 self.hub.sync(&doc.path, lang, &doc.buffer, &mut doc.lsp);
@@ -4085,6 +4113,8 @@ impl eframe::App for FerriteApp {
         if self.mcp.due() {
             let snapshot = self.mcp_snapshot();
             self.mcp.publish(snapshot);
+        } else if let Some(wait) = self.mcp.until_due() {
+            ctx.request_repaint_after(wait);
         }
         if std::mem::take(&mut self.settings_changed) {
             let (settings, error) = load_settings();
@@ -4578,31 +4608,6 @@ mod tests {
         let file = dir.join("src").join("main.rs");
         fs::write(&file, main).unwrap();
         (dir, file)
-    }
-
-    /// 서버 프로세스가 작업 폴더를 놓을 때까지 잠시 기다린다(Windows는 쓰는 중인 폴더를 못 지운다).
-    /// 시험 폴더를 지운다(앱이 아직 쥐고 있으면 잠깐씩 다시 해 본다). 다른 스레드에서 지우고 10초만
-    /// 기다린다: Windows에서 파일 감시·DB 스레드가 그 폴더의 핸들을 닫는 중에 지우면, 폴더의 다음 항목
-    /// 읽기(`FindNextFileW`)가 드물게(수백 번에 한 번) 돌아오지 않아 시험이 끝나지 않았다.
-    /// 그때는 폴더를 남기고 시험을 끝낸다.
-    fn remove_project(dir: &std::path::Path) {
-        let dir = dir.to_path_buf();
-        let (done, wait) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            for _ in 0..50 {
-                if fs::remove_dir_all(&dir).is_ok() {
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(100));
-            }
-            let _ = done.send(());
-        });
-        if wait
-            .recv_timeout(std::time::Duration::from_secs(10))
-            .is_err()
-        {
-            eprintln!("시험 폴더를 10초 안에 지우지 못해 남깁니다");
-        }
     }
 
     /// 조건이 맞을 때까지(최대 2분) 프레임을 돌린다. 첫 실행 rust-analyzer는 준비가 오래 걸린다.
