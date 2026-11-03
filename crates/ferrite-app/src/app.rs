@@ -4250,7 +4250,7 @@ mod tests {
             "저장 내용: {saved}"
         );
 
-        fs::remove_dir_all(&dir).unwrap();
+        remove_project(&dir);
     }
 
     #[test]
@@ -4302,7 +4302,7 @@ mod tests {
         assert_eq!(harness.state().docs[0].buffer.text(), "X bar X");
         assert!(harness.state().docs[0].is_dirty());
 
-        fs::remove_dir_all(&dir).unwrap();
+        remove_project(&dir);
     }
 
     /// 파일 감시 알림은 OS 스레드에서 비동기로 오므로 조건이 맞을 때까지 프레임을 돌린다.
@@ -4368,7 +4368,7 @@ mod tests {
         assert_eq!(harness.state().docs[0].buffer.text(), "v3");
         assert!(!harness.state().docs[0].external_change);
 
-        fs::remove_dir_all(&dir).unwrap();
+        remove_project(&dir);
     }
 
     #[test]
@@ -4402,7 +4402,7 @@ mod tests {
         assert!(!doc.is_dirty());
         assert_eq!(fs::read_to_string(&file).unwrap(), doc.buffer.text());
 
-        fs::remove_dir_all(&dir).unwrap();
+        remove_project(&dir);
     }
 
     /// 같은 이름이 탭과 트리에 함께 보일 때 트리(왼쪽) 항목을 고른다.
@@ -4487,7 +4487,7 @@ mod tests {
         harness.run();
         assert!(dir.join("c.toml").is_file());
 
-        fs::remove_dir_all(&dir).unwrap();
+        remove_project(&dir);
     }
 
     // 여기부터 rust-analyzer를 실제로 띄우는 테스트는 `run()` 대신 `run_ok()`를 쓴다. 서버 알림
@@ -4581,12 +4581,27 @@ mod tests {
     }
 
     /// 서버 프로세스가 작업 폴더를 놓을 때까지 잠시 기다린다(Windows는 쓰는 중인 폴더를 못 지운다).
+    /// 시험 폴더를 지운다(앱이 아직 쥐고 있으면 잠깐씩 다시 해 본다). 다른 스레드에서 지우고 10초만
+    /// 기다린다: Windows에서 파일 감시·DB 스레드가 그 폴더의 핸들을 닫는 중에 지우면, 폴더의 다음 항목
+    /// 읽기(`FindNextFileW`)가 드물게(수백 번에 한 번) 돌아오지 않아 시험이 끝나지 않았다.
+    /// 그때는 폴더를 남기고 시험을 끝낸다.
     fn remove_project(dir: &std::path::Path) {
-        for _ in 0..50 {
-            if fs::remove_dir_all(dir).is_ok() {
-                break;
+        let dir = dir.to_path_buf();
+        let (done, wait) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for _ in 0..50 {
+                if fs::remove_dir_all(&dir).is_ok() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
             }
-            std::thread::sleep(std::time::Duration::from_millis(100));
+            let _ = done.send(());
+        });
+        if wait
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .is_err()
+        {
+            eprintln!("시험 폴더를 10초 안에 지우지 못해 남깁니다");
         }
     }
 
@@ -4872,7 +4887,7 @@ mod tests {
         }
 
         drop(harness);
-        fs::remove_dir_all(&dir).unwrap();
+        remove_project(&dir);
     }
 
     #[test]
@@ -5374,7 +5389,7 @@ mod tests {
         assert!(harness.query_by_label("groupId").is_none());
         harness.get_by_label("내려받아 만들기 (3.7MB)");
         drop(harness);
-        let _ = fs::remove_dir_all(&dir);
+        remove_project(&dir);
     }
 
     /// `FERRITE_EGOV_VSIX=<vsix 절대 경로> cargo test -p ferrite-app 공식_템플릿 -- --ignored`
@@ -6665,7 +6680,7 @@ mod tests {
         assert_eq!(harness.state().docs[0].buffer.text(), "HELLO WORLD\nhello");
         // 문서가 바뀌면 패널을 다시 그린다(찾을 글은 플러그인에 남는다)
         harness.get_by_label("'hello': 1곳");
-        fs::remove_dir_all(&dir).unwrap();
+        remove_project(&dir);
     }
 
     #[test]
@@ -6727,7 +6742,7 @@ mod tests {
         harness.run();
         assert!(harness.state().docs[0].textmate.is_none());
         harness.get_by_label("일반 텍스트");
-        fs::remove_dir_all(&dir).unwrap();
+        remove_project(&dir);
     }
 
     #[test]
