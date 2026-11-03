@@ -1262,9 +1262,9 @@
     - 실제 HTTP(`ferrite-mcp` 시험): 토큰 없음·틀림 401, 다른 Origin 403, localhost Origin 허용, 판 협상, 세션 머리, 알림 202, 도구 다섯과 읽기 전용 표시, 저장 안 한 내용·줄 범위·경로 끝, 열리지 않은 파일은 `isError`, 진단 거르기, 디버거 상태, 모르는 도구·메서드, 404·405, 버리면 더 듣지 않음
     - 창 시험(kittest): MCP를 켜고 에디터에 친 글(저장 안 함)을 에이전트처럼 HTTP로 읽고, 저장 안 한 변경·언어·커서, 끄면 더 듣지 않음
     - 실제 앱(Windows, 릴리스 빌드, `mcp_server = true`): 127.0.0.1:47711에서 initialize 200(세션 머리)·알림 202·도구 다섯·열린 파일·활성 에디터·`read_open_file` 2줄(한글)을 받고 토큰 없이는 401. 이때 응답에 문자 집합이 없어 PowerShell이 한글을 잘못 읽는 것을 보고 `charset=utf-8`을 붙였다.
-  - 확인하지 못한 것: 실제 Claude Code로는 묻지 못했다(이 PC의 Claude Code 로그인이 만료됨). Phase 10 검증에서 한다.
+  - 실제 Claude Code로는 Phase 10 검증에서 확인했다(아래).
 - [x] 10-2 ACP 클라이언트(대화 패널·diff) — 큼
-  - 결정(사용자): 내장 에이전트(Gemini CLI `gemini --acp`, Claude Code `npx -y @zed-industries/claude-code-acp`)와 settings.toml의 `[[agent]]`(name·command·args·env), 파일 쓰기는 diff를 보고 [받기]로 버퍼에 적용(저장은 사용자가), 터미널 기능은 주지 않는다, 확인은 가짜 에이전트와 Gemini CLI.
+  - 결정(사용자): 내장 에이전트(Gemini CLI `gemini --acp`, Claude Code `npx -y @agentclientprotocol/claude-agent-acp`, 예전 이름 `@zed-industries/claude-code-acp`는 더 고치지 않는다)와 settings.toml의 `[[agent]]`(name·command·args·env), 파일 쓰기는 diff를 보고 [받기]로 버퍼에 적용(저장은 사용자가), 터미널 기능은 주지 않는다, 확인은 가짜 에이전트와 Gemini CLI.
   - 클라이언트(`ferrite-acp`): 에이전트를 프로젝트 루트에서 띄워(PATH의 `.cmd`도 찾고 콘솔 창은 숨긴다) 표준 입출력으로 JSON-RPC를 줄마다 하나씩 주고받는다. `initialize`(판 1, `fs.readTextFile`·`fs.writeTextFile`, `terminal: false`) → `session/new`(cwd, MCP 서버) → `session/prompt`, 멈춤은 `session/cancel` 알림.
     - 받는 것: `session/update`(답 글·생각·사용자 글 조각, `tool_call`·`tool_call_update`(diff·글 내용), `plan`), 요청 `session/request_permission`·`fs/read_text_file`·`fs/write_text_file`. 모르는 요청(`terminal/*` 등)은 -32601.
     - `session/new`의 거절은 글에 인증 말이 있을 때만 로그인 안내를 붙인다. 에이전트가 끝나면 표준 오류의 끝 줄을 알린다.
@@ -1278,8 +1278,16 @@
     - 단위(가짜 에이전트, 같은 프로세스의 파이프): 시작 순서와 보내는 능력, HTTP MCP를 못 받는 에이전트에는 표준 입출력 서버만, 대화 조각·생각·도구 호출(diff·글)·고침 합치기·계획, 읽기·권한·쓰기 답하기와 거절, 모르는 메서드, 멈춤, 에이전트가 끝남, 인증 거절, 없는 프로그램
     - 창 시험(kittest): 가짜 에이전트와 대화해 읽기 요청에 저장 안 한 버퍼로 답하고, 권한 단추, diff 카드의 지운 줄·더한 줄, [받기]로 버퍼에 적용(저장 전, 디스크 그대로), 프로젝트 밖 쓰기 거절
     - 실제 Gemini CLI 0.42.0(`--acp`): 프로그램 찾기(`.cmd`)·띄우기·`initialize`까지 맞았으나, `session/new`에서 Google이 "This client is no longer supported for Gemini Code Assist for individuals"로 거절해(이 계정 종류의 서비스 정책) 대화는 확인하지 못했다. 이때 로그인 안내를 잘못 붙이는 것을 보고 고쳤다.
-  - 확인하지 못한 것: 실제 에이전트와의 대화·diff(Gemini는 계정 정책, Claude Code는 이 PC의 로그인 만료). Phase 10 검증에서 Claude Code로 한다.
-- [ ] 3개 OS 검증
+  - 실제 에이전트와의 대화·diff는 Phase 10 검증에서 Claude Code로 확인했다(아래).
+- [x] 3개 OS 검증(2026-11-03)
+  - 결정(사용자): 이 PC의 Claude Code에 로그인해 실제로 확인한다. 사용자 계정으로 MCP 한 번, ACP 몇 번 묻고, ACP 어댑터(npm `@agentclientprotocol/claude-agent-acp` 0.100.0, 풀면 약 390MB)를 npx로 받는다.
+  - MCP(Claude Code 2.1.317, 릴리스 빌드, `mcp_server = true`): `claude -p`에 `--mcp-config`(HTTP·Bearer 토큰)로 Ferrite를 붙여 물으니 `list_open_files`·`get_active_editor`·`read_open_file`를 불러 열린 파일(Board.java, Java, 5줄, 저장 안 한 변경 없음)·커서(1줄 1열)·2번째 줄 내용을 맞게 답했다.
+  - ACP(같은 Claude Code, 어댑터 0.100.0): `ferrite-acp`의 실제 시험(`tests/gemini.rs`의 `claude_code…`, 기본으로는 돌지 않음)으로 세션이 2초 만에 열리고, 파일을 고쳐 달라고 하면 읽기·편집 도구 호출 → diff 1개가 붙은 권한 요청(allow_once·allow_always·reject_once) → 한 번 허락 → 파일이 고쳐지고 end_turn. 에이전트를 닫으면 0.4초 안에 손자 프로세스(node·claude)까지 끝나 폴더가 풀린다.
+    - 알게 된 것: 이 어댑터 판은 `fs/read_text_file`·`fs/write_text_file`를 부르지 않는다. Claude Code가 자기 도구로 디스크를 직접 읽고 쓰고, 편집 diff는 권한 요청에 붙여 보인다. 그래서 Claude Code에서는 diff 카드의 [받기] 대신 권한 카드의 diff를 보고 허락하면 에이전트가 디스크에 쓰고, Ferrite는 파일 감시로 열린 문서를 다시 읽는다(저장 안 한 변경이 있으면 충돌로 알린다). 에이전트가 저장 안 한 버퍼를 보려면 MCP(`read_open_file`)를 쓴다.
+    - 알게 된 것: Claude Code의 권한 모드(사용자 설정 `permissions.defaultMode`)가 `auto`·`acceptEdits`면 묻지 않고 고친다. 이 PC의 설정이 `auto`라 처음 시험에서는 권한 요청 없이 고쳐졌다. 시험은 시험 폴더의 `.claude/settings.local.json`에 `default`를 두어 묻게 하고, 두 길(클라이언트에 쓰기를 맡김, 권한 뒤 직접 씀)을 다 받는다.
+  - 내장 Claude Code 항목을 바뀐 npm 이름으로 고쳤다.
+  - CI 3개 OS 전체(실행 41561435959, `ff7522c`) 통과.
+  - 확인하지 못한 것: 실제 에이전트와는 `ferrite-acp`로 대화했고 앱의 에이전트 창으로는 하지 않았다(창은 가짜 에이전트 창 시험으로 확인). MCP의 진단·디버거 상태는 실제 HTTP 시험과 창 시험으로만 확인했다. 실제 에이전트 확인은 Windows뿐이다.
 
 ### 백로그 — Phase 미정
 
