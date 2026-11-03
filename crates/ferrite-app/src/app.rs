@@ -3979,7 +3979,13 @@ impl egui_tiles::Behavior<Pane> for Dock<'_> {
             Pane::Agent => {
                 let root = app.tree.as_ref().map(|t| t.root().to_path_buf());
                 let mcp = app.mcp.agent_server();
-                if let Some(action) = app.agent.ui(ui, root.as_deref(), &app.settings.agents, mcp) {
+                if let Some(action) = app.agent.ui(
+                    ui,
+                    root.as_deref(),
+                    &app.settings.agents,
+                    &app.settings.agent_mode,
+                    mcp,
+                ) {
                     app.agent_action(action);
                 }
             }
@@ -7962,7 +7968,7 @@ mod tests {
     }
 
     #[test]
-    fn 에이전트와_대화하고_읽기는_버퍼로_답하고_쓰기는_diff를_받아_버퍼에_적용한다() {
+    fn 에이전트와_대화하고_모드를_맞추며_읽기는_버퍼로_답하고_쓰기는_diff를_받아_버퍼에_적용한다() {
         use std::io::{BufRead, BufReader, Write};
 
         use egui::accesskit::Role;
@@ -7998,8 +8004,36 @@ mod tests {
             let mut send = |message: Value| writeln!(agent_out, "{message}").unwrap();
             let init = next();
             send(json!({ "jsonrpc": "2.0", "id": init["id"], "result": { "protocolVersion": 1 } }));
+            let options = |mode: &str, model: &str| {
+                json!([
+                    { "id": "mode", "name": "Mode", "category": "mode", "currentValue": mode,
+                      "options": [{ "value": "default", "name": "Default" }, { "value": "auto", "name": "Auto" }] },
+                    { "id": "model", "name": "Model", "category": "model", "currentValue": model,
+                      "options": [{ "value": "m1", "name": "M1" }, { "value": "m2", "name": "M2" }] },
+                ])
+            };
             let new = next();
-            send(json!({ "jsonrpc": "2.0", "id": new["id"], "result": { "sessionId": "s1" } }));
+            send(
+                json!({ "jsonrpc": "2.0", "id": new["id"], "result": { "sessionId": "s1", "configOptions": options("auto", "m1") } }),
+            );
+            // 설정의 처음 모드(agent_mode)로 바꾼다.
+            let mode = next();
+            assert_eq!(
+                mode["params"],
+                json!({ "sessionId": "s1", "configId": "mode", "value": "default" })
+            );
+            send(
+                json!({ "jsonrpc": "2.0", "id": mode["id"], "result": { "configOptions": options("default", "m1") } }),
+            );
+            // 창에서 고른 모델
+            let model = next();
+            assert_eq!(
+                model["params"],
+                json!({ "sessionId": "s1", "configId": "model", "value": "m2" })
+            );
+            send(
+                json!({ "jsonrpc": "2.0", "id": model["id"], "result": { "configOptions": options("default", "m2") } }),
+            );
             let prompt = next();
             assert_eq!(prompt["params"]["prompt"][0]["text"], "크기를 20으로");
             send(
@@ -8016,7 +8050,8 @@ mod tests {
             );
             send(
                 json!({ "jsonrpc": "2.0", "id": 101, "method": "session/request_permission", "params": { "sessionId": "s1",
-                "toolCall": { "toolCallId": "t1", "title": "Board.java 고치기" },
+                "toolCall": { "toolCallId": "t1", "title": "Board.java 고치기", "content": [{ "type": "diff", "path": target,
+                    "oldText": "// 메모 class Board {\n    int size = 10;\n}\n", "newText": "// 메모 class Board {\n    int size = 20;\n}\n" }] },
                 "options": [{ "optionId": "ok", "name": "허락", "kind": "allow_once" }, { "optionId": "no", "name": "거절", "kind": "reject_once" }] } }),
             );
             let permission = next();
@@ -8049,10 +8084,17 @@ mod tests {
             app.agent.connect(
                 ferrite_acp::Agent::with_streams(client_in, client_out, &root, Vec::new()),
                 "가짜 에이전트",
+                "default",
             );
             dock::show(&mut app.layout, Pane::Agent);
         }
         wait_for_label(&mut harness, "세션이 열렸습니다");
+        harness
+            .get_by_role_and_label(Role::ComboBox, "Model")
+            .click();
+        harness.run();
+        harness.get_by_label("M2").click();
+        harness.run();
         harness
             .get_by_role_and_label(Role::MultilineTextInput, "보낼 글")
             .focus();
@@ -8064,6 +8106,9 @@ mod tests {
         harness.get_by_label("보내기").click();
         wait_for_label(&mut harness, "권한 요청: Board.java 고치기");
         harness.get_by_label("읽어 볼게요");
+        // 권한 요청에 붙은 diff를 보인다(디스크에 직접 쓰는 에이전트는 여기서만 확인한다).
+        harness.get_by_label_contains("고칠 파일:");
+        harness.get_by_label("+     int size = 20;");
         harness.get_by_label("허락").click();
         wait_for_label(&mut harness, "파일 쓰기 제안");
         harness.get_by_label("-     int size = 10;");

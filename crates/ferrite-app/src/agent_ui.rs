@@ -1,6 +1,7 @@
 //! "에이전트" 창(ACP): 코딩 에이전트를 띄워 대화한다. 답 글·생각·도구 호출·계획을 보이고, 권한 요청에는
-//! 단추로 답한다. 에이전트가 파일을 쓰려고 하면 diff를 보이고 [받기]를 눌러야 에디터 버퍼에 적용한다
-//! (저장은 사용자가 한다). 파일 읽기 요청은 앱이 열린 버퍼(저장 안 한 내용)나 디스크에서 답한다.
+//! 단추로 답한다(고칠 diff가 붙으면 보인다). 에이전트가 Ferrite에 파일 쓰기를 맡기면 diff를 보이고
+//! [받기]를 눌러야 에디터 버퍼에 적용한다(저장은 사용자가 한다). 파일 읽기 요청은 앱이 열린 버퍼
+//! (저장 안 한 내용)나 디스크에서 답한다. 에이전트의 고르기 설정(권한 모드·모델 등)은 창 위에서 바꾼다.
 
 use std::path::{Path, PathBuf};
 
@@ -33,6 +34,8 @@ struct PermissionAsk {
     id: Value,
     tool: ToolCall,
     options: Vec<PermissionOption>,
+    /// 고칠 파일과 diff 줄(받을 때 한 번 계산한다).
+    diffs: Vec<(PathBuf, Vec<(char, String)>)>,
 }
 
 struct WriteAsk {
@@ -72,6 +75,8 @@ pub struct AgentPanel {
     chosen: usize,
     agent: Option<Agent>,
     name: String,
+    /// 세션이 열리면 맞출 권한 모드(설정 `agent_mode`, 맞춘 뒤 비운다).
+    start_mode: String,
     entries: Vec<Entry>,
     input: String,
     busy: bool,
@@ -101,22 +106,58 @@ impl AgentPanel {
     }
 
     /// 에이전트를 띄운다(프로젝트 루트에서). `mcp`는 세션에 넘길 MCP 서버(Ferrite의 MCP).
-    fn start(&mut self, setting: &AgentSetting, root: &Path, mcp: Vec<Value>) {
+    fn start(&mut self, setting: &AgentSetting, root: &Path, mcp: Vec<Value>, mode: &str) {
         let env: Vec<(String, String)> = setting.env.clone().into_iter().collect();
         match Agent::spawn(&setting.command, &setting.args, &env, root, mcp) {
             Ok(agent) => {
-                self.connect(agent, &setting.name);
+                self.connect(agent, &setting.name, mode);
             }
             Err(e) => self.notice(e, true),
         }
     }
 
-    /// 열린 에이전트를 붙인다(시험은 가짜 에이전트를 붙인다).
-    pub fn connect(&mut self, agent: Agent, name: &str) {
+    /// 열린 에이전트를 붙인다(시험은 가짜 에이전트를 붙인다). `mode`는 세션이 열리면 맞출 권한 모드.
+    pub fn connect(&mut self, agent: Agent, name: &str, mode: &str) {
         self.agent = Some(agent);
         self.name = name.to_owned();
+        self.start_mode = mode.trim().to_owned();
         self.busy = false;
         self.notice(format!("{name}을(를) 띄웠습니다. 세션을 여는 중…"), false);
+    }
+
+    /// 세션이 열리면 설정의 권한 모드로 바꾼다. 에이전트에 없는 모드면 알리고 그대로 둔다.
+    fn apply_start_mode(&mut self) {
+        let want = std::mem::take(&mut self.start_mode);
+        let Some(agent) = &mut self.agent else {
+            return;
+        };
+        if want.is_empty() {
+            return;
+        }
+        let mode = agent
+            .config()
+            .iter()
+            .find(|o| o.category.as_deref() == Some("mode"));
+        let problem = match mode {
+            None => Some(format!(
+                "에이전트가 권한 모드를 고르게 하지 않아 agent_mode = \"{want}\"를 쓰지 않았습니다"
+            )),
+            Some(mode) if mode.current == want => None,
+            Some(mode) if mode.values.iter().any(|v| v.value == want) => {
+                let id = mode.id.clone();
+                agent.set_config(&id, &want).err()
+            }
+            Some(mode) => {
+                let have: Vec<&str> = mode.values.iter().map(|v| v.value.as_str()).collect();
+                Some(format!(
+                    "에이전트에 \"{want}\" 모드가 없어 그대로 둡니다(있는 것: {})",
+                    have.join(", ")
+                ))
+            }
+        };
+        if let Some(problem) = problem {
+            self.notice(problem, true);
+        }
     }
 
     /// 에이전트를 끝낸다(남은 요청은 물린다).
@@ -179,7 +220,10 @@ impl AgentPanel {
         let mut actions = Vec::new();
         for event in events {
             match event {
-                Event::Ready => self.notice("세션이 열렸습니다. 글을 보내세요.", false),
+                Event::Ready => {
+                    self.notice("세션이 열렸습니다. 글을 보내세요.", false);
+                    self.apply_start_mode();
+                }
                 Event::Message(kind, text) => match self.entries.last_mut() {
                     Some(Entry::Message(last, body)) if *last == kind => body.push_str(&text),
                     _ => self.entries.push(Entry::Message(kind, text)),
@@ -201,7 +245,23 @@ impl AgentPanel {
                     self.entries.push(Entry::Plan(entries));
                 }
                 Event::Permission { id, tool, options } => {
-                    self.permissions.push(PermissionAsk { id, tool, options });
+                    let diffs = tool
+                        .diffs
+                        .iter()
+                        .map(|d| {
+                            let old = d.old_text.as_deref().unwrap_or_default();
+                            (
+                                d.path.clone(),
+                                ferrite_core::git::diff_lines(old, &d.new_text),
+                            )
+                        })
+                        .collect();
+                    self.permissions.push(PermissionAsk {
+                        id,
+                        tool,
+                        options,
+                        diffs,
+                    });
                 }
                 Event::ReadFile {
                     id,
@@ -270,12 +330,14 @@ impl AgentPanel {
         }
     }
 
-    /// 창을 그린다. `root`가 없으면 시작할 수 없다. `mcp`는 세션에 넘길 Ferrite MCP 서버.
+    /// 창을 그린다. `root`가 없으면 시작할 수 없다. `mode`는 설정의 처음 권한 모드(`agent_mode`),
+    /// `mcp`는 세션에 넘길 Ferrite MCP 서버.
     pub fn ui(
         &mut self,
         ui: &mut egui::Ui,
         root: Option<&Path>,
         settings: &[AgentSetting],
+        mode: &str,
         mcp: Option<Value>,
     ) -> Option<AgentAction> {
         let choices = Self::choices(settings);
@@ -301,7 +363,7 @@ impl AgentPanel {
                     .clicked()
                     && let (Some(root), Some(choice)) = (root, choices.get(self.chosen))
                 {
-                    self.start(choice, root, mcp.into_iter().collect());
+                    self.start(choice, root, mcp.into_iter().collect(), mode);
                 }
             } else if ui.button("끝내기").clicked() {
                 self.stop();
@@ -315,9 +377,12 @@ impl AgentPanel {
                 self.entries.clear();
             }
         });
+        self.config_ui(ui);
         if self.agent.is_none() && self.entries.is_empty() {
             ui.weak(
-                "에이전트는 프로젝트 폴더에서 돌고, 파일을 쓰려고 하면 diff를 보이고 받을지 묻습니다. \
+                "에이전트는 프로젝트 폴더에서 돌고, 파일을 고치기 전에 diff를 보이고 묻습니다. \
+                 묻는지는 에이전트의 권한 모드에 달려 있어 세션이 열리면 창 위에서 고르고, \
+                 처음 모드는 settings.toml의 agent_mode로 정합니다. \
                  Ferrite는 에이전트를 설치하거나 로그인하지 않습니다(터미널에서 한 번 실행해 로그인하세요). \
                  다른 ACP 에이전트는 settings.toml의 [[agent]]로 더합니다.",
             );
@@ -374,6 +439,48 @@ impl AgentPanel {
         action
     }
 
+    /// 에이전트의 고르기 설정(권한 모드·모델 등)을 에이전트가 준 차례대로 보이고 바꾼다.
+    fn config_ui(&mut self, ui: &mut egui::Ui) {
+        let Some(agent) = self.agent.as_mut().filter(|a| a.is_ready()) else {
+            return;
+        };
+        if agent.config().is_empty() {
+            return;
+        }
+        let mut change = None;
+        ui.horizontal_wrapped(|ui| {
+            for option in agent.config() {
+                let label = ui.label(&option.name);
+                let current = option.values.iter().find(|v| v.value == option.current);
+                let combo = egui::ComboBox::from_id_salt(("agent_config", &option.id))
+                    .selected_text(current.map_or(option.current.as_str(), |v| v.name.as_str()))
+                    .show_ui(ui, |ui| {
+                        for value in &option.values {
+                            let item =
+                                ui.selectable_label(value.value == option.current, &value.name);
+                            let item = match &value.description {
+                                Some(text) => item.on_hover_text(text),
+                                None => item,
+                            };
+                            if item.clicked() && value.value != option.current {
+                                change = Some((option.id.clone(), value.value.clone()));
+                            }
+                        }
+                    })
+                    .response
+                    .labelled_by(label.id);
+                if let Some(text) = &option.description {
+                    combo.on_hover_text(text);
+                }
+            }
+        });
+        if let Some((id, value)) = change
+            && let Err(e) = agent.set_config(&id, &value)
+        {
+            self.notice(e, true);
+        }
+    }
+
     /// 권한 요청과 쓰기 제안 카드. 받은 쓰기는 앱이 적용한다.
     fn asks_ui(&mut self, ui: &mut egui::Ui) -> Option<AgentAction> {
         let mut answered = None;
@@ -386,8 +493,9 @@ impl AgentPanel {
                 if let Some(text) = &ask.tool.text {
                     ui.label(text);
                 }
-                for diff in &ask.tool.diffs {
-                    ui.weak(format!("고칠 파일: {}", diff.path.display()));
+                for (path, lines) in &ask.diffs {
+                    ui.weak(format!("고칠 파일: {}", path.display()));
+                    diff_ui(ui, lines);
                 }
                 ui.horizontal_wrapped(|ui| {
                     for option in &ask.options {

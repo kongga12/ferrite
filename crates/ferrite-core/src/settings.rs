@@ -38,6 +38,9 @@ keymap = "default"
 
 # AI 에이전트(ACP). Gemini CLI·Claude Code는 기본으로 있고, 다른 ACP 에이전트를 [[agent]]로 더한다.
 # Ferrite는 에이전트를 설치하거나 로그인하지 않는다(터미널에서 한 번 실행해 로그인한다).
+# agent_mode: 세션을 열 때 바꿀 권한 모드. 비우면 에이전트 자기 설정(Claude Code는 permissions.defaultMode)을
+# 따른다. "default"는 Claude Code·Gemini CLI에서 고치기 전에 묻는 모드다. 에이전트 창 위에서 언제든 바꾼다.
+agent_mode = ""
 # [[agent]]
 # name = "내 에이전트"
 # command = "my-agent"
@@ -108,6 +111,8 @@ pub struct Settings {
     /// 사용자가 더한 ACP 에이전트(`[[agent]]`).
     #[serde(rename = "agent")]
     pub agents: Vec<AgentSetting>,
+    /// 세션을 열 때 바꿀 에이전트 권한 모드(빈 글이면 에이전트 설정 그대로).
+    pub agent_mode: String,
 }
 
 /// ACP 에이전트 하나(`[[agent]]`).
@@ -138,6 +143,7 @@ impl Default for Settings {
             keymap: Keymap::Default,
             keys: BTreeMap::new(),
             agents: Vec::new(),
+            agent_mode: String::new(),
         }
     }
 }
@@ -212,6 +218,12 @@ mod tests {
         .unwrap();
         assert_eq!(s.agents[0].name, "내 에이전트");
         assert_eq!(s.agents[0].args, ["--acp"]);
+        assert_eq!(
+            Settings::parse("agent_mode = \"default\"")
+                .unwrap()
+                .agent_mode,
+            "default"
+        );
         assert!(
             Settings::parse("[[agent]]\nname = \"a\"").is_err(),
             "command 빠짐"
