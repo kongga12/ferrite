@@ -3,6 +3,8 @@
 //! `session/new`를 차례로 보내고, `session/prompt`로 대화한다. 에이전트가 보내는 것:
 //! - `session/update`(알림): 답 글·생각·도구 호출(diff 포함)·계획.
 //! - `session/request_permission`·`fs/read_text_file`·`fs/write_text_file`(요청): 앱이 답한다.
+//! - 고르기 설정(권한 모드·모델 등): 세션을 열 때와 `config_option_update`로 온다. 예전 판의 세션
+//!   모드(`modes`)만 주는 에이전트는 그것을 설정 하나로 보인다.
 //!
 //! 터미널 기능은 주지 않는다(에이전트가 자기 셸 도구를 쓰고 권한 요청으로 묻는다).
 
@@ -78,6 +80,26 @@ pub struct PermissionOption {
     pub kind: String,
 }
 
+/// 고르기 설정의 값 하나.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConfigValue {
+    pub value: String,
+    pub name: String,
+    pub description: Option<String>,
+}
+
+/// 에이전트의 고르기 설정(권한 모드·모델·생각 깊이 등). 에이전트가 준 차례대로 보인다.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConfigOption {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    /// mode·model·thought_level 등(없을 수 있다).
+    pub category: Option<String>,
+    pub current: String,
+    pub values: Vec<ConfigValue>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PlanEntry {
     pub content: String,
@@ -127,6 +149,9 @@ enum Pending {
     Initialize,
     NewSession,
     Prompt,
+    SetConfig,
+    /// 예전 판의 `session/set_mode`(바꿀 모드). 응답에 상태가 없어 성공하면 이것으로 바꾼다.
+    SetMode(String),
 }
 
 pub struct Agent {
@@ -135,6 +160,9 @@ pub struct Agent {
     next_id: i64,
     pending: HashMap<i64, Pending>,
     session: Option<String>,
+    config: Vec<ConfigOption>,
+    /// `config`가 예전 판의 세션 모드에서 왔다(바꿀 때 `session/set_mode`).
+    legacy_modes: bool,
     cwd: PathBuf,
     mcp_servers: Vec<Value>,
     child: Option<Child>,
@@ -206,6 +234,8 @@ impl Agent {
             next_id: 1,
             pending: HashMap::new(),
             session: None,
+            config: Vec::new(),
+            legacy_modes: false,
             cwd: cwd.to_path_buf(),
             mcp_servers,
             child: None,
@@ -262,6 +292,33 @@ impl Agent {
             json!({ "sessionId": session, "prompt": [{ "type": "text", "text": text }] }),
             Pending::Prompt,
         );
+        Ok(())
+    }
+
+    /// 에이전트의 고르기 설정(지금 값 포함). 세션을 열기 전이나 주지 않는 에이전트는 비었다.
+    pub fn config(&self) -> &[ConfigOption] {
+        &self.config
+    }
+
+    /// 고르기 설정을 바꾼다. 바뀐 값은 에이전트가 답하면 [`Agent::config`]에 들어온다.
+    pub fn set_config(&mut self, id: &str, value: &str) -> Result<(), String> {
+        let session = self
+            .session
+            .clone()
+            .ok_or("세션이 아직 열리지 않았습니다")?;
+        if self.legacy_modes {
+            self.request(
+                "session/set_mode",
+                json!({ "sessionId": session, "modeId": value }),
+                Pending::SetMode(value.to_owned()),
+            );
+        } else {
+            self.request(
+                "session/set_config_option",
+                json!({ "sessionId": session, "configId": id, "value": value }),
+                Pending::SetConfig,
+            );
+        }
         Ok(())
     }
 
@@ -354,7 +411,20 @@ impl Agent {
             // 알림
             (Some(method), None) => {
                 if method == "session/update" {
-                    events.extend(session_update(&message["params"]["update"]));
+                    let update = &message["params"]["update"];
+                    match update["sessionUpdate"].as_str() {
+                        Some("config_option_update") => {
+                            self.config = config_options(&update["configOptions"]);
+                        }
+                        Some("current_mode_update") => {
+                            if self.legacy_modes
+                                && let Some(mode) = self.config.first_mut()
+                            {
+                                mode.current = text(&update["currentModeId"]);
+                            }
+                        }
+                        _ => events.extend(session_update(update)),
+                    }
                 }
             }
             // 우리 요청의 응답
@@ -374,6 +444,9 @@ impl Agent {
                             "에이전트에 로그인해야 합니다(터미널에서 에이전트를 한 번 실행해 로그인하세요): {text}"
                         ),
                         Pending::NewSession => format!("에이전트가 세션을 열지 않았습니다: {text}"),
+                        Pending::SetConfig | Pending::SetMode(_) => {
+                            format!("설정을 바꾸지 못했습니다: {text}")
+                        }
                         _ => text.to_owned(),
                     }));
                     if matches!(pending, Pending::Prompt) {
@@ -401,6 +474,14 @@ impl Agent {
                     }
                     Pending::NewSession => {
                         self.session = result["sessionId"].as_str().map(str::to_owned);
+                        // 둘 다 주면 새 판의 설정을 쓴다(규격).
+                        self.config = config_options(&result["configOptions"]);
+                        if self.config.is_empty()
+                            && let Some(modes) = modes_option(&result["modes"])
+                        {
+                            self.config.push(modes);
+                            self.legacy_modes = true;
+                        }
                         events.push(match &self.session {
                             Some(_) => Event::Ready,
                             None => Event::Error("에이전트가 세션 번호를 주지 않았습니다".into()),
@@ -412,6 +493,16 @@ impl Agent {
                             .unwrap_or("end_turn")
                             .to_owned(),
                     )),
+                    Pending::SetConfig => {
+                        if result["configOptions"].is_array() {
+                            self.config = config_options(&result["configOptions"]);
+                        }
+                    }
+                    Pending::SetMode(mode) => {
+                        if let Some(option) = self.config.first_mut() {
+                            option.current = mode;
+                        }
+                    }
                 }
             }
             (None, None) => {}
@@ -483,6 +574,58 @@ fn tool_call(value: &Value) -> ToolCall {
         call.text = Some(texts.join("\n"));
     }
     call
+}
+
+/// `configOptions`. 고르기(`select`)만 읽고 묶음(group)은 펼친다(불린은 받는다고 알리지 않았다).
+fn config_options(options: &Value) -> Vec<ConfigOption> {
+    options
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|o| o["type"].as_str().unwrap_or("select") == "select")
+        .map(|o| ConfigOption {
+            id: text(&o["id"]),
+            name: text(&o["name"]),
+            description: some(&o["description"]),
+            category: some(&o["category"]),
+            current: text(&o["currentValue"]),
+            values: o["options"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .flat_map(|v| {
+                    v["options"]
+                        .as_array()
+                        .map_or(std::slice::from_ref(v), Vec::as_slice)
+                })
+                .map(|v| ConfigValue {
+                    value: text(&v["value"]),
+                    name: text(&v["name"]),
+                    description: some(&v["description"]),
+                })
+                .collect(),
+        })
+        .collect()
+}
+
+/// 예전 판의 세션 모드(`modes`)를 설정 하나로.
+fn modes_option(modes: &Value) -> Option<ConfigOption> {
+    Some(ConfigOption {
+        id: "mode".into(),
+        name: "모드".into(),
+        description: None,
+        category: Some("mode".into()),
+        current: text(&modes["currentModeId"]),
+        values: modes["availableModes"]
+            .as_array()?
+            .iter()
+            .map(|m| ConfigValue {
+                value: text(&m["id"]),
+                name: text(&m["name"]),
+                description: some(&m["description"]),
+            })
+            .collect(),
+    })
 }
 
 fn session_update(update: &Value) -> Option<Event> {

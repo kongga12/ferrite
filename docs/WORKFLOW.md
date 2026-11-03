@@ -1343,6 +1343,18 @@
     - 가짜 어댑터(ferrite-dap): 띄운 어댑터가 정해 둔 주소를 늦게 열어도 붙고, 주소를 열지 않고 끝나면 기다리지 않고 실패
     - 실제 앱(Windows, 릴리스 빌드): 코드 생성 템플릿(`jsp_list.hbs`)이 Handlebars로 열려 `{{ }}`·`{{#if}}`·`{{#each}}`·변수·HTML 태그가 칠해지는 것을 화면으로 확인했다.
   - 확인하지 못한 것: 실제 제조사 어댑터로는 돌려 보지 않았다(가짜 어댑터와 시험으로 연결 방식 셋을 확인).
+- [x] 에이전트 권한 모드·고르기 설정(2026-11-03) — 작음
+  - 까닭: Phase 10 검증에서 Claude Code는 사용자 설정의 권한 모드(`auto`·`acceptEdits`)면 묻지 않고 디스크에 바로 고쳤다. Ferrite에서 에이전트의 모드를 보고 바꾼다.
+  - 결정(사용자): settings.toml의 `agent_mode` 하나로 처음 모드를 정하고 창에서 언제든 바꾼다. 창에는 에이전트가 주는 고르기 설정(모드·모델·생각 깊이 등)을 모두 보인다.
+  - 클라이언트(`ferrite-acp`): `session/new`의 `configOptions`(고르기만, 묶음은 펼친다. 불린은 받는다고 알리지 않았다)를 읽고 `session/set_config_option`으로 바꾼다. 응답과 `config_option_update` 알림은 설정 전체로 바꾼다. 둘 다 주면 `configOptions`를 쓰고(규격), 예전 판의 `modes`만 주는 에이전트는 "모드" 설정 하나로 보여 `session/set_mode`로 바꾸고 `current_mode_update`를 따른다. 거절되면 "설정을 바꾸지 못했습니다"를 알리고 그대로 둔다.
+  - 창: 세션이 열리면 대화 위에 설정마다 이름과 고르기 칸(값의 설명은 마우스를 올리면)을 에이전트가 준 차례대로 보인다.
+    - `agent_mode`(기본 빈 글이면 에이전트 설정 그대로): 세션이 열리면 category가 `mode`인 설정을 그 값으로 바꾼다. 그 모드가 없으면 있는 값들을 알리고 그대로 둔다. Claude Code·Gemini CLI(0.42에서 확인)는 `default`가 고치기 전에 묻는 모드다.
+    - 권한 카드가 고칠 파일 이름만 보이던 것을 diff 줄(앞뒤 2줄)까지 보이게 했다. 디스크에 직접 쓰는 에이전트(Claude Code)는 여기서만 고칠 내용을 본다.
+  - 검증
+    - 가짜 에이전트(파이프): 설정 읽기(불린 빼기·묶음 펼치기·설명), 바꾸기 요청과 응답, 에이전트가 보낸 바뀜, 거절, 두 꼴을 다 주면 새 판, 예전 판 모드의 `set_mode`와 `current_mode_update`
+    - 창 시험(kittest): `agent_mode = "default"`로 세션을 열면 모드를 바꾸는 요청을 보내고, 고르기 칸으로 모델을 바꾸며, 권한 카드에 diff 줄이 보인다
+    - 실제 Claude Code(2.1.317, 어댑터 0.100.0, `ferrite-acp` 실제 시험 `claude_code의…`, 기본으로는 돌지 않음, 대화 없음): 세션을 열면 `configOptions`로 Mode(category `mode`: default·acceptEdits·plan·auto·bypassPermissions)·Model·Effort(`thought_level`)·Fast mode·Ultracode(`model_config`, on·off)·Agent(category 없음, 사용자의 서브에이전트)를 준다. 이 PC 설정대로 `auto`이던 모드를 `default`로 바꾸는 데 2.4초. 받은 직후 첫 실행에서는 닫은 뒤 15초 넘게 프로세스가 남았고, 이후 세 번은 2초 안에 끝났다.
+  - 확인하지 못한 것: 실제 에이전트와는 `ferrite-acp`로 확인했고 앱의 에이전트 창으로는 보지 않았다(창은 가짜 에이전트 창 시험으로 확인).
 
 - 살폈지만 넣지 않은 것: 임베디드(MCU 플래시·시리얼 모니터·장비 설정 파일), 프레임워크별 지원(React·Vue·Angular 등, JS·TS 언어 서버로 기본은 된다), 린터 개별 연동(언어 서버나 저장 시 작업으로 된다), 원격 개발·컨테이너·SFTP 배포, 로컬 AI 완성 모델, 계정 기반 설정 동기화. egov 개발과 거리가 멀거나 크기에 비해 쓰임이 적다.
 

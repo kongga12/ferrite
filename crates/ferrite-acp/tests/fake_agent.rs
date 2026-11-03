@@ -6,7 +6,9 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use ferrite_acp::{Agent, Diff, Event, MessageKind, PermissionOption, PlanEntry};
+use ferrite_acp::{
+    Agent, ConfigOption, ConfigValue, Diff, Event, MessageKind, PermissionOption, PlanEntry,
+};
 use serde_json::{Value, json};
 
 struct Fake {
@@ -95,6 +97,163 @@ fn run_until(
             thread::sleep(Duration::from_millis(5));
         }
     }
+}
+
+/// 고르기 설정이 `done`을 맞출 때까지 받는다(그동안의 이벤트는 버린다).
+fn wait_config(agent: &mut Agent, done: impl Fn(&[ConfigOption]) -> bool) {
+    let started = Instant::now();
+    while !done(agent.config()) {
+        agent.poll();
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "시간 초과: {:#?}",
+            agent.config()
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// 세션을 열 때까지 각본을 돌린다. `session`은 `session/new`의 응답.
+fn open(f: &mut Fake, session: Value) {
+    let init = f.expect("initialize");
+    f.respond(
+        &init,
+        json!({ "protocolVersion": 1, "agentCapabilities": {}, "authMethods": [] }),
+    );
+    let new = f.expect("session/new");
+    f.respond(&new, session);
+}
+
+#[test]
+fn 고르기_설정을_보이고_바꾸며_에이전트가_바꾼_것도_따른다() {
+    let options = |mode: &str, model: &str| {
+        json!([
+            { "id": "mode", "name": "Mode", "category": "mode", "type": "select", "currentValue": mode,
+              "options": [{ "value": "default", "name": "Default", "description": "묻는다" }, { "value": "auto", "name": "Auto" }] },
+            { "id": "model", "name": "Model", "category": "model", "type": "select", "currentValue": model,
+              "options": [{ "group": "g", "name": "묶음", "options": [{ "value": "m1", "name": "M1" }, { "value": "m2", "name": "M2" }] }] },
+            { "id": "fast", "name": "Fast", "type": "boolean", "currentValue": false },
+        ])
+    };
+    let (mut agent, fake) = connect(Vec::new(), move |f| {
+        // 둘 다 주면 새 판(configOptions)을 쓴다.
+        open(
+            f,
+            json!({ "sessionId": "s1", "configOptions": options("auto", "m1"),
+                    "modes": { "currentModeId": "auto", "availableModes": [{ "id": "auto", "name": "Auto" }] } }),
+        );
+        let set = f.expect("session/set_config_option");
+        assert_eq!(
+            set["params"],
+            json!({ "sessionId": "s1", "configId": "mode", "value": "default" })
+        );
+        f.respond(&set, json!({ "configOptions": options("default", "m1") }));
+        f.update(json!({ "sessionUpdate": "config_option_update", "configOptions": options("default", "m2") }));
+        let bad = f.expect("session/set_config_option");
+        f.send(json!({ "jsonrpc": "2.0", "id": bad["id"], "error": { "code": -32602, "message": "unknown value" } }));
+    });
+    let mut backlog = VecDeque::new();
+    run_until(&mut agent, &mut backlog, |_, _| {}, |e| *e == Event::Ready);
+    let config = agent.config();
+    assert_eq!(config.len(), 2, "불린은 받는다고 알리지 않아 뺀다");
+    assert_eq!(
+        (
+            config[0].category.as_deref(),
+            config[0].current.as_str(),
+            &config[0].values[0]
+        ),
+        (
+            Some("mode"),
+            "auto",
+            &ConfigValue {
+                value: "default".into(),
+                name: "Default".into(),
+                description: Some("묻는다".into())
+            }
+        )
+    );
+    let models: Vec<&str> = config[1].values.iter().map(|v| v.value.as_str()).collect();
+    assert_eq!(models, ["m1", "m2"], "묶음은 펼친다");
+
+    agent.set_config("mode", "default").unwrap();
+    wait_config(&mut agent, |c| c[0].current == "default");
+    wait_config(&mut agent, |c| c[1].current == "m2");
+    agent.set_config("model", "nope").unwrap();
+    let events = run_until(
+        &mut agent,
+        &mut backlog,
+        |_, _| {},
+        |e| matches!(e, Event::Error(_)),
+    );
+    assert_eq!(
+        events.last(),
+        Some(&Event::Error(
+            "설정을 바꾸지 못했습니다: unknown value".into()
+        ))
+    );
+    assert_eq!(agent.config()[1].current, "m2", "거절되면 그대로");
+    fake.join().expect("가짜 에이전트 각본이 어긋남");
+}
+
+#[test]
+fn 예전_판의_세션_모드만_주면_모드_설정_하나로_보이고_set_mode로_바꾼다() {
+    let (mut agent, fake) = connect(Vec::new(), |f| {
+        open(
+            f,
+            json!({ "sessionId": "s1", "modes": { "currentModeId": "auto", "availableModes": [
+                { "id": "default", "name": "Default", "description": "묻는다" }, { "id": "auto", "name": "Auto" },
+            ] } }),
+        );
+        let set = f.expect("session/set_mode");
+        assert_eq!(
+            set["params"],
+            json!({ "sessionId": "s1", "modeId": "default" })
+        );
+        f.respond(&set, json!({}));
+        // 에이전트가 스스로 바꾼 것(계획 모드를 마침 등)도 따른다.
+        let prompt = f.expect("session/prompt");
+        f.update(json!({ "sessionUpdate": "current_mode_update", "currentModeId": "auto" }));
+        f.respond(&prompt, json!({ "stopReason": "end_turn" }));
+    });
+    assert!(
+        agent.set_config("mode", "default").is_err(),
+        "세션이 열리기 전"
+    );
+    let mut backlog = VecDeque::new();
+    run_until(&mut agent, &mut backlog, |_, _| {}, |e| *e == Event::Ready);
+    assert_eq!(
+        agent.config(),
+        [ConfigOption {
+            id: "mode".into(),
+            name: "모드".into(),
+            description: None,
+            category: Some("mode".into()),
+            current: "auto".into(),
+            values: vec![
+                ConfigValue {
+                    value: "default".into(),
+                    name: "Default".into(),
+                    description: Some("묻는다".into())
+                },
+                ConfigValue {
+                    value: "auto".into(),
+                    name: "Auto".into(),
+                    description: None
+                },
+            ],
+        }]
+    );
+    agent.set_config("mode", "default").unwrap();
+    wait_config(&mut agent, |c| c[0].current == "default");
+    agent.prompt("계획대로 해").unwrap();
+    run_until(
+        &mut agent,
+        &mut backlog,
+        |_, _| {},
+        |e| matches!(e, Event::TurnEnded(_)),
+    );
+    assert_eq!(agent.config()[0].current, "auto");
+    fake.join().expect("가짜 에이전트 각본이 어긋남");
 }
 
 #[test]
