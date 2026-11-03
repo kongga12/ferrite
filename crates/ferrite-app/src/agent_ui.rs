@@ -15,7 +15,7 @@ const BUILTIN: [(&str, &str, &[&str]); 2] = [
     (
         "Claude Code",
         "npx",
-        &["-y", "@zed-industries/claude-code-acp"],
+        &["-y", "@agentclientprotocol/claude-agent-acp"],
     ),
 ];
 
