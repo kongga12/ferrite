@@ -153,6 +153,56 @@ fn source_key(source: &Source) -> String {
 }
 
 impl Debugger {
+    /// 에이전트(MCP)에 보일 상태: 구성·상태·호출 스택·고른 프레임의 불러온 변수.
+    pub fn mcp_state(&self) -> Option<ferrite_mcp::Debug> {
+        if !self.is_active() {
+            return None;
+        }
+        let state = if self.session.is_none() {
+            "starting"
+        } else if self.is_stopped() {
+            "stopped"
+        } else {
+            "running"
+        };
+        let frames = self
+            .frames
+            .iter()
+            .map(|f| ferrite_mcp::Frame {
+                name: f.name.clone(),
+                path: f
+                    .source
+                    .as_ref()
+                    .and_then(|s| s.path.as_ref())
+                    .map(|p| p.display().to_string()),
+                line: f.line,
+            })
+            .collect();
+        let variables = self
+            .scopes
+            .iter()
+            .flat_map(|scope| {
+                self.children
+                    .get(&scope.variables_reference)
+                    .into_iter()
+                    .flatten()
+                    .map(move |v| ferrite_mcp::Variable {
+                        scope: scope.name.clone(),
+                        name: v.name.clone(),
+                        value: v.value.clone(),
+                        type_name: v.type_name.clone(),
+                    })
+            })
+            .collect();
+        Some(ferrite_mcp::Debug {
+            name: self.name.clone(),
+            adapter: self.adapter.clone(),
+            state: state.into(),
+            frames,
+            variables,
+        })
+    }
+
     /// 세션이 있거나 시작 전 빌드 중.
     pub fn is_active(&self) -> bool {
         self.session.is_some() || self.pending.is_some()

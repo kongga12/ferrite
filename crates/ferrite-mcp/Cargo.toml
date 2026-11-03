@@ -1,0 +1,16 @@
+[package]
+name = "ferrite-mcp"
+description = "Ferrite MCP 서버: 외부 코딩 에이전트가 열린 파일·진단·디버거 상태를 읽는다(127.0.0.1 HTTP, 토큰)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+# 토큰. 다른 크레이트가 이미 쓰는 판이다.
+getrandom = "0.3.4"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+
+[dev-dependencies]
+ureq = { version = "3.5.0", default-features = false, features = ["rustls", "platform-verifier"] }

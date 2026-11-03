@@ -28,6 +28,11 @@ update_check = true
 # 업데이트 정보(latest.json) 주소. 비우면 공식 릴리스. 사내 미러를 쓸 때만 바꾼다.
 update_url = ""
 
+# AI 에이전트 연결(MCP): 앱을 켤 때 이 PC(127.0.0.1)의 이 포트에서 듣는다. 에이전트는 토큰으로 붙어
+# 열린 파일·진단·디버거 상태를 읽는다(파일은 바꾸지 않는다). [도구 > AI 에이전트 연결]에서 켜고 끄며 설정을 복사한다.
+mcp_server = false
+mcp_port = 47711
+
 # 단축키 배치: "default"(VS Code식), "eclipse"(egov 개발환경·Eclipse식)
 keymap = "default"
 
@@ -87,6 +92,8 @@ pub struct Settings {
     pub indent_size: u8,
     pub update_check: bool,
     pub update_url: String,
+    pub mcp_server: bool,
+    pub mcp_port: u16,
     pub keymap: Keymap,
     /// 명령 이름(`"file.save"`) → 키. 배치의 키를 덮는다.
     pub keys: BTreeMap<String, Keys>,
@@ -102,6 +109,8 @@ impl Default for Settings {
             indent_size: 4,
             update_check: true,
             update_url: String::new(),
+            mcp_server: false,
+            mcp_port: 47711,
             keymap: Keymap::Default,
             keys: BTreeMap::new(),
         }

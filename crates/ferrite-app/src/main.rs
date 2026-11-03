@@ -22,6 +22,7 @@ mod keymap;
 mod lsp_hub;
 mod lsp_ui;
 mod mapper_db;
+mod mcp_ui;
 mod new_project;
 mod notebook_ui;
 mod on_save;
