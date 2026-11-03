@@ -1263,7 +1263,22 @@
     - 창 시험(kittest): MCP를 켜고 에디터에 친 글(저장 안 함)을 에이전트처럼 HTTP로 읽고, 저장 안 한 변경·언어·커서, 끄면 더 듣지 않음
     - 실제 앱(Windows, 릴리스 빌드, `mcp_server = true`): 127.0.0.1:47711에서 initialize 200(세션 머리)·알림 202·도구 다섯·열린 파일·활성 에디터·`read_open_file` 2줄(한글)을 받고 토큰 없이는 401. 이때 응답에 문자 집합이 없어 PowerShell이 한글을 잘못 읽는 것을 보고 `charset=utf-8`을 붙였다.
   - 확인하지 못한 것: 실제 Claude Code로는 묻지 못했다(이 PC의 Claude Code 로그인이 만료됨). Phase 10 검증에서 한다.
-- [ ] 10-2 ACP 클라이언트(대화 패널·diff) — 큼
+- [x] 10-2 ACP 클라이언트(대화 패널·diff) — 큼
+  - 결정(사용자): 내장 에이전트(Gemini CLI `gemini --acp`, Claude Code `npx -y @zed-industries/claude-code-acp`)와 settings.toml의 `[[agent]]`(name·command·args·env), 파일 쓰기는 diff를 보고 [받기]로 버퍼에 적용(저장은 사용자가), 터미널 기능은 주지 않는다, 확인은 가짜 에이전트와 Gemini CLI.
+  - 클라이언트(`ferrite-acp`): 에이전트를 프로젝트 루트에서 띄워(PATH의 `.cmd`도 찾고 콘솔 창은 숨긴다) 표준 입출력으로 JSON-RPC를 줄마다 하나씩 주고받는다. `initialize`(판 1, `fs.readTextFile`·`fs.writeTextFile`, `terminal: false`) → `session/new`(cwd, MCP 서버) → `session/prompt`, 멈춤은 `session/cancel` 알림.
+    - 받는 것: `session/update`(답 글·생각·사용자 글 조각, `tool_call`·`tool_call_update`(diff·글 내용), `plan`), 요청 `session/request_permission`·`fs/read_text_file`·`fs/write_text_file`. 모르는 요청(`terminal/*` 등)은 -32601.
+    - `session/new`의 거절은 글에 인증 말이 있을 때만 로그인 안내를 붙인다. 에이전트가 끝나면 표준 오류의 끝 줄을 알린다.
+    - Ferrite의 MCP 서버(10-1)가 켜져 있으면 세션에 넘긴다(HTTP MCP를 받는 에이전트만). 에이전트가 Ferrite의 열린 파일·진단·디버거 상태를 읽는다.
+  - 에이전트 창(`[도구 > 에이전트]`, 도크 창): 에이전트 고르기·[시작]·[끝내기]·[지우기], 대화(나·답·접힌 생각·도구 호출의 상태와 diff 줄 수·계획), 글 칸(Ctrl+Enter로 보내기)·[멈춤].
+    - 권한 요청: 에이전트가 준 선택지 단추와 [물리기]. 멈추면 남은 요청은 물린다.
+    - 파일 읽기: 프로젝트 안 파일만, 열린 문서는 버퍼(저장 안 한 내용), 아니면 디스크(UTF-8·CP949). 줄과 줄 수를 따른다.
+    - 파일 쓰기: 프로젝트 안 파일만. 지금 내용과의 diff(앞뒤 2줄, `ferrite-core` `git::diff_lines`)를 카드로 보이고 [받기]면 그 파일을 열어 버퍼를 바꾼다(실행 취소할 수 있고 저장은 사용자가). 새 파일은 그 내용으로 만들어 연다. [버리기]면 에이전트에 거절을 알린다. 그동안 에이전트는 기다린다.
+    - 받은 쓰기는 디스크에 저장하기 전이라, 에이전트가 자기 셸로 돌리는 명령(빌드·시험)은 저장하기 전 내용을 본다.
+  - 검증
+    - 단위(가짜 에이전트, 같은 프로세스의 파이프): 시작 순서와 보내는 능력, HTTP MCP를 못 받는 에이전트에는 표준 입출력 서버만, 대화 조각·생각·도구 호출(diff·글)·고침 합치기·계획, 읽기·권한·쓰기 답하기와 거절, 모르는 메서드, 멈춤, 에이전트가 끝남, 인증 거절, 없는 프로그램
+    - 창 시험(kittest): 가짜 에이전트와 대화해 읽기 요청에 저장 안 한 버퍼로 답하고, 권한 단추, diff 카드의 지운 줄·더한 줄, [받기]로 버퍼에 적용(저장 전, 디스크 그대로), 프로젝트 밖 쓰기 거절
+    - 실제 Gemini CLI 0.42.0(`--acp`): 프로그램 찾기(`.cmd`)·띄우기·`initialize`까지 맞았으나, `session/new`에서 Google이 "This client is no longer supported for Gemini Code Assist for individuals"로 거절해(이 계정 종류의 서비스 정책) 대화는 확인하지 못했다. 이때 로그인 안내를 잘못 붙이는 것을 보고 고쳤다.
+  - 확인하지 못한 것: 실제 에이전트와의 대화·diff(Gemini는 계정 정책, Claude Code는 이 PC의 로그인 만료). Phase 10 검증에서 Claude Code로 한다.
 - [ ] 3개 OS 검증
 
 ### 백로그 — Phase 미정

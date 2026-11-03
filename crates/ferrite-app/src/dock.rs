@@ -25,10 +25,11 @@ pub enum Pane {
     Endpoints,
     Http,
     Tests,
+    Agent,
 }
 
 /// 열고 닫는 도구 창. 프로젝트와 에디터는 늘 있다.
-const TOOLS: [Pane; 13] = [
+const TOOLS: [Pane; 14] = [
     Pane::Terminal,
     Pane::Problems,
     Pane::Search,
@@ -42,9 +43,10 @@ const TOOLS: [Pane; 13] = [
     Pane::Endpoints,
     Pane::Http,
     Pane::Tests,
+    Pane::Agent,
 ];
 
-const ALL: [Pane; 15] = [
+const ALL: [Pane; 16] = [
     Pane::Project,
     Pane::Editor,
     Pane::Terminal,
@@ -60,6 +62,7 @@ const ALL: [Pane; 15] = [
     Pane::Endpoints,
     Pane::Http,
     Pane::Tests,
+    Pane::Agent,
 ];
 
 impl Pane {
@@ -80,6 +83,7 @@ impl Pane {
             Pane::Endpoints => "엔드포인트",
             Pane::Http => "HTTP 응답",
             Pane::Tests => "테스트",
+            Pane::Agent => "에이전트",
         }
     }
 

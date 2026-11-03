@@ -36,6 +36,14 @@ mcp_port = 47711
 # 단축키 배치: "default"(VS Code식), "eclipse"(egov 개발환경·Eclipse식)
 keymap = "default"
 
+# AI 에이전트(ACP). Gemini CLI·Claude Code는 기본으로 있고, 다른 ACP 에이전트를 [[agent]]로 더한다.
+# Ferrite는 에이전트를 설치하거나 로그인하지 않는다(터미널에서 한 번 실행해 로그인한다).
+# [[agent]]
+# name = "내 에이전트"
+# command = "my-agent"
+# args = ["--acp"]
+# env = { MY_AGENT_HOME = "C:/my-agent" }
+
 # 명령마다 키를 바꾼다. 명령 이름과 지금 키는 [보기 > 단축키 목록]에서 본다.
 # "Ctrl"은 macOS에서 Cmd다(실제 Ctrl은 "Control"). 키 여럿은 목록으로, 빈 값("")은 키를 뺀다.
 # [keys]
@@ -97,6 +105,22 @@ pub struct Settings {
     pub keymap: Keymap,
     /// 명령 이름(`"file.save"`) → 키. 배치의 키를 덮는다.
     pub keys: BTreeMap<String, Keys>,
+    /// 사용자가 더한 ACP 에이전트(`[[agent]]`).
+    #[serde(rename = "agent")]
+    pub agents: Vec<AgentSetting>,
+}
+
+/// ACP 에이전트 하나(`[[agent]]`).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentSetting {
+    pub name: String,
+    /// 띄울 프로그램(PATH의 이름이나 경로).
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
 }
 
 impl Default for Settings {
@@ -113,6 +137,7 @@ impl Default for Settings {
             mcp_port: 47711,
             keymap: Keymap::Default,
             keys: BTreeMap::new(),
+            agents: Vec::new(),
         }
     }
 }
@@ -177,6 +202,20 @@ mod tests {
             "오타를 조용히 무시하지 않는다"
         );
         assert!(Settings::parse("keymap = \"emacs\"").is_err());
+    }
+
+    #[test]
+    fn 사용자_에이전트() {
+        let s = Settings::parse(
+            "[[agent]]\nname = \"내 에이전트\"\ncommand = \"my-agent\"\nargs = [\"--acp\"]\n",
+        )
+        .unwrap();
+        assert_eq!(s.agents[0].name, "내 에이전트");
+        assert_eq!(s.agents[0].args, ["--acp"]);
+        assert!(
+            Settings::parse("[[agent]]\nname = \"a\"").is_err(),
+            "command 빠짐"
+        );
     }
 
     #[test]

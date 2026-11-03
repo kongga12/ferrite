@@ -1,0 +1,12 @@
+[package]
+name = "ferrite-acp"
+description = "Ferrite ACP 클라이언트: 코딩 에이전트 프로세스와 표준 입출력의 JSON-RPC로 대화한다"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+# 프로그램 찾기(Windows의 .cmd)와 콘솔 창 숨기기.
+ferrite-lsp.workspace = true
+serde_json = "1.0.154"
