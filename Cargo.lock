@@ -1578,6 +1578,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b97b65636e5b9ef369943878ac74335ba1c55c1cb6adbf1e2c293c624248d693"
 
 [[package]]
+name = "ferrite-acp"
+version = "0.1.0"
+dependencies = [
+ "ferrite-lsp",
+ "serde_json",
+]
+
+[[package]]
 name = "ferrite-app"
 version = "0.1.0"
 dependencies = [
@@ -1587,6 +1595,7 @@ dependencies = [
  "egui_kittest",
  "egui_tiles",
  "encoding_rs",
+ "ferrite-acp",
  "ferrite-codegen",
  "ferrite-core",
  "ferrite-dap",

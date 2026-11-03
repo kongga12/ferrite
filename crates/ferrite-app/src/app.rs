@@ -629,6 +629,8 @@ pub struct FerriteApp {
     on_save: crate::on_save::OnSave,
     /// AI 에이전트 연결(MCP 서버).
     mcp: crate::mcp_ui::McpPanel,
+    /// 에이전트 창(ACP).
+    agent: crate::agent_ui::AgentPanel,
     /// jsconfig.json을 만들자고 할지 본 문서와 그 결과(화면 폴더). 문서가 바뀌면 다시 본다.
     jsconfig: Option<(PathBuf, Option<&'static str>)>,
     /// jsconfig.json 제안을 닫은 프로젝트 루트(앱이 켜진 동안).
@@ -716,6 +718,7 @@ impl FerriteApp {
             keys_window: None,
             on_save: crate::on_save::OnSave::new(&cc.egui_ctx),
             mcp: crate::mcp_ui::McpPanel::new(mcp_token_path()),
+            agent: Default::default(),
             jsconfig: None,
             jsconfig_dismissed: Default::default(),
             watcher: FsWatcher::new(cc.egui_ctx.clone()).ok(),
@@ -1375,6 +1378,104 @@ impl FerriteApp {
             diagnostics,
             debug: self.debugger.mcp_state(),
         }
+    }
+
+    /// 에이전트의 파일 읽기·쓰기. 프로젝트 안 파일만 다루고, 열린 문서는 버퍼(저장 안 한 내용)로 답한다.
+    fn agent_action(&mut self, action: crate::agent_ui::AgentAction) {
+        use crate::agent_ui::AgentAction;
+        let root = self.tree.as_ref().map(|t| t.root().to_path_buf());
+        let resolve = |path: PathBuf| -> Result<PathBuf, String> {
+            let root = root.as_deref().ok_or("열린 프로젝트가 없습니다")?;
+            let path = real_path(&root.join(path));
+            if path.starts_with(root) {
+                Ok(path)
+            } else {
+                Err(format!(
+                    "프로젝트 밖 파일은 다루지 않습니다: {}",
+                    path.display()
+                ))
+            }
+        };
+        match action {
+            AgentAction::Read {
+                id,
+                path,
+                line,
+                limit,
+            } => {
+                let result = resolve(path)
+                    .and_then(|path| self.current_text(&path))
+                    .map(|text| {
+                        let start = line.unwrap_or(1).max(1) - 1;
+                        let lines = text.split_inclusive('\n').skip(start);
+                        match limit {
+                            Some(limit) => lines.take(limit).collect(),
+                            None => lines.collect(),
+                        }
+                    });
+                self.agent.answer_read(&id, result);
+            }
+            AgentAction::Write { id, path, content } => match resolve(path) {
+                Ok(path) => {
+                    let old = self.current_text(&path).ok();
+                    self.agent.propose_write(id, path, old, content);
+                    dock::show(&mut self.layout, Pane::Agent);
+                }
+                Err(e) => self.agent.answer_write(&id, Err(e)),
+            },
+            AgentAction::Apply { id, path, content } => {
+                let result = self.apply_agent_write(&path, &content);
+                if let Err(e) = &result {
+                    self.status = e.clone();
+                }
+                self.agent.answer_write(&id, result);
+            }
+        }
+    }
+
+    /// 열린 문서면 버퍼(저장 안 한 내용), 아니면 디스크의 글(문자 집합을 가려 읽는다).
+    fn current_text(&self, path: &Path) -> Result<String, String> {
+        if let Some(doc) = self.docs.iter().find(|d| d.path == path) {
+            return Ok(doc.buffer.text());
+        }
+        let bytes = text_file::read(path)
+            .map_err(|e| format!("{}을(를) 읽지 못했습니다: {e}", path.display()))?;
+        text_file::decode(&bytes)
+            .map(|c| c.text)
+            .map_err(|e| format!("{}을(를) 읽지 못했습니다: {e}", path.display()))
+    }
+
+    /// 사용자가 받은 에이전트의 쓰기. 있는 파일은 열어 버퍼를 바꾸고(실행 취소할 수 있고 저장은 사용자가),
+    /// 새 파일은 그 내용으로 만들어 연다.
+    fn apply_agent_write(&mut self, path: &Path, content: &str) -> Result<(), String> {
+        if !path.exists() {
+            if let Some(dir) = path.parent() {
+                std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+            }
+            text_file::write_atomic(path, content.as_bytes())
+                .map_err(|e| format!("{}을(를) 만들지 못했습니다: {e}", path.display()))?;
+            self.open_file(path.to_path_buf());
+            self.status = format!("에이전트가 만든 파일을 열었습니다: {}", path.display());
+            return Ok(());
+        }
+        self.open_file(path.to_path_buf());
+        let i = self
+            .docs
+            .iter()
+            .position(|d| d.path == path)
+            .ok_or_else(|| format!("{}을(를) 열지 못했습니다", path.display()))?;
+        let doc = &mut self.docs[i];
+        let len = doc.buffer.len_chars();
+        doc.buffer.replace_ranges(
+            vec![(0..len, content.replace("\r\n", "\n"))],
+            Instant::now(),
+        );
+        doc.view.reveal_cursor();
+        self.status = format!(
+            "에이전트의 쓰기를 적용했습니다(저장은 직접): {}",
+            path.display()
+        );
+        Ok(())
     }
 
     /// 활성 문서의 줄 번호를 묻는다(지금 줄을 채워 둔다).
@@ -2695,6 +2796,10 @@ impl FerriteApp {
                         ui.close();
                         self.git.toggle();
                     }
+                    if ui.button("에이전트").clicked() {
+                        ui.close();
+                        dock::show(&mut self.layout, Pane::Agent);
+                    }
                     if ui.button("AI 에이전트 연결(MCP)…").clicked() {
                         ui.close();
                         self.mcp.show();
@@ -3871,6 +3976,13 @@ impl egui_tiles::Behavior<Pane> for Dock<'_> {
                 None => {}
             },
             Pane::Http => app.http.ui(ui),
+            Pane::Agent => {
+                let root = app.tree.as_ref().map(|t| t.root().to_path_buf());
+                let mcp = app.mcp.agent_server();
+                if let Some(action) = app.agent.ui(ui, root.as_deref(), &app.settings.agents, mcp) {
+                    app.agent_action(action);
+                }
+            }
             Pane::Tests => {
                 let root = app.tree.as_ref().map(|t| t.root().to_path_buf());
                 if let Some(crate::test_ui::TestAction::Go(path, line)) =
@@ -3960,6 +4072,9 @@ impl eframe::App for FerriteApp {
         self.vuln.poll();
         if let Some(message) = self.on_save.poll() {
             self.status = message;
+        }
+        for action in self.agent.poll() {
+            self.agent_action(action);
         }
         if self.mcp.due() {
             let snapshot = self.mcp_snapshot();
@@ -7841,6 +7956,133 @@ mod tests {
         assert!(
             std::net::TcpStream::connect_timeout(&address, std::time::Duration::from_millis(500))
                 .is_err()
+        );
+        drop(harness);
+        remove_project(&dir);
+    }
+
+    #[test]
+    fn 에이전트와_대화하고_읽기는_버퍼로_답하고_쓰기는_diff를_받아_버퍼에_적용한다() {
+        use std::io::{BufRead, BufReader, Write};
+
+        use egui::accesskit::Role;
+        use serde_json::{Value, json};
+
+        let dir = std::env::temp_dir().join(format!("ferrite-agent-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("Board.java");
+        let original = "class Board {\n    int size = 10;\n}\n";
+        fs::write(&file, original).unwrap();
+        let mut harness = harness_builder()
+            .with_size(egui::vec2(1200.0, 900.0))
+            .build_eframe(|cc| FerriteApp::new(cc, Some(file.clone())));
+        harness.run();
+        harness.get_by_role(Role::MultilineTextInput).focus();
+        harness.run();
+        harness
+            .get_by_role(Role::MultilineTextInput)
+            .type_text("// 메모 ");
+        harness.run();
+        let path = real_path(&file);
+        let root = harness.state().tree.as_ref().unwrap().root().to_path_buf();
+
+        // 각본대로 답하는 가짜 에이전트(파이프)
+        let (client_in, mut agent_out) = std::io::pipe().unwrap();
+        let (agent_in, client_out) = std::io::pipe().unwrap();
+        let target = path.to_string_lossy().into_owned();
+        let fake = std::thread::spawn(move || {
+            let mut lines = BufReader::new(agent_in).lines();
+            let mut next =
+                move || -> Value { serde_json::from_str(&lines.next().unwrap().unwrap()).unwrap() };
+            let mut send = |message: Value| writeln!(agent_out, "{message}").unwrap();
+            let init = next();
+            send(json!({ "jsonrpc": "2.0", "id": init["id"], "result": { "protocolVersion": 1 } }));
+            let new = next();
+            send(json!({ "jsonrpc": "2.0", "id": new["id"], "result": { "sessionId": "s1" } }));
+            let prompt = next();
+            assert_eq!(prompt["params"]["prompt"][0]["text"], "크기를 20으로");
+            send(
+                json!({ "jsonrpc": "2.0", "method": "session/update", "params": { "sessionId": "s1",
+                "update": { "sessionUpdate": "agent_message_chunk", "content": { "type": "text", "text": "읽어 볼게요" } } } }),
+            );
+            send(
+                json!({ "jsonrpc": "2.0", "id": 100, "method": "fs/read_text_file", "params": { "sessionId": "s1", "path": target } }),
+            );
+            let read = next();
+            assert_eq!(
+                read["result"]["content"], "// 메모 class Board {\n    int size = 10;\n}\n",
+                "저장하지 않은 버퍼"
+            );
+            send(
+                json!({ "jsonrpc": "2.0", "id": 101, "method": "session/request_permission", "params": { "sessionId": "s1",
+                "toolCall": { "toolCallId": "t1", "title": "Board.java 고치기" },
+                "options": [{ "optionId": "ok", "name": "허락", "kind": "allow_once" }, { "optionId": "no", "name": "거절", "kind": "reject_once" }] } }),
+            );
+            let permission = next();
+            assert_eq!(permission["result"]["outcome"]["optionId"], "ok");
+            send(
+                json!({ "jsonrpc": "2.0", "id": 102, "method": "fs/write_text_file", "params": { "sessionId": "s1",
+                "path": target, "content": "// 메모 class Board {\n    int size = 20;\n}\n" } }),
+            );
+            let write = next();
+            assert_eq!(write["result"], json!({}), "{write}");
+            // 프로젝트 밖은 쓰지 않는다.
+            send(
+                json!({ "jsonrpc": "2.0", "id": 103, "method": "fs/write_text_file", "params": { "sessionId": "s1",
+                "path": std::env::temp_dir().join("ferrite-agent-outside.txt").to_string_lossy(), "content": "x" } }),
+            );
+            let outside = next();
+            assert!(
+                outside["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("프로젝트 밖"),
+                "{outside}"
+            );
+            send(
+                json!({ "jsonrpc": "2.0", "id": prompt["id"], "result": { "stopReason": "end_turn" } }),
+            );
+        });
+        {
+            let app = harness.state_mut();
+            app.agent.connect(
+                ferrite_acp::Agent::with_streams(client_in, client_out, &root, Vec::new()),
+                "가짜 에이전트",
+            );
+            dock::show(&mut app.layout, Pane::Agent);
+        }
+        wait_for_label(&mut harness, "세션이 열렸습니다");
+        harness
+            .get_by_role_and_label(Role::MultilineTextInput, "보낼 글")
+            .focus();
+        harness.run();
+        harness
+            .get_by_role_and_label(Role::MultilineTextInput, "보낼 글")
+            .type_text("크기를 20으로");
+        harness.run();
+        harness.get_by_label("보내기").click();
+        wait_for_label(&mut harness, "권한 요청: Board.java 고치기");
+        harness.get_by_label("읽어 볼게요");
+        harness.get_by_label("허락").click();
+        wait_for_label(&mut harness, "파일 쓰기 제안");
+        harness.get_by_label("-     int size = 10;");
+        harness.get_by_label("+     int size = 20;");
+        harness.get_by_label("받기").click();
+        harness.run();
+        fake.join().expect("가짜 에이전트 각본이 어긋남");
+        harness.run();
+        let doc = &harness.state().docs[0];
+        assert_eq!(
+            doc.buffer.text(),
+            "// 메모 class Board {\n    int size = 20;\n}\n"
+        );
+        assert!(doc.is_dirty(), "저장은 사용자가 한다");
+        assert_eq!(fs::read_to_string(&file).unwrap(), original);
+        assert!(
+            !std::env::temp_dir()
+                .join("ferrite-agent-outside.txt")
+                .exists()
         );
         drop(harness);
         remove_project(&dir);

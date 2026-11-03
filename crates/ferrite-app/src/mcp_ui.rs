@@ -52,6 +52,17 @@ impl McpPanel {
         self.token.as_deref()
     }
 
+    /// 에이전트(ACP) 세션에 넘길 이 서버(켜져 있을 때). 에이전트가 Ferrite의 상태를 읽는다.
+    pub fn agent_server(&self) -> Option<serde_json::Value> {
+        let (server, token) = (self.server.as_ref()?, self.token.as_ref()?);
+        Some(serde_json::json!({
+            "type": "http",
+            "name": "ferrite",
+            "url": format!("http://{}/mcp", server.address()),
+            "headers": [{ "name": "Authorization", "value": format!("Bearer {token}") }],
+        }))
+    }
+
     /// 토큰 파일을 읽거나 새로 만든다.
     fn load_token(&mut self, renew: bool) -> Result<String, String> {
         if !renew && let Some(token) = &self.token {

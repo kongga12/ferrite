@@ -343,6 +343,34 @@ fn code(c: u8) -> Option<Change> {
     }
 }
 
+/// 두 글의 줄 diff(앞뒤 2줄을 붙인 덩어리들). (`' '` 같음·`'-'` 지움·`'+'` 더함, 줄). 덩어리 사이는
+/// (`'~'`, 빈 글). 에이전트가 제안한 파일 쓰기를 보일 때 쓴다.
+pub fn diff_lines(old: &str, new: &str) -> Vec<(char, String)> {
+    let diff = TextDiff::configure()
+        .timeout(DIFF_TIMEOUT)
+        .diff_lines(old, new);
+    let mut lines = Vec::new();
+    for (i, group) in diff.grouped_ops(2).iter().enumerate() {
+        if i > 0 {
+            lines.push(('~', String::new()));
+        }
+        for op in group {
+            for change in diff.iter_changes(op) {
+                let tag = match change.tag() {
+                    similar::ChangeTag::Equal => ' ',
+                    similar::ChangeTag::Delete => '-',
+                    similar::ChangeTag::Insert => '+',
+                };
+                lines.push((
+                    tag,
+                    change.value().trim_end_matches(['\r', '\n']).to_owned(),
+                ));
+            }
+        }
+    }
+    lines
+}
+
 /// `base`(인덱스 내용) 대비 `current`(버퍼)의 줄 변경. (현재 줄 번호, 변경) 목록, 줄 순.
 pub fn line_changes(base: &str, current: &str) -> Vec<(usize, LineChange)> {
     if base.len() > MAX_DIFF_BYTES || current.len() > MAX_DIFF_BYTES {
@@ -385,6 +413,24 @@ pub fn line_changes(base: &str, current: &str) -> Vec<(usize, LineChange)> {
     changes.sort_by_key(|(line, _)| *line);
     changes.dedup_by_key(|(line, _)| *line);
     changes
+}
+
+#[cfg(test)]
+mod diff_tests {
+    use super::*;
+
+    #[test]
+    fn 줄_diff는_앞뒤_두_줄을_붙여_덩어리로_보인다() {
+        let old = "a\nb\nc\nd\ne\nf\ng\nh\ni\n";
+        let new = "a\nB\nc\nd\ne\nf\ng\nh\ni\nj\n";
+        let lines = diff_lines(old, new);
+        let tags: String = lines.iter().map(|(t, _)| *t).collect();
+        assert_eq!(tags, " -+  ~  +");
+        assert_eq!(lines[1], ('-', "b".to_owned()));
+        assert_eq!(lines[2], ('+', "B".to_owned()));
+        assert_eq!(lines.last(), Some(&('+', "j".to_owned())));
+        assert!(diff_lines("x\n", "x\n").is_empty());
+    }
 }
 
 #[cfg(test)]
