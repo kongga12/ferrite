@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 
 use ferrite_lsp::client::{LanguageServer, ServerCommand, ServerEvent, parse_diagnostics};
 use ferrite_lsp::position::{PositionEncoding, from_lsp};
+use ferrite_lsp::watch::FileChange;
 use lsp_types::Diagnostic;
 use ropey::Rope;
 
@@ -241,6 +242,21 @@ fn 매퍼_xml과_java_사이를_정의로_이동하고_xml_문장이_없는_메�
     assert_eq!(warnings.len(), 1, "{warnings:?}");
     assert!(warnings[0].message.contains("deleteSample"));
     assert_eq!(warnings[0].range.start.line, 4);
+
+    // 매퍼 XML을 닫으면 디스크가 기준이다. 디스크에서 문장을 더하면(에이전트·git) 경고가 사라진다.
+    lsp.did_close(&sample_xml);
+    assert_eq!(diagnostics_for(&lsp, "SampleMapper.java").len(), 1);
+    fs::write(
+        &sample_xml,
+        sample_text.replace(
+            "</mapper>",
+            "  <delete id=\"deleteSample\">DELETE FROM sample</delete>\n</mapper>",
+        ),
+    )
+    .unwrap();
+    lsp.did_change_watched_files(&[(sample_xml.clone(), FileChange::Changed)]);
+    let warnings = diagnostics_for(&lsp, "SampleMapper.java");
+    assert!(warnings.is_empty(), "{warnings:?}");
 
     drop(lsp);
     for _ in 0..50 {
@@ -865,6 +881,38 @@ fn 프로젝트의_요청_매핑을_엔드포인트_기호로_낸다() {
     let symbol = &response(&lsp, id)[0];
     assert_eq!(symbol["containerName"], "BoardController");
     assert_eq!(symbol["location"]["range"]["start"]["line"], 6);
+
+    // 디스크에서 바뀐 파일(에이전트·git이 쓴 것): 서버가 등록한 감시에 맞춰 알리면 다시 색인한다.
+    // 위의 응답보다 등록 요청이 먼저 왔으므로 클라이언트는 이미 패턴을 안다.
+    let notice = web.join("NoticeController.java");
+    fs::write(
+        &notice,
+        "package egov.board.web;\n\n@Controller\npublic class NoticeController {\n    @GetMapping(\"/notice/list.do\")\n    public String list() { return \"x\"; }\n}\n",
+    )
+    .unwrap();
+    // 빌드 결과물의 사본은 보내도 색인하지 않는다.
+    let copy = root.join("target/classes/egov/board/web/CopyController.java");
+    fs::create_dir_all(copy.parent().unwrap()).unwrap();
+    fs::write(
+        &copy,
+        "@Controller\npublic class CopyController {\n    @GetMapping(\"/copy.do\")\n    public String a() { return \"x\"; }\n}\n",
+    )
+    .unwrap();
+    lsp.did_change_watched_files(&[
+        (notice.clone(), FileChange::Created),
+        (copy, FileChange::Created),
+    ]);
+    assert_eq!(
+        names(&mut lsp, "@/"),
+        [
+            "@/board/list.do",
+            "@/board/save.do -- POST",
+            "@/notice/list.do -- GET"
+        ]
+    );
+    fs::remove_file(web.join("BoardController.java")).unwrap();
+    lsp.did_change_watched_files(&[(web.join("BoardController.java"), FileChange::Deleted)]);
+    assert_eq!(names(&mut lsp, "@/"), ["@/notice/list.do -- GET"]);
     drop(lsp);
     let _ = fs::remove_dir_all(&root);
 }

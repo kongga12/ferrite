@@ -1724,6 +1724,7 @@ version = "0.1.0"
 dependencies = [
  "ferrite-core",
  "flate2",
+ "globset",
  "lsp-types",
  "ropey",
  "serde_json",

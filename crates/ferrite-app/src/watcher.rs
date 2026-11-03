@@ -1,11 +1,15 @@
-//! 파일 변경 감시. 열린 문서의 폴더와 펼친 트리 폴더만 비재귀로 감시한다
+//! 파일 변경 감시. 화면용(`FsWatcher`)은 열린 문서의 폴더와 펼친 트리 폴더만 비재귀로 감시한다
 //! (저장소 전체를 재귀로 감시하면 Linux inotify 감시 개수 한도에 걸릴 수 있다).
+//! 언어 서버에 알릴 프로젝트 전체 감시는 `ProjectWatcher`가 따로 한다.
 
-use std::collections::HashSet;
-use std::path::PathBuf;
+use std::collections::{BTreeSet, HashSet};
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, channel};
 
 use eframe::egui;
+use ferrite_lsp::watch::FileChange;
+use notify::event::ModifyKind;
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 
 pub struct FsWatcher {
@@ -53,5 +57,173 @@ impl FsWatcher {
             .filter(|e| !matches!(e.kind, EventKind::Access(_)))
             .flat_map(|e| e.paths)
             .collect()
+    }
+}
+
+/// 프로젝트 전체에서 감시하지 않는 폴더(빌드 결과물·의존성·도구). 바뀜이 많고 언어 서버가 볼 일이 없다.
+const SKIP_DIRS: [&str; 7] = [
+    ".git",
+    ".gradle",
+    "bin",
+    "build",
+    "node_modules",
+    "out",
+    "target",
+];
+
+/// 프로젝트 전체 감시. 에이전트·git·다른 도구가 디스크에 쓴 것을 언어 서버에 알리는 데 쓴다.
+/// Windows·macOS는 재귀 감시 하나로 보고, Linux는 inotify 감시 수 한도 때문에 뺄 폴더를 건너뛰며
+/// 폴더마다 감시한다(새로 생긴 폴더도 더한다).
+pub struct ProjectWatcher {
+    watcher: RecommendedWatcher,
+    events: Receiver<notify::Result<notify::Event>>,
+    root: PathBuf,
+}
+
+impl ProjectWatcher {
+    pub fn new(root: &Path, ctx: egui::Context) -> notify::Result<Self> {
+        let (tx, events) = channel();
+        let watcher = notify::recommended_watcher(move |event| {
+            let _ = tx.send(event);
+            ctx.request_repaint();
+        })?;
+        let mut this = Self {
+            watcher,
+            events,
+            root: root.to_path_buf(),
+        };
+        if cfg!(target_os = "linux") {
+            this.watch_tree(root);
+        } else {
+            this.watcher.watch(root, RecursiveMode::Recursive)?;
+        }
+        Ok(this)
+    }
+
+    /// 이 폴더와 그 아래 폴더마다 감시를 건다(뺄 폴더 아래로는 들어가지 않는다).
+    // ponytail: 화면 스레드에서 폴더를 다 돈다. 폴더가 수만 개인 저장소에서 느리면 별도 스레드로.
+    fn watch_tree(&mut self, dir: &Path) {
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            if self
+                .watcher
+                .watch(&dir, RecursiveMode::NonRecursive)
+                .is_err()
+            {
+                continue;
+            }
+            for entry in fs::read_dir(&dir).into_iter().flatten().flatten() {
+                if entry.file_type().is_ok_and(|t| t.is_dir())
+                    && !SKIP_DIRS.iter().any(|s| entry.file_name() == *s)
+                {
+                    stack.push(entry.path());
+                }
+            }
+        }
+    }
+
+    fn ignored(&self, path: &Path) -> bool {
+        path.strip_prefix(&self.root).map_or(true, |relative| {
+            relative
+                .components()
+                .any(|c| SKIP_DIRS.iter().any(|s| c.as_os_str() == *s))
+        })
+    }
+
+    /// 마지막 호출 이후 바뀐 것(같은 경로는 한 번). 종류는 지금 디스크 상태로 정한다:
+    /// 없으면 지움, 만들기·이름 바꾸기 알림이 있었으면 만듦, 아니면 바뀜.
+    pub fn changes(&mut self) -> Vec<(PathBuf, FileChange)> {
+        let mut paths = BTreeSet::new();
+        let mut created = HashSet::new();
+        for event in self.events.try_iter().filter_map(Result::ok) {
+            if matches!(event.kind, EventKind::Access(_)) {
+                continue;
+            }
+            let create = matches!(
+                event.kind,
+                EventKind::Create(_) | EventKind::Modify(ModifyKind::Name(_))
+            );
+            for path in event.paths {
+                if self.ignored(&path) {
+                    continue;
+                }
+                if create {
+                    created.insert(path.clone());
+                }
+                paths.insert(path);
+            }
+        }
+        let mut changes = Vec::new();
+        for path in paths {
+            let change = if !path.exists() {
+                FileChange::Deleted
+            } else if created.contains(&path) {
+                FileChange::Created
+            } else {
+                FileChange::Changed
+            };
+            if cfg!(target_os = "linux") && change == FileChange::Created && path.is_dir() {
+                self.watch_tree(&path);
+            }
+            changes.push((path, change));
+        }
+        changes
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    /// `want`가 나올 때까지 모은다.
+    fn wait_for(
+        watcher: &mut ProjectWatcher,
+        want: &(PathBuf, FileChange),
+    ) -> Vec<(PathBuf, FileChange)> {
+        let started = Instant::now();
+        let mut seen = Vec::new();
+        while !seen.contains(want) {
+            seen.extend(watcher.changes());
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "{want:?}가 오지 않음: {seen:?}"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        seen
+    }
+
+    #[test]
+    fn 프로젝트의_바뀐_파일을_모으고_빌드_결과물은_뺀다() {
+        let dir = std::env::temp_dir().join(format!("ferrite-watch-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("src/a")).unwrap();
+        fs::create_dir_all(dir.join("target/classes")).unwrap();
+        let root = crate::app::real_path(&dir);
+        let mut watcher = ProjectWatcher::new(&root, egui::Context::default()).unwrap();
+
+        let java = root.join("src").join("a").join("A.java");
+        fs::write(&java, "class A {}").unwrap();
+        fs::write(root.join("target/classes/A.class"), "x").unwrap();
+        let seen = wait_for(&mut watcher, &(java.clone(), FileChange::Created));
+        assert!(
+            seen.iter()
+                .all(|(p, _)| !p.starts_with(root.join("target"))),
+            "{seen:?}"
+        );
+
+        // 새로 만든 폴더 안의 파일도 본다(Linux는 폴더마다 감시를 더한다).
+        let new_dir = root.join("src").join("b");
+        fs::create_dir_all(&new_dir).unwrap();
+        wait_for(&mut watcher, &(new_dir.clone(), FileChange::Created));
+        let mapper = new_dir.join("BoardMapper.xml");
+        fs::write(&mapper, "<mapper/>").unwrap();
+        wait_for(&mut watcher, &(mapper, FileChange::Created));
+
+        fs::remove_file(&java).unwrap();
+        wait_for(&mut watcher, &(java, FileChange::Deleted));
+        drop(watcher);
+        let _ = fs::remove_dir_all(&dir);
     }
 }
