@@ -1353,7 +1353,8 @@
   - 검증
     - 가짜 에이전트(파이프): 설정 읽기(불린 빼기·묶음 펼치기·설명), 바꾸기 요청과 응답, 에이전트가 보낸 바뀜, 거절, 두 꼴을 다 주면 새 판, 예전 판 모드의 `set_mode`와 `current_mode_update`
     - 창 시험(kittest): `agent_mode = "default"`로 세션을 열면 모드를 바꾸는 요청을 보내고, 고르기 칸으로 모델을 바꾸며, 권한 카드에 diff 줄이 보인다
-  - 확인하지 못한 것: 실제 Claude Code 어댑터의 설정 이름·값으로는 돌려 보지 않았다(어댑터를 지운 뒤 만들었다).
+    - 실제 Claude Code(2.1.317, 어댑터 0.100.0, `ferrite-acp` 실제 시험 `claude_code의…`, 기본으로는 돌지 않음, 대화 없음): 세션을 열면 `configOptions`로 Mode(category `mode`: default·acceptEdits·plan·auto·bypassPermissions)·Model·Effort(`thought_level`)·Fast mode·Ultracode(`model_config`, on·off)·Agent(category 없음, 사용자의 서브에이전트)를 준다. 이 PC 설정대로 `auto`이던 모드를 `default`로 바꾸는 데 2.4초. 받은 직후 첫 실행에서는 닫은 뒤 15초 넘게 프로세스가 남았고, 이후 세 번은 2초 안에 끝났다.
+  - 확인하지 못한 것: 실제 에이전트와는 `ferrite-acp`로 확인했고 앱의 에이전트 창으로는 보지 않았다(창은 가짜 에이전트 창 시험으로 확인).
 
 - 살폈지만 넣지 않은 것: 임베디드(MCU 플래시·시리얼 모니터·장비 설정 파일), 프레임워크별 지원(React·Vue·Angular 등, JS·TS 언어 서버로 기본은 된다), 린터 개별 연동(언어 서버나 저장 시 작업으로 된다), 원격 개발·컨테이너·SFTP 배포, 로컬 AI 완성 모델, 계정 기반 설정 동기화. egov 개발과 거리가 멀거나 크기에 비해 쓰임이 적다.
 

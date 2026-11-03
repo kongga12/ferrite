@@ -1,6 +1,7 @@
 //! 실제 에이전트(Gemini CLI `gemini --acp`, Claude Code의 ACP 어댑터)와 대화해 파일을 고치게 한다.
 //! 고치는 길은 둘이다: `fs/write_text_file`로 클라이언트에 쓰기를 맡기거나(Gemini),
 //! 권한 요청에 diff를 보이고 허락받은 뒤 직접 디스크에 쓴다(Claude Code 어댑터 0.100).
+//! Claude Code는 고르기 설정(권한 모드 등)을 읽고 바꾸는 것도 본다(대화 없이).
 //! 로그인한 에이전트가 필요하고 사용자 계정으로 질의하므로 기본으로는 돌지 않는다.
 //! `cargo test -p ferrite-acp --test gemini -- --ignored --nocapture <이름>`
 
@@ -137,4 +138,76 @@ fn claude_code와_대화하고_권한을_받아_파일을_고친다() {
         &["-y", "@agentclientprotocol/claude-agent-acp@0.100.0"],
         "claude",
     );
+}
+
+/// `done`이 맞을 때까지 받는다. 오류나 끝남은 실패.
+fn wait(agent: &mut Agent, started: Instant, what: &str, done: impl Fn(&Agent) -> bool) {
+    while !done(agent) {
+        for event in agent.poll() {
+            if let Event::Error(e) | Event::Exited(e) = event {
+                panic!("{what}: 에이전트 오류: {e}");
+            }
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(120),
+            "{what}: 시간 초과"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+#[ignore = "로그인한 Claude Code와 npm의 ACP 어댑터(약 370MB)가 필요하다(대화는 하지 않는다)"]
+fn claude_code의_고르기_설정을_읽고_권한_모드를_바꾼다() {
+    let root =
+        std::env::temp_dir().join(format!("ferrite-acp-claude-config-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let args = ["-y", "@agentclientprotocol/claude-agent-acp@0.100.0"].map(String::from);
+    let mut agent = Agent::spawn("npx", &args, &[], &root, Vec::new()).unwrap();
+    let started = Instant::now();
+    wait(&mut agent, started, "세션 열기", Agent::is_ready);
+    for option in agent.config() {
+        let values: Vec<&str> = option.values.iter().map(|v| v.value.as_str()).collect();
+        eprintln!(
+            "{} [{}] {:?} = {} / {values:?}",
+            option.name, option.id, option.category, option.current
+        );
+    }
+    let mode = agent
+        .config()
+        .iter()
+        .find(|o| o.category.as_deref() == Some("mode"))
+        .expect("권한 모드 설정이 없다")
+        .clone();
+    // 사용자 설정이 묻는 모드면 편집 허용으로, 아니면 묻는 모드로 바꿔 본다.
+    let target = if mode.current == "default" {
+        "acceptEdits"
+    } else {
+        "default"
+    };
+    assert!(
+        mode.values.iter().any(|v| v.value == target),
+        "{target} 모드가 없다"
+    );
+    agent.set_config(&mode.id, target).unwrap();
+    wait(&mut agent, started, "모드 바꾸기", |a| {
+        a.config()
+            .iter()
+            .any(|o| o.id == mode.id && o.current == target)
+    });
+    eprintln!(
+        "{} → {target} ({:.1}초)",
+        mode.current,
+        started.elapsed().as_secs_f64()
+    );
+    drop(agent);
+    let closed = Instant::now();
+    while std::fs::remove_dir_all(&root).is_err() {
+        assert!(
+            closed.elapsed() < Duration::from_secs(90),
+            "에이전트가 끝나지 않는다"
+        );
+        thread::sleep(Duration::from_millis(200));
+    }
+    eprintln!("에이전트 끝남 ({:.1}초)", closed.elapsed().as_secs_f64());
 }
