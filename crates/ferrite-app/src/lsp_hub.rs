@@ -24,6 +24,8 @@ use lsp_types::{CodeActionProviderCapability, Diagnostic, HoverProviderCapabilit
 use ropey::Rope;
 use serde_json::{Value, json};
 
+use crate::watcher::ProjectWatcher;
+
 /// 입력이 멈춘 뒤 서버에 보내기까지 기다리는 시간(타이핑마다 문서 전체를 보내지 않게).
 const CHANGE_DEBOUNCE: Duration = Duration::from_millis(150);
 /// 실행 중이던 서버가 죽으면 다시 띄우기까지 기다리는 시간. 연달아 죽을수록 늘리고, 다 쓰면
@@ -295,6 +297,8 @@ pub struct LspHub {
     crashes: HashMap<&'static str, Crashes>,
     /// 여러 서버에 보내고 답을 기다리는 요청.
     fan_outs: Vec<FanOut>,
+    /// 프로젝트 전체 감시. 디스크에서 바뀐 파일을 서버에 알린다(서버가 등록한 패턴에 맞는 것만).
+    disk: Option<ProjectWatcher>,
     ctx: egui::Context,
 }
 
@@ -314,6 +318,7 @@ impl LspHub {
             spring_requested: false,
             crashes: HashMap::new(),
             fan_outs: Vec::new(),
+            disk: None,
             ctx,
         }
     }
@@ -332,6 +337,21 @@ impl LspHub {
             self.crashes.clear();
             self.fan_outs.clear();
             self.root = root.map(Path::to_path_buf);
+            self.disk = root.and_then(|r| ProjectWatcher::new(r, self.ctx.clone()).ok());
+        }
+    }
+
+    /// 디스크에서 바뀐 프로젝트 파일(에이전트·git·다른 도구가 쓴 것)을 떠 있는 서버에 알린다.
+    pub fn forward_disk_changes(&mut self) {
+        let Some(disk) = &mut self.disk else {
+            return;
+        };
+        let changes = disk.changes();
+        if changes.is_empty() {
+            return;
+        }
+        for lsp in self.servers.values().filter_map(|s| s.lsp.as_ref()) {
+            lsp.did_change_watched_files(&changes);
         }
     }
 

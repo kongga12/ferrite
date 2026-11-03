@@ -19,6 +19,7 @@ use serde_json::{Value, json};
 use crate::position::PositionEncoding;
 use crate::transport::{read_message, write_message};
 use crate::uri::{path_to_uri, uri_to_path};
+use crate::watch::{FileChange, Watchers};
 
 /// 종료 사유로 보여 줄 stderr 마지막 줄 수.
 const STDERR_TAIL_LINES: usize = 20;
@@ -142,6 +143,8 @@ struct Shared {
     queue: Vec<Vec<u8>>,
     encoding: PositionEncoding,
     capabilities: Option<ServerCapabilities>,
+    /// 서버가 등록한 파일 감시(`workspace/didChangeWatchedFiles`).
+    watchers: Watchers,
 }
 
 pub struct LanguageServer {
@@ -191,6 +194,7 @@ impl LanguageServer {
             queue: Vec::new(),
             encoding: PositionEncoding::Utf16,
             capabilities: None,
+            watchers: Watchers::default(),
         }));
 
         // stderr를 읽어 비우지 않으면 파이프가 가득 차 서버가 멈춘다. 종료 사유로 쓸 마지막 몇 줄만 남긴다.
@@ -309,6 +313,27 @@ impl LanguageServer {
         );
     }
 
+    /// 디스크에서 바뀐 파일을 알린다. 서버가 등록한 패턴에 맞는 것만 보낸다(맞는 것이 없으면 보내지 않는다).
+    pub fn did_change_watched_files(&self, changes: &[(PathBuf, FileChange)]) {
+        let events: Vec<Value> = {
+            let shared = lock(&self.shared);
+            changes
+                .iter()
+                .filter(|(path, change)| shared.watchers.matches(path, *change))
+                .filter_map(|(path, change)| {
+                    let uri = path_to_uri(path).ok()?;
+                    Some(json!({ "uri": uri, "type": *change as u8 }))
+                })
+                .collect()
+        };
+        if !events.is_empty() {
+            self.notify(
+                "workspace/didChangeWatchedFiles",
+                json!({ "changes": events }),
+            );
+        }
+    }
+
     /// `ServerEvent::Request`에 답한다.
     pub fn reply(&self, id: Value, result: Value) {
         self.send(&json!({ "jsonrpc": "2.0", "id": id, "result": result }));
@@ -410,6 +435,8 @@ fn initialize_params(root: &Path, init_options: &Value) -> Result<Value, String>
                 "configuration": true,
                 "diagnostics": { "refreshSupport": true },
                 "symbol": {},
+                // 디스크 바뀜(에이전트·git·다른 도구가 쓴 것)은 서버가 등록한 패턴에 맞춰 알린다.
+                "didChangeWatchedFiles": { "dynamicRegistration": true, "relativePatternSupport": true },
                 "applyEdit": true,
                 // 코드 액션 명령·중계로 workspace/executeCommand를 보낸다. Spring Boot LS는 이것이
                 // 없으면 명령 목록을 만들지 않아 초기화하다 죽는다.
@@ -459,6 +486,12 @@ fn reader_loop(
                 params: message.get("params").cloned().unwrap_or(Value::Null),
             }),
             (Some(id), Some(method)) => {
+                let params = message.get("params").unwrap_or(&Value::Null);
+                match method {
+                    "client/registerCapability" => lock(shared).watchers.register(params),
+                    "client/unregisterCapability" => lock(shared).watchers.unregister(params),
+                    _ => {}
+                }
                 reply_to_server_request(stdin, id, method, message.get("params"));
                 // 진단을 다시 물으라는 요청은 답하고 앱에도 알린다(앱이 열린 문서의 진단을 다시 묻는다).
                 if method == DIAGNOSTIC_REFRESH {

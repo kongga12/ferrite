@@ -1,6 +1,7 @@
 //! egov 언어 서버(LSP, 표준 입출력). 비동기 런타임 없이 메시지를 하나씩 처리한다.
 //! 시작할 때 프로젝트의 매퍼와 Java 인터페이스를 모아 색인하고, 열린 문서는 편집 중인 내용으로
-//! 덮어쓴다.
+//! 덮어쓴다. 디스크에서 바뀐 Java·XML(에이전트·git·다른 도구가 쓴 것)은 클라이언트에 감시를 등록해
+//! `workspace/didChangeWatchedFiles`로 받아 다시 색인한다.
 //!
 //! 위치는 UTF-16으로 주고받는다. 이 서버는 다른 서버(jdt.ls, lemminx)와 함께 한 문서를 맡아
 //! 결과가 합쳐지므로, 그 서버들과 같은 단위를 써야 위치가 어긋나지 않는다.
@@ -27,6 +28,8 @@ use crate::taglib::{self, Library, Site, Tld};
 use crate::web;
 
 const ENCODING: PositionEncoding = PositionEncoding::Utf16;
+/// 디스크 바뀜 감시 등록 번호(서버가 보내는 요청의 번호로도 쓴다).
+const WATCH_ID: &str = "ferrite-egov/watch";
 /// 클래스 이름 자동완성에서 한 번에 돌려줄 최대 개수. 넘으면 목록이 미완성이라고 알린다.
 const MAX_CLASS_ITEMS: usize = 200;
 /// 필드가 아니라 이름으로 값을 꺼내는 타입(`#{아무이름}`). 속성을 완성할 수 없다.
@@ -88,6 +91,8 @@ pub fn run(input: &mut impl BufRead, output: &mut impl Write) -> io::Result<()> 
             break;
         }
         let replies = match message.get("id") {
+            // 서버가 보낸 요청(감시 등록)의 응답은 볼 것이 없다.
+            Some(_) if method.is_empty() => continue,
             Some(id) => vec![server.request(id.clone(), method, &params)],
             None => server.notification(method, &params),
         };
@@ -115,6 +120,8 @@ fn is_jsp(path: &Path) -> bool {
 #[derive(Default)]
 struct Server {
     root: Option<PathBuf>,
+    /// 클라이언트가 파일 감시의 동적 등록을 받는다.
+    watch_files: bool,
     index: Index,
     /// Java 파일의 타입(Mapper 인터페이스, VO 클래스).
     java: HashMap<PathBuf, JavaFile>,
@@ -149,6 +156,9 @@ impl Server {
         match method {
             "initialize" => {
                 self.root = initialize_root(params);
+                self.watch_files = params
+                    .pointer("/capabilities/workspace/didChangeWatchedFiles/dynamicRegistration")
+                    == Some(&Value::Bool(true));
                 json!({ "jsonrpc": "2.0", "id": id, "result": {
                     "capabilities": {
                         "positionEncoding": "utf-16",
@@ -182,8 +192,17 @@ impl Server {
                 if let Some(root) = self.root.clone() {
                     self.index_project(&root);
                 }
-                Vec::new()
+                if !self.watch_files {
+                    return Vec::new();
+                }
+                // 색인하는 것(Java, 매퍼·Spring XML)이 디스크에서 바뀌면 알려 달라고 한다.
+                vec![
+                    json!({ "jsonrpc": "2.0", "id": WATCH_ID, "method": "client/registerCapability",
+                    "params": { "registrations": [{ "id": WATCH_ID, "method": "workspace/didChangeWatchedFiles",
+                        "registerOptions": { "watchers": [{ "globPattern": "**/*.java" }, { "globPattern": "**/*.xml" }] } }] } }),
+                ]
             }
+            "workspace/didChangeWatchedFiles" => self.files_changed(params),
             "textDocument/didOpen" => {
                 let text = params.pointer("/textDocument/text").and_then(Value::as_str);
                 self.update(document_path(params), text)
@@ -214,6 +233,50 @@ impl Server {
             }
             _ => Vec::new(),
         }
+    }
+
+    /// 디스크에서 바뀐 파일을 다시 색인한다. 열린 문서(편집 중인 내용이 기준)와 빌드 결과물 폴더는
+    /// 건너뛴다. 바뀐 것이 있으면 열린 문서를 다시 진단한다(매퍼와 인터페이스가 서로 참조해서).
+    // ponytail: 바뀐 파일만 다시 읽는다. 웹 구조(.properties·.tld·web.xml)와 폴더째 옮기기는 시작할 때만 읽는다.
+    fn files_changed(&mut self, params: &Value) -> Vec<Value> {
+        let mut touched = false;
+        for change in params["changes"].as_array().into_iter().flatten() {
+            let Some(path) = change["uri"]
+                .as_str()
+                .and_then(|uri| uri.parse::<Uri>().ok())
+                .and_then(|uri| uri_to_path(&uri))
+            else {
+                continue;
+            };
+            if self.open.contains_key(&path) || self.in_skipped_dir(&path) {
+                continue;
+            }
+            // FileChangeType 3은 지움.
+            let text = if change["type"] == 3 {
+                None
+            } else {
+                read_text(&path)
+            };
+            self.reindex(&path, text.as_deref());
+            touched = true;
+        }
+        if touched {
+            self.publish_all()
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// 프로젝트 안에서 색인하지 않는 폴더(빌드 결과물 등, 같은 매퍼의 사본이 있다) 아래인가.
+    fn in_skipped_dir(&self, path: &Path) -> bool {
+        let relative = self
+            .root
+            .as_deref()
+            .and_then(|root| path.strip_prefix(root).ok())
+            .unwrap_or(path);
+        relative
+            .components()
+            .any(|c| SKIP_DIRS.iter().any(|s| c.as_os_str() == *s))
     }
 
     /// 요청 매핑을 `workspace/symbol` 결과(`SymbolInformation[]`)로. 이름에 질의가 들어 있는 것만

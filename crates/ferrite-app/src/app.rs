@@ -3054,6 +3054,7 @@ impl FerriteApp {
     /// 열린 문서를 언어 서버와 맞추고, 서버에서 온 진단·메시지를 반영한다.
     fn sync_language_servers(&mut self) {
         self.hub.set_root(self.tree.as_ref().map(FileTree::root));
+        self.hub.forward_disk_changes();
         for doc in &mut self.docs {
             if let Some(lang) = doc.lang {
                 self.hub.sync(&doc.path, lang, &doc.buffer, &mut doc.lsp);
@@ -4085,6 +4086,8 @@ impl eframe::App for FerriteApp {
         if self.mcp.due() {
             let snapshot = self.mcp_snapshot();
             self.mcp.publish(snapshot);
+        } else if let Some(wait) = self.mcp.until_due() {
+            ctx.request_repaint_after(wait);
         }
         if std::mem::take(&mut self.settings_changed) {
             let (settings, error) = load_settings();
