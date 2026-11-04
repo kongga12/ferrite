@@ -400,7 +400,7 @@ pub fn uninstall(root: &Path, server: &Server) -> io::Result<()> {
     }
 }
 
-fn agent() -> Agent {
+pub(crate) fn agent() -> Agent {
     Agent::config_builder()
         .https_only(true)
         // 회사망의 TLS 검사 프록시처럼 OS에 추가된 루트 인증서도 믿도록 OS 검증기를 쓴다.

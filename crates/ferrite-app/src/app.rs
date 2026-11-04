@@ -3082,6 +3082,7 @@ impl FerriteApp {
     fn sync_language_servers(&mut self) {
         self.hub.set_root(self.tree.as_ref().map(FileTree::root));
         self.hub.forward_disk_changes();
+        self.hub.set_json_schemas(&self.settings.json_schemas);
         for doc in &mut self.docs {
             if let Some(lang) = doc.lang {
                 self.hub.sync(&doc.path, lang, &doc.buffer, &mut doc.lsp);

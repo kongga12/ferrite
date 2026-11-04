@@ -42,7 +42,7 @@ Rust로 작성한 크로스플랫폼(Windows / macOS / Linux) 경량 IDE.
   - 엔드포인트 창의 [요청]은 `http/<컨트롤러>.http`에 그 URL의 요청을 만든다(환경 파일이 없으면 견본도).
 - 트리 우클릭: 새 파일·새 폴더·이름 바꾸기·휴지통으로 삭제
 - 가상화 코드 에디터: 100MB 파일도 스크롤·입력 1ms 미만, 줄 번호, 한글 IME 조합 표시
-- 언어 서버(LSP): 에이전트·git·다른 도구가 디스크에서 바꾼 파일은 서버가 등록한 패턴(`workspace/didChangeWatchedFiles`)에 맞춰 알린다. 내장 egov 서버는 바뀐 Java·매퍼 XML을 다시 색인한다. rust-analyzer로 검증했다. gopls·clangd·basedpyright·phpactor·lemminx(XML)·jdt.ls(Java)도 연결한다. JS·TS는 TypeScript 7, HTML·CSS·JSON은 vscode-langservers-extracted를 npm으로 설치한다(npm 필요, HTML·CSS·JSON은 Node 필요).
+- 언어 서버(LSP): 에이전트·git·다른 도구가 디스크에서 바꾼 파일은 서버가 등록한 패턴(`workspace/didChangeWatchedFiles`)에 맞춰 알린다. 내장 egov 서버는 바뀐 Java·매퍼 XML을 다시 색인한다. rust-analyzer로 검증했다. gopls·clangd·basedpyright·phpactor·lemminx(XML)·jdt.ls(Java)도 연결한다. JS·TS는 TypeScript 7, HTML·CSS·JSON은 vscode-langservers-extracted를 npm으로 설치한다(npm 필요, HTML·CSS·JSON은 Node 필요). JSON은 스키마로도 검사한다: package.json·tsconfig 등은 내장 스키마(망 없이), 그 밖의 잘 알려진 파일은 SchemaStore 목록(망이 될 때), 프로젝트의 JSON은 settings.toml의 `[[json_schema]]`로 잇는다.
   - egov 화면 스크립트: `<script>`로 따로 불러오는 jQuery와 다른 스크립트의 전역 함수는 jsconfig.json이 있어야 안다. 화면 폴더의 `.js`를 열었는데 없으면 에디터 위에서 만들자고 한다.
   - TypeScript 서버는 라이브러리 파일 이름(`jquery-*.js` 등)을 보고 타입 정보(`@types`)를 npm으로 사용자 캐시(Windows `%LOCALAPPDATA%\Microsoft\TypeScript\7.0`)에 받는다(VS Code와 같다). 인터넷이 막힌 PC는 프로젝트의 `node_modules/@types`에 넣는다.
   - Java: jdt.ls를 Lombok 에이전트와 함께 띄운다. 서버 실행에 Java 21 이상이 필요하다(JAVA_HOME 또는 PATH). 프로젝트는 Java 8·11이어도 된다.

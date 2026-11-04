@@ -47,6 +47,12 @@ agent_mode = ""
 # args = ["--acp"]
 # env = { MY_AGENT_HOME = "C:/my-agent" }
 
+# JSON 스키마: package.json·tsconfig 등은 내장 스키마로, 그 밖의 잘 알려진 파일은 SchemaStore 목록(망이 될 때)으로
+# 검사한다. 프로젝트의 JSON에 스키마를 이으려면 [[json_schema]]를 더한다(url은 주소나 프로젝트 기준 경로).
+# [[json_schema]]
+# files = ["config/*.json"]
+# url = "schemas/config.schema.json"
+
 # 명령마다 키를 바꾼다. 명령 이름과 지금 키는 [보기 > 단축키 목록]에서 본다.
 # "Ctrl"은 macOS에서 Cmd다(실제 Ctrl은 "Control"). 키 여럿은 목록으로, 빈 값("")은 키를 뺀다.
 # [keys]
@@ -113,6 +119,19 @@ pub struct Settings {
     pub agents: Vec<AgentSetting>,
     /// 세션을 열 때 바꿀 에이전트 권한 모드(빈 글이면 에이전트 설정 그대로).
     pub agent_mode: String,
+    /// 사용자가 이은 JSON 스키마(`[[json_schema]]`).
+    #[serde(rename = "json_schema")]
+    pub json_schemas: Vec<JsonSchemaSetting>,
+}
+
+/// JSON 파일 패턴과 스키마를 잇는다(`[[json_schema]]`).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct JsonSchemaSetting {
+    /// 맞출 파일 패턴(프로젝트 기준, `config/*.json`·`*.app.json`).
+    pub files: Vec<String>,
+    /// 스키마 주소(`https://…`)나 프로젝트 기준 경로.
+    pub url: String,
 }
 
 /// ACP 에이전트 하나(`[[agent]]`).
@@ -144,6 +163,7 @@ impl Default for Settings {
             keys: BTreeMap::new(),
             agents: Vec::new(),
             agent_mode: String::new(),
+            json_schemas: Vec::new(),
         }
     }
 }
@@ -218,6 +238,21 @@ mod tests {
         .unwrap();
         assert_eq!(s.agents[0].name, "내 에이전트");
         assert_eq!(s.agents[0].args, ["--acp"]);
+        let s = Settings::parse(
+            "[[json_schema]]\nfiles = [\"config/*.json\"]\nurl = \"schemas/a.json\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            s.json_schemas,
+            [JsonSchemaSetting {
+                files: vec!["config/*.json".into()],
+                url: "schemas/a.json".into()
+            }]
+        );
+        assert!(
+            Settings::parse("[[json_schema]]\nfiles = []\n").is_err(),
+            "url 빠짐"
+        );
         assert_eq!(
             Settings::parse("agent_mode = \"default\"")
                 .unwrap()

@@ -6,6 +6,7 @@ pub mod edits;
 pub mod features;
 pub mod install;
 pub mod java;
+pub mod json;
 pub mod position;
 pub mod problem;
 pub mod spring;
