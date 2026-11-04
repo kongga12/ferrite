@@ -139,6 +139,12 @@ pub struct Terminal {
     title: String,
     /// 셸이 끝났으면 Some(종료 코드, 모르면 None).
     exited: Option<Option<i32>>,
+    /// 쥐어 두는 PTY slave. 읽기 스레드는 화면 잠금을 못 잡으면 읽은 바이트를 들고 다시 읽는데,
+    /// Linux에서 셸이 끝나 slave가 모두 닫히면 그 읽기가 EIO로 실패하고 들고 있던 바이트(마지막
+    /// 출력)를 버린다. slave가 열려 있으면 EIO 대신 WouldBlock이 와서 잠금을 잡을 때까지 기다린다.
+    /// 셸이 끝난 것은 SIGCHLD로 안다.
+    #[cfg(unix)]
+    _slave: std::os::fd::OwnedFd,
 }
 
 impl Terminal {
@@ -176,6 +182,17 @@ impl Terminal {
             #[cfg(windows)]
             escape_args,
         };
+        #[cfg(unix)]
+        let (pty, slave) = {
+            use tty::ToWinsize;
+            let pair = rustix_openpty::openpty(None, Some(&size.window().to_winsize()))?;
+            let slave = pair.user.try_clone()?;
+            (
+                tty::from_fd(&tty_options, 0, pair.controller, pair.user)?,
+                slave,
+            )
+        };
+        #[cfg(not(unix))]
         let pty = tty::new(&tty_options, size.window(), 0)?;
         let (notices_tx, notices) = channel();
         let pty_sender = Arc::new(OnceLock::new());
@@ -201,6 +218,8 @@ impl Terminal {
             size,
             title: String::new(),
             exited: None,
+            #[cfg(unix)]
+            _slave: slave,
         })
     }
 
@@ -652,6 +671,73 @@ mod tests {
             None,
             "글자는 글자 입력으로"
         );
+    }
+
+    /// 조건이 맞을 때까지(최대 20초) 기다린다.
+    #[cfg(target_os = "linux")]
+    fn wait<T>(what: &str, mut ready: impl FnMut() -> Option<T>) -> T {
+        let start = std::time::Instant::now();
+        loop {
+            if let Some(value) = ready() {
+                return value;
+            }
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(20),
+                "{what} 시간 초과"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    /// 화면을 그리는 중(잠금)에 명령이 마지막 출력을 내고 끝나도 그 출력이 화면에 남는다.
+    /// alacritty_terminal의 읽기 스레드는 화면 잠금을 못 잡으면 읽은 바이트를 들고 다시 읽는데,
+    /// Linux에서 셸이 끝나 PTY의 slave가 모두 닫히면 그 읽기가 EIO로 실패하고 들고 있던 바이트를 버린다.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn 화면을_잠근_사이에_끝난_명령의_마지막_출력도_남는다() {
+        let dir = std::env::temp_dir().join(format!("ferrite-term-eio-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let pid_file = dir.join("pid");
+        let script = format!("echo $$ > '{}'; read x; echo run-ok", pid_file.display());
+        let options = Options {
+            working_directory: dir.clone(),
+            columns: 40,
+            lines: 5,
+            shell: Some(("sh".to_owned(), vec!["-c".to_owned(), script])),
+            ..Default::default()
+        };
+        let terminal = Terminal::spawn(&options, || {}).unwrap();
+        let pid: u32 = wait("셸 시작", || {
+            std::fs::read_to_string(&pid_file).ok()?.trim().parse().ok()
+        });
+        {
+            let _drawing = terminal.term.lock();
+            // 잠근 뒤에 출력하게 한다(Enter로 read를 끝낸다).
+            let _ = terminal.pty.send(Msg::Input(Cow::Borrowed(b"\r")));
+            // 셸이 끝날 때까지(좀비가 되거나 거둬져 사라질 때까지) 잠근 채 기다린다.
+            wait("셸 종료", || {
+                match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+                    Err(_) => Some(()),
+                    Ok(stat) => stat
+                        .rsplit(')')
+                        .next()?
+                        .trim_start()
+                        .starts_with('Z')
+                        .then_some(()),
+                }
+            });
+        }
+        wait("마지막 출력", || {
+            terminal
+                .snapshot()
+                .text()
+                .lines()
+                .any(|l| l.trim() == "run-ok")
+                .then_some(())
+        });
+        drop(terminal);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
