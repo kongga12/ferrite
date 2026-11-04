@@ -1432,7 +1432,26 @@
     - 단위: 내장·사용자 설정(내용째·주소·프로젝트 기준 경로와 패턴, 빈 주소 빼기), 망이 막혔을 때 바깥 참조 빼기(상대 주소 포함, 같은 스키마 안·내장끼리는 둠), 목록을 패턴별 연결로(내장 빼기, 같은 패턴 여러 주소), `[[json_schema]]` 읽기
     - 실제 서버(`download.rs`의 웹 서버 묶음 시험, `servers.yml`): 내장(package.json `"name": 1` → Expected "string"), 사용자 연결(config/app.json → Expected "integer"), SchemaStore 목록(renovate.json `"extends": 1` → Expected "array")
     - 실제 앱(Windows, 릴리스 빌드, MCP로 진단 읽기): 같은 세 경우가 0.5~1초에 뜬다. 닿지 않는 프록시로 망을 막으면 package.json은 내장으로 검사하고(목록 받기 실패 뒤 다시 보낸 설정으로) renovate.json은 진단이 없다.
-  - 확인하지 못한 것: 화면으로 직접 본 것은 아니다(MCP로 읽음). 프록시 뒤에서 서버가 스키마를 받는 것은 보지 않았다(Ferrite는 `HTTPS_PROXY`로 목록을 받지만 서버의 `http.proxy`는 넘기지 않는다).
+  - 확인하지 못한 것: 화면으로 직접 본 것은 아니다(MCP로 읽음). 프록시 뒤에서 서버가 스키마를 받는 것은 보지 않았다. 서버도 Ferrite처럼 `HTTPS_PROXY` 환경 변수를 읽는다(아래 "JSON 스키마 받기의 인증서 검증"에서 확인).
+
+- [x] JSON 스키마 받기의 인증서 검증(2026-11-04) — 작음
+  - 까닭: "JSON 서버에 프록시 넘기기"를 하려다 서버 코드를 보니, 프록시는 이미 되고 인증서 검증이 꺼져 있었다.
+    - 프록시: 서버(request-light)는 `http.proxy` 설정이 없으면 `HTTPS_PROXY`·`https_proxy`·`HTTP_PROXY`·`http_proxy` 환경 변수를 읽는다. 서버는 Ferrite의 환경을 물려받으므로 Ferrite와 같은 프록시를 쓴다. `NO_PROXY`는 읽지 않는다.
+    - 검증: 서버는 설정을 받을 때 `!!http.proxyStrictSSL`로 검증 여부를 정한다. Ferrite가 `http`를 보내지 않아 거짓이 되어, SchemaStore 스키마를 TLS 인증서 검증 없이 받고 있었다(4.10.0 코드로 확인).
+  - 결정(사용자): 검증을 켜고, Node로 도는 언어 서버가 OS 인증서 저장소도 믿게 한다. Ferrite 자신의 다운로드(OS 검증기)와 같은 기준이다.
+  - 고침
+    - JSON 설정에 `http.proxyStrictSSL = true`를 넣는다.
+    - 언어 서버를 띄울 때 `NODE_USE_SYSTEM_CA=1`을 넘긴다. 사용자가 이미 정했으면 그대로 둔다. Node 22.19·24.6부터 읽는다. 그 전 판과 Node가 아닌 서버는 무시한다. TS 서버가 띄우는 타입 받기 npm에도 물려간다.
+    - 회사의 TLS 검사 프록시 뒤에서 Node가 그 전 판이면 SchemaStore 스키마만 받지 못한다(진단에 까닭과 `--use-system-ca` 안내가 뜬다). 내장 스키마는 그대로 된다.
+  - 검증
+    - 단위: 설정에 `http.proxyStrictSSL`, 서버 명령에 `NODE_USE_SYSTEM_CA`(이미 있으면 두기)
+    - 실제 서버(vscode-langservers-extracted 4.10.0, Node 26, 이 PC): 일회용 자체 서명 인증서(openssl)의 로컬 HTTPS 서버가 주는 스키마로 `{"port": "80"}`을 검사했다.
+      - 예전 설정(`http` 없음): 스키마를 받아 Expected "integer"(검증 없이 받는다)
+      - 새 설정 + `NODE_USE_SYSTEM_CA`: "Unable to load schema … self-signed certificate"
+      - 새 설정 + 그 인증서를 믿게(`NODE_EXTRA_CA_CERTS`): Expected "integer"
+      - 새 설정 + `NODE_USE_SYSTEM_CA`로 SchemaStore의 renovate 스키마: Expected "array"
+    - 실제 서버 시험(`download.rs`, `servers.yml`, 3개 OS)이 같은 설정과 서버 띄우기로 SchemaStore 스키마를 받는다.
+  - 확인하지 못한 것: OS 저장소에만 있는 루트 인증서(회사 TLS 검사 프록시)로 받는 것은 보지 않았다. 시험 때문에 OS 저장소를 바꾸지 않았다. 앱 화면으로는 보지 않았다(앱이 보내는 설정을 그대로 서버에 보내 확인했다).
 
 - [x] HTTP 요청 파일 보강(2026-11-04) — 작음~중간
   - 결정(사용자): `.http` 구문 강조, 파일·멀티파트 본문, 응답을 파일로 저장. 요청 기록은 이번에 넣지 않았다. 응답 처리 스크립트는 JS 엔진을 넣어야 해서 뺐다.

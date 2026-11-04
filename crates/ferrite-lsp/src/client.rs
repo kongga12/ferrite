@@ -94,6 +94,16 @@ pub fn hide_console(cmd: &mut Command) {
     let _ = cmd;
 }
 
+/// Node로 도는 서버(JSON 스키마 받기, TS의 타입 받기 npm 등)가 OS 인증서 저장소도 믿게 한다. 회사의 TLS
+/// 검사 프록시처럼 OS에 더한 루트 인증서를 Ferrite 자신의 다운로드와 같이 믿는다. Node 22.19·24.6부터
+/// 읽고, 그 전 판과 Node가 아닌 서버는 무시한다. 사용자가 이미 정했으면 그대로 둔다.
+fn use_system_ca(cmd: &mut Command) {
+    const NAME: &str = "NODE_USE_SYSTEM_CA";
+    if std::env::var_os(NAME).is_none() {
+        cmd.env(NAME, "1");
+    }
+}
+
 /// 서버가 돌려준 오류 응답.
 #[derive(Debug, Clone)]
 pub struct RpcError {
@@ -178,6 +188,7 @@ impl LanguageServer {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        use_system_ca(&mut cmd);
         hide_console(&mut cmd);
         let mut child = cmd
             .spawn()
@@ -603,6 +614,27 @@ fn reply_to_server_request(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn 서버가_os_인증서를_쓰게_하되_사용자가_정한_값은_둔다() {
+        let mut cmd = Command::new("node");
+        use_system_ca(&mut cmd);
+        let set: Vec<_> = cmd
+            .get_envs()
+            .filter(|(k, _)| *k == "NODE_USE_SYSTEM_CA")
+            .collect();
+        if std::env::var_os("NODE_USE_SYSTEM_CA").is_some() {
+            assert!(set.is_empty(), "물려받은 값을 그대로 둔다");
+        } else {
+            assert_eq!(
+                set,
+                [(
+                    std::ffi::OsStr::new("NODE_USE_SYSTEM_CA"),
+                    Some(std::ffi::OsStr::new("1"))
+                )]
+            );
+        }
+    }
 
     #[test]
     fn 물어서_받은_진단은_전체_목록만_꺼낸다() {
