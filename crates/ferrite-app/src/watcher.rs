@@ -4,7 +4,7 @@
 
 use std::collections::{BTreeSet, HashSet};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::mpsc::{Receiver, channel};
 
 use eframe::egui;
@@ -71,13 +71,44 @@ const SKIP_DIRS: [&str; 7] = [
     "target",
 ];
 
+/// 프로젝트 밖에서 이보다 얕은 폴더(홈 아래면 홈부터, 아니면 드라이브부터 센 깊이)는 감시하지 않는다.
+/// TS 서버는 프로젝트 밖 파일들의 공통 부모로 `C:\Users\<이름>\AppData` 같은 넓은 폴더를 등록하기도 한다.
+/// 타입 캐시는 충분히 깊다(`AppData\Local\Microsoft\TypeScript\7.0`, `~/.cache/typescript/7.0`).
+const MIN_OUTSIDE_DEPTH: usize = 3;
+
+/// `path`가 `dir` 아래(같은 것 포함)인지. Windows는 대소문자를 가리지 않는다(TS 서버는 소문자 경로도 보낸다).
+fn under(path: &Path, dir: &Path) -> bool {
+    if cfg!(windows) {
+        let lower = |p: &Path| PathBuf::from(p.to_string_lossy().to_lowercase());
+        lower(path).starts_with(lower(dir))
+    } else {
+        path.starts_with(dir)
+    }
+}
+
+/// 홈 아래면 홈부터, 아니면 드라이브(루트)부터 센 폴더 깊이.
+fn outside_depth(dir: &Path) -> usize {
+    let depth = |p: &Path| {
+        p.components()
+            .filter(|c| matches!(c, Component::Normal(_)))
+            .count()
+    };
+    let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" });
+    match home.map(PathBuf::from).filter(|home| under(dir, home)) {
+        Some(home) => depth(dir).saturating_sub(depth(&home)),
+        None => depth(dir),
+    }
+}
+
 /// 프로젝트 전체 감시. 에이전트·git·다른 도구가 디스크에 쓴 것을 언어 서버에 알리는 데 쓴다.
 /// Windows·macOS는 재귀 감시 하나로 보고, Linux는 inotify 감시 수 한도 때문에 뺄 폴더를 건너뛰며
 /// 폴더마다 감시한다(새로 생긴 폴더도 더한다).
+/// 서버가 감시를 등록한 프로젝트 밖 폴더(TS 서버의 타입 캐시 등)도 재귀로 본다(`watch_outside`).
 pub struct ProjectWatcher {
     watcher: RecommendedWatcher,
     events: Receiver<notify::Result<notify::Event>>,
     root: PathBuf,
+    outside: BTreeSet<PathBuf>,
 }
 
 impl ProjectWatcher {
@@ -91,6 +122,7 @@ impl ProjectWatcher {
             watcher,
             events,
             root: root.to_path_buf(),
+            outside: BTreeSet::new(),
         };
         if cfg!(target_os = "linux") {
             this.watch_tree(root);
@@ -122,12 +154,44 @@ impl ProjectWatcher {
         }
     }
 
+    /// 서버가 등록한 감시 폴더(`LanguageServer::watched_dirs`) 중 프로젝트 밖의 것도 재귀로 감시한다(바뀐
+    /// 것만 다시 건다). TS 서버는 받은 타입을 프로젝트 밖 캐시에 두고, 그 바뀜을 알려야 받는 중에 읽은 타입
+    /// 파일을 다시 읽는다. 프로젝트 안(이미 본다), 프로젝트를 품은 폴더와 너무 얕은 폴더(넓다)는 뺀다.
+    // ponytail: 감시를 걸지 못한 폴더(아직 없음)는 등록이 바뀔 때까지 다시 걸지 않는다.
+    pub fn watch_outside(&mut self, dirs: impl IntoIterator<Item = PathBuf>) {
+        let dirs: BTreeSet<PathBuf> = dirs
+            .into_iter()
+            .filter(|d| {
+                !under(d, &self.root)
+                    && !under(&self.root, d)
+                    && outside_depth(d) >= MIN_OUTSIDE_DEPTH
+            })
+            .collect();
+        // 다른 것 아래의 폴더는 재귀 감시가 이미 덮는다.
+        let dirs: BTreeSet<PathBuf> = dirs
+            .iter()
+            .filter(|d| !dirs.iter().any(|o| o != *d && under(d, o)))
+            .cloned()
+            .collect();
+        if dirs == self.outside {
+            return;
+        }
+        for gone in self.outside.difference(&dirs) {
+            let _ = self.watcher.unwatch(gone);
+        }
+        for new in dirs.difference(&self.outside) {
+            let _ = self.watcher.watch(new, RecursiveMode::Recursive);
+        }
+        self.outside = dirs;
+    }
+
     fn ignored(&self, path: &Path) -> bool {
-        path.strip_prefix(&self.root).map_or(true, |relative| {
-            relative
+        match path.strip_prefix(&self.root) {
+            Ok(relative) => relative
                 .components()
-                .any(|c| SKIP_DIRS.iter().any(|s| c.as_os_str() == *s))
-        })
+                .any(|c| SKIP_DIRS.iter().any(|s| c.as_os_str() == *s)),
+            Err(_) => !self.outside.iter().any(|d| under(path, d)),
+        }
     }
 
     /// 마지막 호출 이후 바뀐 것(같은 경로는 한 번). 종류는 지금 디스크 상태로 정한다:
@@ -162,7 +226,12 @@ impl ProjectWatcher {
             } else {
                 FileChange::Changed
             };
-            if cfg!(target_os = "linux") && change == FileChange::Created && path.is_dir() {
+            // 프로젝트 밖은 재귀 감시라 새 폴더를 notify가 더한다.
+            if cfg!(target_os = "linux")
+                && change == FileChange::Created
+                && path.starts_with(&self.root)
+                && path.is_dir()
+            {
                 self.watch_tree(&path);
             }
             changes.push((path, change));
@@ -223,6 +292,46 @@ mod tests {
 
         fs::remove_file(&java).unwrap();
         wait_for(&mut watcher, &(java, FileChange::Deleted));
+        drop(watcher);
+        crate::app::remove_project(&dir);
+    }
+
+    #[test]
+    fn 서버가_등록한_프로젝트_밖_폴더도_감시하되_넓은_폴더는_뺀다() {
+        let dir = std::env::temp_dir().join(format!("ferrite-watch-out-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let base = crate::app::real_path(&dir);
+        let root = base.join("project");
+        // TS 서버의 타입 캐시처럼 node_modules 아래에 받은 타입이 있다.
+        let cache = base.join("cache");
+        let types = cache.join("node_modules").join("@types").join("jquery");
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::create_dir_all(&types).unwrap();
+        let mut watcher = ProjectWatcher::new(&root, egui::Context::default()).unwrap();
+        let shallow = base.ancestors().last().unwrap().join("ferrite-shallow");
+        watcher.watch_outside([
+            cache.join("node_modules"), // 캐시 감시가 덮는다
+            cache.clone(),
+            base.clone(),     // 프로젝트를 품었다
+            root.join("src"), // 이미 본다
+            shallow,          // 너무 얕다
+        ]);
+        assert_eq!(watcher.outside, BTreeSet::from([cache.clone()]));
+
+        fs::write(base.join("other.txt"), "x").unwrap();
+        let typing = types.join("index.d.ts");
+        fs::write(&typing, "declare var $: any;").unwrap();
+        let seen = wait_for(&mut watcher, &(typing.clone(), FileChange::Created));
+        assert!(seen.iter().all(|(p, _)| p.starts_with(&cache)), "{seen:?}");
+        // 다시 쓴 것은 macOS(FSEvents)에서 만듦 표시가 이어 붙어 만듦으로 올 수 있어, 어느 OS에서나
+        // 같게 나오는 지움으로 다음 바뀜을 본다.
+        fs::remove_file(&typing).unwrap();
+        wait_for(&mut watcher, &(typing, FileChange::Deleted));
+
+        // 등록이 사라지면 감시를 푼다.
+        watcher.watch_outside([]);
+        assert!(watcher.outside.is_empty());
         drop(watcher);
         crate::app::remove_project(&dir);
     }

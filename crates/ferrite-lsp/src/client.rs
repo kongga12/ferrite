@@ -313,6 +313,11 @@ impl LanguageServer {
         );
     }
 
+    /// 서버가 등록한 감시 패턴들이 맞을 수 있는 폴더(`Watchers::dirs`).
+    pub fn watched_dirs(&self) -> Vec<PathBuf> {
+        lock(&self.shared).watchers.dirs()
+    }
+
     /// 디스크에서 바뀐 파일을 알린다. 서버가 등록한 패턴에 맞는 것만 보낸다(맞는 것이 없으면 보내지 않는다).
     pub fn did_change_watched_files(&self, changes: &[(PathBuf, FileChange)]) {
         let events: Vec<Value> = {
