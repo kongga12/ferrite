@@ -323,7 +323,13 @@ mod tests {
         let typing = types.join("index.d.ts");
         fs::write(&typing, "declare var $: any;").unwrap();
         let seen = wait_for(&mut watcher, &(typing.clone(), FileChange::Created));
-        assert!(seen.iter().all(|(p, _)| p.starts_with(&cache)), "{seen:?}");
+        // 넓은 폴더(`base`)의 바뀜은 오지 않는다. 프로젝트 안의 것은 와도 된다: macOS(FSEvents)는 감시를
+        // 걸기 직전에 만든 `project`·`project/src`의 만듦을 늦게 알리기도 한다.
+        assert!(
+            seen.iter()
+                .all(|(p, _)| p.starts_with(&cache) || p.starts_with(&root)),
+            "{seen:?}"
+        );
         // 다시 쓴 것은 macOS(FSEvents)에서 만듦 표시가 이어 붙어 만듦으로 올 수 있어, 어느 OS에서나
         // 같게 나오는 지움으로 다음 바뀜을 본다.
         fs::remove_file(&typing).unwrap();
