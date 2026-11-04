@@ -346,6 +346,13 @@ impl LspHub {
         let Some(disk) = &mut self.disk else {
             return;
         };
+        // 서버가 감시를 등록한 프로젝트 밖 폴더(TS 서버의 타입 캐시 등)도 본다.
+        disk.watch_outside(
+            self.servers
+                .values()
+                .filter_map(|s| s.lsp.as_ref())
+                .flat_map(|lsp| lsp.watched_dirs()),
+        );
         let changes = disk.changes();
         if changes.is_empty() {
             return;
