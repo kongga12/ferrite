@@ -324,8 +324,10 @@ mod tests {
         fs::write(&typing, "declare var $: any;").unwrap();
         let seen = wait_for(&mut watcher, &(typing.clone(), FileChange::Created));
         assert!(seen.iter().all(|(p, _)| p.starts_with(&cache)), "{seen:?}");
-        fs::write(&typing, "declare var $: JQueryStatic;").unwrap();
-        wait_for(&mut watcher, &(typing, FileChange::Changed));
+        // 다시 쓴 것은 macOS(FSEvents)에서 만듦 표시가 이어 붙어 만듦으로 올 수 있어, 어느 OS에서나
+        // 같게 나오는 지움으로 다음 바뀜을 본다.
+        fs::remove_file(&typing).unwrap();
+        wait_for(&mut watcher, &(typing, FileChange::Deleted));
 
         // 등록이 사라지면 감시를 푼다.
         watcher.watch_outside([]);
