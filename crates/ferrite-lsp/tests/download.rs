@@ -370,6 +370,8 @@ fn completes(
     let deadline = Instant::now() + limit;
     let mut found = vec![false; wanted.len()];
     let mut asked: HashMap<i64, usize> = HashMap::new();
+    // 실패하면 원인을 볼 수 있게 서버가 남기는 자동 타입 받기(ATA) 기록을 모은다.
+    let mut ata = Vec::new();
     while Instant::now() < deadline {
         if asked.is_empty() {
             for (i, ((line, character), _)) in wanted.iter().enumerate() {
@@ -395,6 +397,11 @@ fn completes(
                         .unwrap_or_default();
                     found[i] |= items.iter().any(|item| item["label"] == wanted[i].1);
                 }
+                ServerEvent::Notification { method, params } if method == "window/logMessage" => {
+                    if let Some(m) = params["message"].as_str().filter(|m| m.contains("ATA::")) {
+                        ata.push(m.to_owned());
+                    }
+                }
                 ServerEvent::Exited(reason) => panic!("서버가 끝남: {reason}"),
                 _ => {}
             }
@@ -404,7 +411,7 @@ fn completes(
         }
         std::thread::sleep(Duration::from_millis(500));
     }
-    eprintln!("나온 것: {found:?}");
+    eprintln!("나온 것: {found:?}\nATA 기록:\n{}", ata.join("\n"));
     false
 }
 
@@ -453,15 +460,13 @@ fn npm에서_받은_typescript_7은_jsconfig가_있으면_화면_폴더의_전�
         ferrite_core::web::jsconfig_text(&project, dir),
     )
     .unwrap();
+    // TS 7 서버는 같은 프로젝트의 타입 받기(npm install @types/jquery)를 둘 겹쳐 돌리고, 먼저 끝난 쪽을 보고
+    // 프로그램을 다시 만든다. 그때 다른 npm이 아직 jQuery 타입을 쓰고 있으면 덜 쓰인 타입을 읽고, 바뀜 알림이
+    // 올 때까지 다시 읽지 않아 그 세션은 jQuery를 모른다(Windows CI에서 가끔). 받은 타입은 디스크에
+    // 온전히 남고 다음 세션은 npm 없이 그것을 읽으므로, 서버를 한 번 다시 띄워 본다.
+    let complete = |limit| completes(&command, &project, &board, text, &[global, jquery], limit);
     assert!(
-        completes(
-            &command,
-            &project,
-            &board,
-            text,
-            &[global, jquery],
-            Duration::from_secs(180)
-        ),
+        complete(Duration::from_secs(60)) || complete(Duration::from_secs(120)),
         "jsconfig.json이 있으면 화면 폴더의 전역 함수와 jQuery($.ajax)를 완성한다"
     );
     remove(&root);
