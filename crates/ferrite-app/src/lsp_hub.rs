@@ -5,10 +5,12 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{Receiver, TryRecvError, channel};
 use std::time::{Duration, Instant};
 
 use eframe::egui;
 use ferrite_core::buffer::Buffer;
+use ferrite_core::settings::JsonSchemaSetting;
 use ferrite_core::syntax::{Lang, MAX_SYNTAX_BYTES};
 use ferrite_lsp::catalog::{self, Launch, Server as ServerSpec, Source};
 use ferrite_lsp::client::{
@@ -17,6 +19,7 @@ use ferrite_lsp::client::{
 };
 use ferrite_lsp::edits::{FileEdit, parse_workspace_edit};
 use ferrite_lsp::install;
+use ferrite_lsp::json;
 use ferrite_lsp::position::PositionEncoding;
 use ferrite_lsp::problem::{Problem, to_problems};
 use ferrite_lsp::spring;
@@ -272,6 +275,16 @@ struct Relay {
     id: Value,
 }
 
+/// SchemaStore 목록(JSON 스키마 연결). 앱을 켠 뒤 JSON 서버가 처음 준비되면 한 번 받는다.
+enum Catalog {
+    NotAsked,
+    Loading(Receiver<Result<Value, String>>),
+    /// `json/schemaAssociations`로 보낼 것.
+    Ready(Value),
+    /// 받지 못했다(망이 막힘 등). 내장 스키마만 쓴다.
+    Failed,
+}
+
 pub struct LspHub {
     root: Option<PathBuf>,
     /// 언어 서버 매니저가 서버를 설치하는 폴더.
@@ -299,6 +312,9 @@ pub struct LspHub {
     fan_outs: Vec<FanOut>,
     /// 프로젝트 전체 감시. 디스크에서 바뀐 파일을 서버에 알린다(서버가 등록한 패턴에 맞는 것만).
     disk: Option<ProjectWatcher>,
+    /// 사용자가 이은 JSON 스키마(settings.toml).
+    json_schemas: Vec<JsonSchemaSetting>,
+    catalog: Catalog,
     ctx: egui::Context,
 }
 
@@ -319,6 +335,8 @@ impl LspHub {
             crashes: HashMap::new(),
             fan_outs: Vec::new(),
             disk: None,
+            json_schemas: Vec::new(),
+            catalog: Catalog::NotAsked,
             ctx,
         }
     }
@@ -338,6 +356,87 @@ impl LspHub {
             self.fan_outs.clear();
             self.root = root.map(Path::to_path_buf);
             self.disk = root.and_then(|r| ProjectWatcher::new(r, self.ctx.clone()).ok());
+        }
+    }
+
+    /// settings.toml의 `[[json_schema]]`. 바뀌면 떠 있는 JSON 서버에 설정을 다시 보낸다.
+    pub fn set_json_schemas(&mut self, schemas: &[JsonSchemaSetting]) {
+        if self.json_schemas != schemas {
+            self.json_schemas = schemas.to_vec();
+            self.send_json_settings();
+        }
+    }
+
+    fn json_server(&self) -> Option<&LanguageServer> {
+        self.servers
+            .get(json::SERVER)
+            .and_then(|s| s.lsp.as_ref())
+            .filter(|l| l.is_ready())
+    }
+
+    /// JSON 서버에 설정(검사 켜기, 내장·사용자 스키마)을 보낸다.
+    fn send_json_settings(&self) {
+        let Some(lsp) = self.json_server() else {
+            return;
+        };
+        let offline = matches!(self.catalog, Catalog::Failed);
+        let user: Vec<json::UserSchema> = self
+            .json_schemas
+            .iter()
+            .map(|s| json::UserSchema {
+                files: &s.files,
+                url: &s.url,
+            })
+            .collect();
+        lsp.notify(
+            "workspace/didChangeConfiguration",
+            json!({ "settings": json::settings(self.root.as_deref(), &user, offline) }),
+        );
+    }
+
+    fn send_json_associations(&self) {
+        if let (Some(lsp), Catalog::Ready(associations)) = (self.json_server(), &self.catalog) {
+            lsp.notify("json/schemaAssociations", associations.clone());
+        }
+    }
+
+    /// 준비된 JSON 서버에 설정과 SchemaStore 연결을 보낸다. 목록은 처음이면 받기 시작한다.
+    fn start_json(&mut self) {
+        self.send_json_settings();
+        self.send_json_associations();
+        if matches!(self.catalog, Catalog::NotAsked) {
+            let (tx, rx) = channel();
+            let ctx = self.ctx.clone();
+            std::thread::spawn(move || {
+                let _ = tx.send(json::fetch_catalog().and_then(|text| json::associations(&text)));
+                ctx.request_repaint();
+            });
+            self.catalog = Catalog::Loading(rx);
+        }
+    }
+
+    /// 받은 SchemaStore 목록을 JSON 서버에 알린다. 못 받았으면 한 번 알린다.
+    fn poll_catalog(&mut self, updates: &mut Vec<HubUpdate>) {
+        let Catalog::Loading(rx) = &self.catalog else {
+            return;
+        };
+        let result = match rx.try_recv() {
+            Ok(result) => result,
+            Err(TryRecvError::Empty) => return,
+            Err(TryRecvError::Disconnected) => Err("SchemaStore 목록을 받지 못했습니다".into()),
+        };
+        match result {
+            Ok(associations) => {
+                self.catalog = Catalog::Ready(associations);
+                self.send_json_associations();
+            }
+            Err(e) => {
+                self.catalog = Catalog::Failed;
+                self.send_json_settings();
+                updates.push(HubUpdate::Message(format!(
+                    "{e}. 내장 JSON 스키마만 씁니다"
+                )));
+            }
         }
     }
 
@@ -754,6 +853,7 @@ impl LspHub {
             }
         }
         let mut updates = Vec::new();
+        self.poll_catalog(&mut updates);
         for (name, encoding, events) in batches {
             for event in events {
                 self.handle_event(name, encoding, event, &mut updates);
@@ -787,6 +887,9 @@ impl LspHub {
                 server.state = ServerState::Ready;
                 if server.spec.launch == Launch::SpringBoot {
                     self.start_spring(name);
+                }
+                if name == json::SERVER {
+                    self.start_json();
                 }
             }
             ServerEvent::Exited(reason) => {

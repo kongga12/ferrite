@@ -330,7 +330,7 @@ pub const SERVERS: &[Server] = &[
         },
     },
     Server {
-        name: "vscode-json",
+        name: crate::json::SERVER,
         languages: &["json"],
         version: WEB_SERVERS_VERSION,
         program: "vscode-json-language-server",

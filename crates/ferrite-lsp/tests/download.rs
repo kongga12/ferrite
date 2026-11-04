@@ -207,9 +207,19 @@ fn install_npm(root: &Path, server: &Server) -> Option<install::Installed> {
     Some(installed)
 }
 
-/// `file`의 진단 중 오류가 하나라도 올 때까지 기다린다. 진단을 묻는 서버(LSP 3.17 pull)에는 물어 보고,
-/// 아니면 서버가 보내 주기를 기다린다.
+/// `file`의 진단 중 오류가 하나라도 올 때까지 기다린다.
 fn wait_errors(lsp: &mut LanguageServer, file: &Path, limit: Duration) -> Vec<String> {
+    wait_diagnostics(lsp, file, limit, &[DiagnosticSeverity::ERROR])
+}
+
+/// `file`의 진단 중 `severities`인 것이 하나라도 올 때까지 기다린다. 진단을 묻는 서버(LSP 3.17 pull)에는
+/// 물어 보고, 아니면 서버가 보내 주기를 기다린다.
+fn wait_diagnostics(
+    lsp: &mut LanguageServer,
+    file: &Path,
+    limit: Duration,
+    severities: &[DiagnosticSeverity],
+) -> Vec<String> {
     let pull = lsp
         .capabilities()
         .is_some_and(|c| c.diagnostic_provider.is_some());
@@ -217,7 +227,7 @@ fn wait_errors(lsp: &mut LanguageServer, file: &Path, limit: Duration) -> Vec<St
     let errors = |diagnostics: &[Diagnostic]| -> Vec<String> {
         diagnostics
             .iter()
-            .filter(|d| d.severity == Some(DiagnosticSeverity::ERROR))
+            .filter(|d| d.severity.is_some_and(|s| severities.contains(&s)))
             .map(|d| d.message.clone())
             .collect()
     };
@@ -257,7 +267,7 @@ fn wait_errors(lsp: &mut LanguageServer, file: &Path, limit: Duration) -> Vec<St
         }
         assert!(
             Instant::now() < deadline,
-            "{limit:?} 안에 {}의 오류가 오지 않음",
+            "{limit:?} 안에 {}의 진단이 오지 않음",
             file.display()
         );
         std::thread::sleep(Duration::from_millis(200));
@@ -341,6 +351,9 @@ fn npm에서_html_css_json_서버를_한_폴더에_받아_띄운다() {
             let errors = wait_errors(&mut lsp, &file, Duration::from_secs(60));
             eprintln!("{name} 오류: {errors:?}");
         }
+        if language == "json" {
+            json_schemas(&mut lsp, &project);
+        }
         drop(lsp);
     }
     // 하나를 지워도 나머지는 남는다.
@@ -348,6 +361,61 @@ fn npm에서_html_css_json_서버를_한_폴더에_받아_띄운다() {
     assert!(install::installed(&root, servers[0]).is_none());
     assert!(install::installed(&root, servers[1]).is_some());
     remove(&root);
+}
+
+/// JSON 서버에 Ferrite의 설정(내장·사용자 스키마)과 SchemaStore 연결을 보내고, 스키마에 어긋난 파일에
+/// 경고가 오는지 본다. SchemaStore 목록을 못 받으면 그 부분은 건너뛴다.
+fn json_schemas(lsp: &mut LanguageServer, project: &Path) {
+    use ferrite_lsp::json;
+
+    let warnings = [DiagnosticSeverity::WARNING, DiagnosticSeverity::ERROR];
+    let limit = Duration::from_secs(60);
+    fs::create_dir_all(project.join("schemas")).unwrap();
+    fs::create_dir_all(project.join("config")).unwrap();
+    fs::write(
+        project.join("schemas/app.schema.json"),
+        r#"{ "type": "object", "properties": { "port": { "type": "integer" } } }"#,
+    )
+    .unwrap();
+    let files = ["config/*.json".to_owned()];
+    let settings = json::settings(
+        Some(project),
+        &[json::UserSchema {
+            files: &files,
+            url: "schemas/app.schema.json",
+        }],
+        false,
+    );
+    lsp.notify(
+        "workspace/didChangeConfiguration",
+        serde_json::json!({ "settings": settings }),
+    );
+    // 내장 스키마(망 없이)
+    let open = |lsp: &mut LanguageServer, name: &str, text: &str| {
+        let file = project.join(name);
+        fs::write(&file, text).unwrap();
+        lsp.did_open(&file, "json", 1, text);
+        file
+    };
+    let package = open(lsp, "package.json", "{ \"name\": 1 }\n");
+    let found = wait_diagnostics(lsp, &package, limit, &warnings);
+    eprintln!("package.json: {found:?}");
+    assert!(found.iter().any(|m| m.contains("string")), "{found:?}");
+    // 사용자 스키마(프로젝트 기준 패턴과 경로)
+    let app = open(lsp, "config/app.json", "{ \"port\": \"80\" }\n");
+    let found = wait_diagnostics(lsp, &app, limit, &warnings);
+    eprintln!("config/app.json: {found:?}");
+    assert!(found.iter().any(|m| m.contains("integer")), "{found:?}");
+    // SchemaStore 목록(망이 될 때): 서버가 스키마를 https로 받는다.
+    match json::fetch_catalog().and_then(|text| json::associations(&text)) {
+        Ok(associations) => {
+            lsp.notify("json/schemaAssociations", associations);
+            let renovate = open(lsp, "renovate.json", "{ \"extends\": 1 }\n");
+            let found = wait_diagnostics(lsp, &renovate, limit, &warnings);
+            eprintln!("renovate.json: {found:?}");
+        }
+        Err(e) => eprintln!("{e}: SchemaStore 연결은 건너뜁니다"),
+    }
 }
 
 /// 보낼 자동완성 위치(줄, 열)와 나와야 할 이름.

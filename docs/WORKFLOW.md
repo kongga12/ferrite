@@ -1067,7 +1067,7 @@
     - 단위: npm 실행 대상 이름 바꾸기, 공용 폴더 설치 기록·지우기, 물어서 받은 진단 읽기, TypeScript·TSX 강조(TS 규칙 + JS·JSX 규칙)
     - 실제 설치(내려받기 시험, 기본으로는 돌지 않는다. CI 3개 OS 전체 작업이 Node 22로 따로 돌린다): TypeScript 7을 받아 Node 없이 띄우고 물어서 타입 오류를 받는다. HTML·CSS·JSON을 함께 설치해 한 폴더를 같이 쓰고, CSS·JSON 진단을 받고, 하나를 지워도 나머지가 남는다.
     - 실제 앱(Windows, 릴리스 빌드): 언어 서버 창에서 넷을 연달아 설치하고, `.ts`의 타입 오류 물결선과 상태 표시줄(`typescript: 준비됨`, 오류 1), `.js`의 `document.getElem` 자동완성(`getElementById` 등), CSS·JSON 진단을 화면으로 확인했다. 확인 뒤 설치 폴더와 설정 폴더를 지웠다.
-  - 남은 것: JSON 스키마 검사(`package.json` 등 스키마를 서버에 알리기), egov 화면의 jQuery 자동완성(Phase 완료 조건에서 확인)
+  - 남은 것: egov 화면의 jQuery 자동완성(Phase 완료 조건에서 확인). JSON 스키마 검사는 백로그 "JSON 스키마 검사"(2026-11-04)에서 했다.
 - [x] 8-2 기호 개요·기호 찾기, 엔드포인트 목록 — 중간
   - 결정(사용자): 엔드포인트는 따로 창(8-3의 요청 만들기를 붙일 자리), 개요는 도킹 창
   - 개요 창(`Ctrl+Shift+O`, [편집 > 개요]): 프로젝트 옆 탭. 지금 문서를 맡은 서버 중 기호를 주는 첫 서버에 `textDocument/documentSymbol`을 묻는다.
@@ -1398,6 +1398,21 @@
     - 실제 TS 7(시험 코드로): 타입 캐시의 jQuery 타입 파일을 비운 채 띄우면 `$.ajax` 완성이 없고, 파일을 되돌려도 알리지 않으면 계속 없고, 알리면 나온다.
     - 실제 앱(Windows, 릴리스 빌드, MCP로 진단 읽기): `// @ts-check`와 `$.ajaxx()`를 쓴 board.js를 열면 "Property 'ajaxx' does not exist on type 'JQueryStatic'" 오류가 난다. 타입 캐시의 `JQueryStatic.d.ts`에 `ajaxx` 선언을 더하면 1.2초 만에 오류가 사라지고, 되돌리면 1.2초 만에 다시 뜬다. 고치기 전(main) 앱은 선언을 더하고 10초가 지나도 오류가 그대로였다.
   - 확인하지 못한 것: TS 서버의 npm이 실제로 겹친 순간을 앱에서 재현하지는 않았다(드물다). 같은 결과(파일이 다 쓰인 뒤의 바뀜 알림)를 위처럼 파일을 바꿔 확인했다. macOS·Linux의 실제 앱은 보지 않았다(단위 시험은 3개 OS CI).
+
+- [x] JSON 스키마 검사(2026-11-04) — 작음~중간
+  - 결정(사용자): 내장 스키마와 SchemaStore 목록(온라인, 망이 막히면 내장만), settings.toml의 `[[json_schema]]`로 사용자 연결, 실제 서버(npm, 풀면 약 85MB)로 확인.
+  - 내장(`ferrite-lsp` `schemas/`, SchemaStore Apache-2.0, `NOTICE.md`): package.json·tsconfig*.json·jsconfig.json·.eslintrc(.json)·.prettierrc(.json)·.babelrc(.json)·babel.config.json. 합쳐 548KB. 특정 편집기 전용 확장 키(`x-` 일부)는 뺐다(검사 규칙은 그대로).
+    - 설정의 `json.schemas`에 내용째 넣고 주소는 SchemaStore 것(`https://www.schemastore.org/<이름>.json`)을 써서, 다른 스키마가 그 주소를 가리켜도(package.json → prettierrc·eslintrc) 망 없이 푼다.
+  - SchemaStore 목록(약 1,400종, 파일 패턴 약 3,000개): 앱을 켠 뒤 JSON 서버가 처음 준비되면 한 번 받아(0.5MB) `json/schemaAssociations`로 알린다. 스키마 내용은 서버가 https로 직접 받는다.
+    - 연결은 객체 꼴(`{ 패턴: [주소] }`)로 보낸다. 배열 꼴은 서버의 JSON-RPC가 배열 `params`를 인자로 펼쳐 첫 항목만 받아 아무 파일에도 맞지 않았다(실제 서버로 확인).
+    - 못 받으면 상태바에 알리고 내장만 쓴다. 이때는 내장 스키마에서 바깥 스키마를 가리키는 `$ref`를 빼고 다시 보낸다: 서버(4.10.0)는 받지 못한 참조가 하나라도 있으면 그 스키마로 검사하지 않고 "Unable to load schema"만 알리는데, package.json 스키마도 stylelintrc 등 바깥 스키마 9개를 가리킨다. 빼면 그 안쪽(다른 도구 설정)만 검사하지 않는다. `json.validate.schemaRequest`로 경고를 끄는 길은 이 판의 서버가 그 설정을 읽지 않아 쓰지 않았다.
+  - 사용자 연결(`[[json_schema]]` `files`·`url`): 패턴은 프로젝트 기준(`folderUri`), `url`은 주소(`https://`·`file://`)나 프로젝트 기준 경로. 바뀌면 떠 있는 JSON 서버에 설정을 다시 보낸다.
+  - 설정은 JSON 서버가 준비되면 `workspace/didChangeConfiguration`으로 보낸다. 서버는 설정에 `json.validate.enable`이 없으면 검사를 끄므로 늘 켠다(지금까지는 설정을 보내지 않아 서버의 처음 기본값으로 문법만 검사했다).
+  - 검증
+    - 단위: 내장·사용자 설정(내용째·주소·프로젝트 기준 경로와 패턴, 빈 주소 빼기), 망이 막혔을 때 바깥 참조 빼기(상대 주소 포함, 같은 스키마 안·내장끼리는 둠), 목록을 패턴별 연결로(내장 빼기, 같은 패턴 여러 주소), `[[json_schema]]` 읽기
+    - 실제 서버(`download.rs`의 웹 서버 묶음 시험, `servers.yml`): 내장(package.json `"name": 1` → Expected "string"), 사용자 연결(config/app.json → Expected "integer"), SchemaStore 목록(renovate.json `"extends": 1` → Expected "array")
+    - 실제 앱(Windows, 릴리스 빌드, MCP로 진단 읽기): 같은 세 경우가 0.5~1초에 뜬다. 닿지 않는 프록시로 망을 막으면 package.json은 내장으로 검사하고(목록 받기 실패 뒤 다시 보낸 설정으로) renovate.json은 진단이 없다.
+  - 확인하지 못한 것: 화면으로 직접 본 것은 아니다(MCP로 읽음). 프록시 뒤에서 서버가 스키마를 받는 것은 보지 않았다(Ferrite는 `HTTPS_PROXY`로 목록을 받지만 서버의 `http.proxy`는 넘기지 않는다).
 
 - 살폈지만 넣지 않은 것: 임베디드(MCU 플래시·시리얼 모니터·장비 설정 파일), 프레임워크별 지원(React·Vue·Angular 등, JS·TS 언어 서버로 기본은 된다), 린터 개별 연동(언어 서버나 저장 시 작업으로 된다), 원격 개발·컨테이너·SFTP 배포, 로컬 AI 완성 모델, 계정 기반 설정 동기화. egov 개발과 거리가 멀거나 크기에 비해 쓰임이 적다.
 
