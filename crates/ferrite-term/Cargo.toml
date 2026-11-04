@@ -8,3 +8,7 @@ publish.workspace = true
 
 [dependencies]
 alacritty_terminal = "0.26.0"
+
+# PTY를 직접 열어 slave를 쥐어 둔다(셸이 끝날 때 마지막 출력을 잃지 않게, `Terminal::spawn` 참고).
+[target.'cfg(unix)'.dependencies]
+rustix-openpty = "0.2.0"
