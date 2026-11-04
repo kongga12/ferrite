@@ -1,0 +1,115 @@
+{
+  "name": "HTTP 요청",
+  "scopeName": "source.http",
+  "patterns": [
+    { "include": "#separator" },
+    { "include": "#comment" },
+    { "include": "#file-variable" },
+    { "include": "#request" }
+  ],
+  "repository": {
+    "separator": { "match": "^\\s*###.*", "name": "markup.heading.http" },
+    "comment": {
+      "begin": "^\\s*(?:#|//)",
+      "end": "$",
+      "name": "comment.line.http",
+      "patterns": [
+        {
+          "match": "@(?:name|insecure|no-redirect|no-cookie-jar)\\b",
+          "name": "keyword.other.directive.http"
+        }
+      ]
+    },
+    "file-variable": {
+      "begin": "^\\s*(@[\\w.-]+)\\s*(=)",
+      "beginCaptures": { "1": { "name": "variable.other.property.http" } },
+      "end": "$",
+      "contentName": "string.unquoted.http",
+      "patterns": [{ "include": "#variable" }]
+    },
+    "variable": { "match": "\\{\\{[^}]*\\}\\}", "name": "entity.name.tag.variable.http" },
+    "request": {
+      "comment": "메서드가 없는 줄도 요청 줄이다(GET). 끝은 다음 ###.",
+      "begin": "^\\s*(?=\\S)(?:((?i:GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS|TRACE|CONNECT))(?:\\s+|$))?",
+      "beginCaptures": { "1": { "name": "keyword.control.http" } },
+      "end": "\\A(?=\\s*###)",
+      "patterns": [{ "include": "#request-line" }, { "include": "#headers" }]
+    },
+    "request-line": {
+      "comment": "요청 줄의 나머지(주소). 첫 줄에서만 맞도록 닻(\\G)에서 시작한다.",
+      "begin": "\\G(?=\\S)",
+      "end": "$",
+      "contentName": "string.unquoted.url.http",
+      "patterns": [
+        { "include": "#variable" },
+        { "match": "\\s+(HTTP/[\\d.]+)\\s*$", "captures": { "1": { "name": "constant.other.version.http" } } }
+      ]
+    },
+    "headers": {
+      "patterns": [
+        { "include": "#body" },
+        { "include": "#save" },
+        { "include": "#handler" },
+        { "include": "#comment" },
+        {
+          "begin": "^\\s*(?=[?&])",
+          "end": "$",
+          "contentName": "string.unquoted.url.http",
+          "patterns": [{ "include": "#variable" }]
+        },
+        {
+          "begin": "^\\s*([^\\s:]+)\\s*(:)",
+          "beginCaptures": { "1": { "name": "entity.other.attribute-name.header.http" } },
+          "end": "$",
+          "patterns": [{ "include": "#variable" }]
+        }
+      ]
+    },
+    "body": {
+      "comment": "헤더 뒤의 첫 빈 줄부터 다음 ###까지. 줄 끝의 줄바꿈 뒤에서도 ^가 맞으므로 줄 처음(\\A)으로 잡는다.",
+      "begin": "\\A\\s*$",
+      "end": "\\A(?=\\s*###)",
+      "patterns": [
+        { "include": "#save" },
+        { "include": "#handler" },
+        { "include": "#file-include" },
+        { "include": "#variable" },
+        { "include": "#json" }
+      ]
+    },
+    "save": {
+      "match": "^\\s*(>>!?)\\s*(.*)",
+      "captures": {
+        "1": { "name": "keyword.other.save.http" },
+        "2": { "name": "string.unquoted.path.http" }
+      }
+    },
+    "handler": {
+      "comment": "응답 처리 스크립트는 돌리지 않으므로 주석처럼 흐리게 보인다.",
+      "patterns": [
+        { "begin": "^\\s*>\\s*\\{%", "end": "%\\}", "name": "comment.block.handler.http" },
+        { "match": "^\\s*>\\s.*", "name": "comment.line.handler.http" }
+      ]
+    },
+    "file-include": {
+      "match": "^\\s*(<)\\s+(.*)",
+      "captures": {
+        "1": { "name": "keyword.other.include.http" },
+        "2": { "name": "string.unquoted.path.http" }
+      }
+    },
+    "json": {
+      "patterns": [
+        { "match": "\"(?:[^\"\\\\]|\\\\.)*\"(?=\\s*:)", "name": "variable.other.property.key.http" },
+        {
+          "begin": "\"",
+          "end": "\"|$",
+          "name": "string.quoted.double.http",
+          "patterns": [{ "match": "\\\\.", "name": "constant.character.escape.http" }, { "include": "#variable" }]
+        },
+        { "match": "-?\\b\\d+(?:\\.\\d+)?(?:[eE][+-]?\\d+)?\\b", "name": "constant.numeric.http" },
+        { "match": "\\b(?:true|false|null)\\b", "name": "constant.language.http" }
+      ]
+    }
+  }
+}

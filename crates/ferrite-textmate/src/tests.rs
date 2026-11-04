@@ -339,6 +339,82 @@ fn 펜스_코드_블록은_안쪽_문법으로_칠하고_같은_펜스로_닫는
 }
 
 #[test]
+fn 내장_http_문법으로_요청_파일을_칠한다() {
+    let registry = Registry::default();
+    let http = registry.language_for(Path::new("api/board.REST")).unwrap();
+    assert_eq!(
+        (http.name.as_str(), http.line_comment.as_deref()),
+        ("HTTP 요청", Some("#"))
+    );
+    let got = spans(
+        http.grammar().unwrap(),
+        "@host = {{baseUrl}}/app\n\
+         ### 글 저장\n\
+         # @name save\n\
+         POST {{host}}/save.do HTTP/1.1\n\
+         \x20   &size=10\n\
+         Content-Type: application/json\n\
+         \n\
+         {\"title\": \"{{$uuid}}\", \"n\": 1.5, \"ok\": true}\n\
+         < ./a.png\n\
+         > {%\n\
+         client.log(1)\n\
+         %}\n\
+         >>! out/r.json\n\
+         ###\n\
+         http://localhost/ping\n\
+         \n\
+         Accept: x\n",
+    );
+    assert_eq!(got[0][0], s("@host", Property));
+    assert!(got[0].contains(&s("{{baseUrl}}", Tag)));
+    assert_eq!(got[1], [s("### 글 저장", Keyword)]);
+    assert_eq!(
+        got[2],
+        [s("# ", Comment), s("@name", Keyword), s(" save", Comment)]
+    );
+    assert_eq!(
+        got[3],
+        [
+            s("POST", Keyword),
+            s("{{host}}", Tag),
+            s("/save.do ", STR),
+            s("HTTP/1.1", Constant)
+        ]
+    );
+    assert_eq!(got[4], [s("&size=10", STR)], "질의 이어 쓰기");
+    assert_eq!(got[5], [s("Content-Type", Property)]);
+    assert_eq!(
+        got[7],
+        [
+            s("\"title\"", Property),
+            s("\"", STR),
+            s("{{$uuid}}", Tag),
+            s("\"", STR),
+            s("\"n\"", Property),
+            s("1.5", Constant),
+            s("\"ok\"", Property),
+            s("true", Constant)
+        ]
+    );
+    assert_eq!(got[8], [s("<", Keyword), s("./a.png", STR)]);
+    assert!(
+        got[9..12]
+            .iter()
+            .all(|row| row.iter().all(|(_, k)| *k == Comment)),
+        "돌리지 않는 응답 스크립트는 흐리게"
+    );
+    assert_eq!(got[12], [s(">>!", Keyword), s("out/r.json", STR)]);
+    assert_eq!(got[13], [s("###", Keyword)]);
+    assert_eq!(
+        got[14],
+        [s("http://localhost/ping", STR)],
+        "메서드 없는 요청 줄"
+    );
+    assert!(got[16].is_empty(), "빈 줄 뒤는 본문이라 헤더가 아니다");
+}
+
+#[test]
 fn 내장_handlebars_문법으로_템플릿을_칠한다() {
     // 확장이 없어도 `.hbs`는 내장 언어로 보고, 확장 수에는 세지 않는다.
     let registry = Registry::default();

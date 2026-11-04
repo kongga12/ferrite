@@ -40,6 +40,8 @@ Rust로 작성한 크로스플랫폼(Windows / macOS / Linux) 경량 IDE.
   - JSON은 키 차례 그대로 들여 쓰고, 본문은 응답 문자 집합대로 푼다(없으면 UTF-8, 아니면 EUC-KR).
   - OS 인증서 저장소와 `HTTPS_PROXY`를 따른다. 자체 서명 인증서는 요청 위에 `# @insecure`를 적었을 때만 받는다. `# @no-redirect`·`# @no-cookie-jar`도 있다.
   - 엔드포인트 창의 [요청]은 `http/<컨트롤러>.http`에 그 URL의 요청을 만든다(환경 파일이 없으면 견본도).
+  - 본문의 `< ./photo.png` 줄은 그 파일을 바이트 그대로 넣는다(멀티파트 업로드도). 요청 끝의 `>> out/a.json`은 응답 본문을 저장한다(있으면 번호를 붙이고, `>>!`는 덮어쓴다). 응답 처리 스크립트(`> {% %}`)는 돌리지 않는다.
+  - 요청·헤더·`{{변수}}`·JSON 본문을 칠한다.
 - 트리 우클릭: 새 파일·새 폴더·이름 바꾸기·휴지통으로 삭제
 - 가상화 코드 에디터: 100MB 파일도 스크롤·입력 1ms 미만, 줄 번호, 한글 IME 조합 표시
 - 언어 서버(LSP): 에이전트·git·다른 도구가 디스크에서 바꾼 파일은 서버가 등록한 패턴(`workspace/didChangeWatchedFiles`)에 맞춰 알린다. 내장 egov 서버는 바뀐 Java·매퍼 XML을 다시 색인한다. rust-analyzer로 검증했다. gopls·clangd·basedpyright·phpactor·lemminx(XML)·jdt.ls(Java)도 연결한다. JS·TS는 TypeScript 7, HTML·CSS·JSON은 vscode-langservers-extracted를 npm으로 설치한다(npm 필요, HTML·CSS·JSON은 Node 필요). JSON은 스키마로도 검사한다: package.json·tsconfig 등은 내장 스키마(망 없이), 그 밖의 잘 알려진 파일은 SchemaStore 목록(망이 될 때), 프로젝트의 JSON은 settings.toml의 `[[json_schema]]`로 잇는다.

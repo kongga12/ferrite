@@ -7330,7 +7330,7 @@ mod tests {
         let file = dir.join("http").join("login.http");
         fs::write(
             &file,
-            "### 로그인\nGET {{base}}/login\n\n### 내 정보\nGET {{base}}{{path}}\n",
+            "### 로그인\nGET {{base}}/login\n\n### 내 정보\nGET {{base}}{{path}}\n>> out/me.json\n",
         )
         .unwrap();
 
@@ -7386,6 +7386,21 @@ mod tests {
             harness.state().http.body(),
             Some("{\n  \"user\": \"관리자\"\n}")
         );
+        // `>> out/me.json`: 앞의 401(빈 본문)이 그 파일에 썼으므로 번호를 붙인 파일에 받은 그대로 쓴다.
+        let out = dir.join("http").join("out");
+        assert_eq!(
+            harness.state().http.saved(),
+            Some(&Ok(out.join("me-1.json")))
+        );
+        assert_eq!(fs::read(out.join("me.json")).unwrap(), b"");
+        assert_eq!(
+            fs::read_to_string(out.join("me-1.json")).unwrap(),
+            r#"{"user":"관리자"}"#
+        );
+        harness.get_by_label(&format!(
+            "응답 본문을 저장했습니다: {}",
+            out.join("me-1.json").display()
+        ));
 
         // 개인 환경 파일이 git에서 빠지지 않았으면 경고하고, 누르면 .gitignore에 더한다.
         harness.get_by_label(".gitignore에 더하기").click();

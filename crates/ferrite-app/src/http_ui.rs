@@ -46,7 +46,18 @@ struct Sent {
     env: Option<String>,
     /// 아직 받는 중이면 None.
     result: Option<Result<Shown, String>>,
+    /// `>> 경로`로 응답 본문을 쓴 파일, 또는 쓰지 못한 까닭.
+    saved: Option<Result<PathBuf, String>>,
+    /// 응답 처리 스크립트(`> …`)가 있었다(돌리지 않는다).
+    handler: bool,
 }
+
+/// 보내는 스레드가 돌려주는 것: 응답, 쿠키 저장소, 응답을 저장한 결과.
+type Received = (
+    Result<Response, String>,
+    CookieJar,
+    Option<Result<PathBuf, String>>,
+);
 
 /// 받은 응답과, 보일 본문 글(길면 앞만).
 struct Shown {
@@ -110,7 +121,7 @@ pub struct HttpPanel {
     /// 개인 환경 파일을 `.gitignore`가 빼지 않는 프로젝트 루트(경고하고 더하기를 권한다).
     unignored: Option<PathBuf>,
     sent: Option<Sent>,
-    rx: Option<Receiver<(Result<Response, String>, CookieJar)>>,
+    rx: Option<Receiver<Received>>,
     tab: Tab,
     status: Option<String>,
 }
@@ -164,8 +175,10 @@ impl HttpPanel {
             url: request.url.clone(),
             env: self.env.clone(),
             result: None,
+            saved: None,
+            handler: request.handler,
         };
-        match ferrite_http::prepare(&file, request, env) {
+        match ferrite_http::prepare(&file, request, env, dir) {
             Err(e) => {
                 sent.result = Some(Err(e));
                 self.rx = None;
@@ -183,7 +196,14 @@ impl HttpPanel {
                     .name("http-request".into())
                     .spawn(move || {
                         let result = client.send(&prepared, &mut jar);
-                        let _ = tx.send((result, jar));
+                        let saved = match (&result, &prepared.save) {
+                            (Ok(response), Some((path, overwrite))) => Some(
+                                ferrite_http::save_body(path, *overwrite, &response.body)
+                                    .map_err(|e| format!("{} ({e})", path.display())),
+                            ),
+                            _ => None,
+                        };
+                        let _ = tx.send((result, jar, saved));
                         ctx.request_repaint();
                     });
                 match spawned {
@@ -218,19 +238,25 @@ impl HttpPanel {
         let Some(rx) = &self.rx else {
             return;
         };
-        let received = match rx.try_recv() {
-            Ok((result, jar)) => {
+        let (received, saved) = match rx.try_recv() {
+            Ok((result, jar, saved)) => {
                 self.jar = jar;
-                Some(result.map(Shown::new))
+                (result.map(Shown::new), saved)
             }
             Err(TryRecvError::Empty) => return,
             // 스레드가 패닉했다. 쿠키는 잃는다.
-            Err(TryRecvError::Disconnected) => Some(Err("보내다가 멈췄습니다".into())),
+            Err(TryRecvError::Disconnected) => (Err("보내다가 멈췄습니다".into()), None),
         };
         self.rx = None;
         if let Some(sent) = &mut self.sent {
-            sent.result = received;
+            sent.result = Some(received);
+            sent.saved = saved;
         }
+    }
+
+    #[cfg(test)]
+    pub fn saved(&self) -> Option<&Result<PathBuf, String>> {
+        self.sent.as_ref()?.saved.as_ref()
     }
 
     pub fn ui(&mut self, ui: &mut egui::Ui) {
@@ -305,6 +331,21 @@ impl HttpPanel {
             .map(|e| format!(" · 환경 {e}"))
             .unwrap_or_default();
         ui.weak(format!("{} {}{env}", sent.method, sent.url));
+        if sent.handler {
+            ui.weak("응답 처리 스크립트(> …)는 돌리지 않습니다");
+        }
+        match &sent.saved {
+            Some(Ok(path)) => {
+                ui.weak(format!("응답 본문을 저장했습니다: {}", path.display()));
+            }
+            Some(Err(e)) => {
+                ui.colored_label(
+                    ui.visuals().error_fg_color,
+                    format!("응답 본문을 저장하지 못했습니다: {e}"),
+                );
+            }
+            None => {}
+        }
         let shown = match &sent.result {
             None => {
                 ui.horizontal(|ui| {

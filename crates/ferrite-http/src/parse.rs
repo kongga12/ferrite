@@ -9,7 +9,11 @@
 //! Accept: application/json         ← 헤더(빈 줄까지)
 //!
 //! {"q": "본문"}                     ← 본문(다음 ### 까지)
+//! < ./photo.png                    ← 본문 줄 대신 그 파일 내용(멀티파트의 파트에도 쓴다)
+//! >> ./out.json                    ← 응답 본문을 저장(`>>!`는 덮어쓴다)
 //! ```
+//!
+//! 응답 처리 스크립트(`> {% … %}`, `> ./script.js`)는 돌리지 않고 본문에서 뺀다.
 
 use std::ops::Range;
 
@@ -28,11 +32,22 @@ pub struct Request {
     pub method: String,
     pub url: String,
     pub headers: Vec<(String, String)>,
+    /// 본문 글. `< 경로` 줄은 그대로 두고 보낼 때 파일 내용으로 바꾼다.
     pub body: Option<String>,
+    /// `>> 경로`(덮어쓰면 `>>!`): 응답 본문을 저장할 파일(변수를 채우기 전).
+    pub save: Option<Save>,
+    /// 응답 처리 스크립트가 있었다(돌리지 않는다).
+    pub handler: bool,
     /// 이 요청만 서버 인증서를 검증하지 않는다(개발 서버의 자체 서명 인증서).
     pub insecure: bool,
     pub no_redirect: bool,
     pub no_cookie_jar: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Save {
+    pub path: String,
+    pub overwrite: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -100,9 +115,15 @@ fn block(
     let mut state = State::Before;
     let mut body: Vec<&str> = Vec::new();
     let mut found = false;
+    // `> {%`부터 `%}`까지(응답 처리 스크립트) 안이다.
+    let mut in_handler = false;
     for i in range {
         let line = lines[i];
         let trimmed = line.trim();
+        // 본문 없이 헤더 바로 뒤에 온 `>> 경로`·`> 스크립트`도 받는다.
+        if matches!(state, State::Headers) && trimmed.starts_with('>') {
+            state = State::Body;
+        }
         match state {
             State::Before => {
                 if trimmed.is_empty() {
@@ -163,7 +184,28 @@ fn block(
                         .push((name.trim().to_owned(), value.trim().to_owned()));
                 }
             }
-            State::Body => body.push(line),
+            State::Body => {
+                if in_handler {
+                    in_handler = !trimmed.contains("%}");
+                } else if let Some(rest) = trimmed.strip_prefix(">>") {
+                    let (overwrite, path) = match rest.strip_prefix('!') {
+                        Some(path) => (true, path),
+                        None => (false, rest),
+                    };
+                    let path = path.trim();
+                    if !path.is_empty() {
+                        request.save = Some(Save {
+                            path: path.to_owned(),
+                            overwrite,
+                        });
+                    }
+                } else if let Some(rest) = trimmed.strip_prefix("> ") {
+                    request.handler = true;
+                    in_handler = rest.trim_start().starts_with("{%") && !rest.contains("%}");
+                } else {
+                    body.push(line);
+                }
+            }
         }
     }
     while body.last().is_some_and(|l| l.trim().is_empty()) {
@@ -246,6 +288,43 @@ mod tests {
         );
         assert_eq!(file.request_at(18).map(|r| r.line), Some(10));
         assert_eq!(file.request_at(0), None);
+    }
+
+    #[test]
+    fn 파일_본문은_두고_저장_줄과_응답_스크립트는_뺀다() {
+        let file = parse(
+            "POST /up\nContent-Type: multipart/form-data; boundary=B\n\n--B\n\n< ./a.png\n--B--\n\n> {%\n  client.test(\"x\", () => {});\n%}\n>> {{dir}}/out.json\n### 둘\nGET /a\n\n> ./check.js\n>>! b.txt\n",
+        );
+        let up = &file.requests[0];
+        assert_eq!(up.body.as_deref(), Some("--B\n\n< ./a.png\n--B--"));
+        assert_eq!(
+            up.save,
+            Some(Save {
+                path: "{{dir}}/out.json".into(),
+                overwrite: false
+            })
+        );
+        assert!(up.handler);
+        let get = &file.requests[1];
+        assert_eq!(get.body, None);
+        assert!(
+            get.handler
+                && get
+                    .save
+                    .as_ref()
+                    .is_some_and(|s| s.overwrite && s.path == "b.txt")
+        );
+        assert!(!parse("GET /a\n").requests[0].handler);
+        let direct = &parse("GET /a\nAccept: */*\n>> a.json\n").requests[0];
+        assert_eq!(
+            (
+                direct.headers.len(),
+                direct.body.as_ref(),
+                direct.save.is_some()
+            ),
+            (1, None, true),
+            "헤더 바로 뒤의 저장 줄"
+        );
     }
 
     #[test]

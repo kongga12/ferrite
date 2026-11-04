@@ -8,7 +8,10 @@ pub mod parse;
 
 use std::cell::RefCell;
 use std::collections::hash_map::RandomState;
+use std::fs::{self, OpenOptions};
 use std::hash::{BuildHasher, Hasher};
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ureq::Agent;
@@ -21,6 +24,8 @@ pub use parse::{HttpFile, Request, parse};
 
 /// 받는 본문의 상한.
 const MAX_BODY: u64 = 20 * 1024 * 1024;
+/// 본문에 넣는 파일(`< 경로`) 하나의 상한. 보내는 본문은 메모리에 다 올린다.
+const MAX_BODY_FILE: u64 = 100 * 1024 * 1024;
 const MAX_REDIRECTS: usize = 10;
 
 /// 변수를 채운 보낼 요청.
@@ -29,18 +34,23 @@ pub struct Prepared {
     pub method: String,
     pub url: String,
     pub headers: Vec<(String, String)>,
-    pub body: Option<String>,
+    /// `< 경로` 줄을 파일 내용으로 바꾼 본문. 멀티파트면 줄을 CRLF로 잇는다.
+    pub body: Option<Vec<u8>>,
+    /// 응답 본문을 저장할 파일과 덮어쓰기(`>>!`).
+    pub save: Option<(PathBuf, bool)>,
     pub insecure: bool,
     pub no_redirect: bool,
     pub no_cookie_jar: bool,
 }
 
 /// 요청의 `{{변수}}`를 채운다. 찾는 순서: 파일 변수(그 안의 변수도 채운다), 고른 환경, 동적 변수
-/// (`$uuid`, `$timestamp`, `$randomInt`).
+/// (`$uuid`, `$timestamp`, `$randomInt`). 본문의 파일과 저장할 파일의 상대 경로는 `dir`(요청 파일의
+/// 폴더) 기준이다.
 pub fn prepare(
     file: &HttpFile,
     request: &Request,
     env: Option<(&Environments, &str)>,
+    dir: &Path,
 ) -> Result<Prepared, String> {
     /// 파일 변수 안에서 못 채운 이름은 `nested`에 모은다(바깥의 파일 변수 이름보다 쓸모 있다).
     fn lookup(
@@ -77,12 +87,16 @@ pub fn prepare(
         })
     };
     let url = take(fill(&request.url));
-    let headers = request
+    let headers: Vec<(String, String)> = request
         .headers
         .iter()
         .map(|(k, v)| (k.clone(), take(fill(v))))
         .collect();
     let body = request.body.as_deref().map(|b| take(fill(b)));
+    let save = request
+        .save
+        .as_ref()
+        .map(|s| (dir.join(take(fill(&s.path))), s.overwrite));
     missing.retain(|name| !file.variables.iter().any(|(n, _)| n == name));
     for name in nested.into_inner() {
         if !missing.contains(&name) {
@@ -96,15 +110,102 @@ pub fn prepare(
         };
         return Err(format!("채우지 못한 변수: {} {hint}", missing.join(", ")));
     }
+    let multipart = headers.iter().any(|(k, v)| {
+        k.eq_ignore_ascii_case("content-type")
+            && v.trim_start()
+                .get(..10)
+                .is_some_and(|t| t.eq_ignore_ascii_case("multipart/"))
+    });
+    let body = body
+        .map(|text| body_bytes(&text, dir, multipart))
+        .transpose()?;
     Ok(Prepared {
         method: request.method.clone(),
         url,
         headers,
         body,
+        save,
         insecure: request.insecure,
         no_redirect: request.no_redirect,
         no_cookie_jar: request.no_cookie_jar,
     })
+}
+
+/// 본문 글을 보낼 바이트로. `< 경로` 줄은 그 파일의 바이트 그대로 넣는다(이미지 등). 멀티파트는
+/// 줄을 CRLF로 이어야 서버가 파트를 나눈다.
+fn body_bytes(text: &str, dir: &Path, multipart: bool) -> Result<Vec<u8>, String> {
+    let separator: &[u8] = if multipart { b"\r\n" } else { b"\n" };
+    let mut out = Vec::with_capacity(text.len());
+    for (i, line) in text.split('\n').enumerate() {
+        if i > 0 {
+            out.extend_from_slice(separator);
+        }
+        let file = line
+            .trim_start()
+            .strip_prefix('<')
+            .filter(|rest| rest.starts_with(char::is_whitespace))
+            .map(str::trim);
+        match file {
+            Some(name) if !name.is_empty() => {
+                let path = dir.join(name);
+                let read = || -> io::Result<Vec<u8>> {
+                    if fs::metadata(&path)?.len() > MAX_BODY_FILE {
+                        return Err(io::Error::other(format!(
+                            "{}MB를 넘는다",
+                            MAX_BODY_FILE >> 20
+                        )));
+                    }
+                    fs::read(&path)
+                };
+                let bytes =
+                    read().map_err(|e| format!("본문 파일을 읽지 못했습니다: {name} ({e})"))?;
+                out.extend_from_slice(&bytes);
+            }
+            _ => out.extend_from_slice(line.as_bytes()),
+        }
+    }
+    Ok(out)
+}
+
+/// 응답 본문을 `>>`의 파일에 쓰고 쓴 파일을 돌려준다. 덮어쓰지 않으면(`>>`) 있는 파일은 두고
+/// `out-1.json`처럼 번호를 붙인 새 파일에 쓴다. 폴더가 없으면 만든다.
+pub fn save_body(path: &Path, overwrite: bool, body: &[u8]) -> io::Result<PathBuf> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    if overwrite {
+        fs::write(path, body)?;
+        return Ok(path.to_path_buf());
+    }
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let ext = path
+        .extension()
+        .map(|e| format!(".{}", e.to_string_lossy()))
+        .unwrap_or_default();
+    for n in 0..1000 {
+        let candidate = if n == 0 {
+            path.to_path_buf()
+        } else {
+            path.with_file_name(format!("{stem}-{n}{ext}"))
+        };
+        // 없을 때만 만든다(그 사이 다른 쪽이 만든 파일을 덮지 않는다).
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(mut file) => {
+                file.write_all(body)?;
+                return Ok(candidate);
+            }
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(io::Error::other("번호를 붙인 파일이 너무 많습니다"))
 }
 
 fn random() -> u64 {
@@ -236,7 +337,7 @@ impl Client {
             }
             let result = match &body {
                 Some(b) => builder
-                    .body(b.clone().into_bytes())
+                    .body(b.clone())
                     .map_err(|e| e.to_string())
                     .and_then(|r| agent.run(r).map_err(describe)),
                 None => builder
@@ -444,7 +545,13 @@ mod tests {
             .entry("dev".into())
             .or_default()
             .insert("base".into(), "http://h".into());
-        let prepared = prepare(&file, &file.requests[0], Some((&envs, "dev"))).unwrap();
+        let prepared = prepare(
+            &file,
+            &file.requests[0],
+            Some((&envs, "dev")),
+            Path::new("."),
+        )
+        .unwrap();
         assert!(
             prepared.url.starts_with("http://h/app/x?id=7&t="),
             "{}",
@@ -452,11 +559,68 @@ mod tests {
         );
         let uuid = &prepared.headers[0].1;
         assert_eq!((uuid.len(), uuid.as_bytes()[14]), (36, b'4'));
-        let err = prepare(&file, &file.requests[0], None).unwrap_err();
+        let err = prepare(&file, &file.requests[0], None, Path::new(".")).unwrap_err();
         assert!(
             err.contains("base") && err.contains("환경을 고르지 않았다"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn 본문_파일을_넣고_멀티파트는_crlf로_잇고_응답을_저장한다() {
+        let dir = std::env::temp_dir().join(format!("ferrite-http-body-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("a.bin"), [0u8, 0xff, b'\n', 1]).unwrap();
+        fs::write(dir.join("q.json"), "{\"q\": {{x}}}").unwrap();
+        let file = parse(
+            "@name = a.bin\n###\nPOST /up\nContent-Type: multipart/form-data; boundary=B\n\n--B\nContent-Disposition: form-data; name=\"f\"; filename=\"a.bin\"\n\n< ./{{name}}\n--B--\n>> out/r.json\n###\nPOST /j\n\n<  q.json\n###\nPOST /x\n\n< nothing.txt\n",
+        );
+        let up = prepare(&file, &file.requests[0], None, &dir).unwrap();
+        let mut want =
+            b"--B\r\nContent-Disposition: form-data; name=\"f\"; filename=\"a.bin\"\r\n\r\n"
+                .to_vec();
+        want.extend_from_slice(&[0, 0xff, b'\n', 1]);
+        want.extend_from_slice(b"\r\n--B--");
+        assert_eq!(
+            up.body.as_deref(),
+            Some(want.as_slice()),
+            "파일은 바이트 그대로, 줄은 CRLF"
+        );
+        assert_eq!(up.save, Some((dir.join("out/r.json"), false)));
+        let json = prepare(&file, &file.requests[1], None, &dir).unwrap();
+        assert_eq!(
+            json.body.as_deref(),
+            Some(&b"{\"q\": {{x}}}"[..]),
+            "멀티파트가 아니면 그대로, 파일 안의 변수는 채우지 않는다"
+        );
+        let err = prepare(&file, &file.requests[2], None, &dir).unwrap_err();
+        assert!(err.contains("nothing.txt"), "{err}");
+
+        let target = dir.join("out/r.json");
+        assert_eq!(
+            save_body(&target, false, b"1").unwrap(),
+            target,
+            "폴더도 만든다"
+        );
+        assert_eq!(
+            save_body(&target, false, b"2").unwrap(),
+            dir.join("out/r-1.json")
+        );
+        assert_eq!(
+            save_body(&target, false, b"3").unwrap(),
+            dir.join("out/r-2.json")
+        );
+        assert_eq!(save_body(&target, true, b"4").unwrap(), target);
+        assert_eq!(fs::read(&target).unwrap(), b"4");
+        assert_eq!(fs::read(dir.join("out/r-1.json")).unwrap(), b"2");
+        let plain = dir.join("out/noext");
+        save_body(&plain, false, b"").unwrap();
+        assert_eq!(
+            save_body(&plain, false, b"").unwrap(),
+            dir.join("out/noext-1")
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
