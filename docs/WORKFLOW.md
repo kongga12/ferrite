@@ -1383,7 +1383,7 @@
     - Linux에서는 셸이 끝나 PTY의 slave가 모두 닫히면 그 읽기가 EIO로 실패한다. 그러면 들고 있던 바이트를 파싱하지 않고 오류로 돌아가 마지막 출력이 사라진다. macOS는 그때 0바이트를 읽어 잃지 않고, Windows(ConPTY)는 다른 길이다.
     - 결정적으로 재현하는 시험을 만들었다. 화면을 잠그고, 셸이 `run-ok`를 찍고 끝날 때까지(`/proc`에서 좀비가 될 때까지) 기다린 뒤 잠금을 푼다. 고치기 전 Ubuntu CI에서 20초 동안 `run-ok`가 오지 않아 실패했고(임시 탐색 실행 41780294468), 고친 뒤 통과했다(41780407938).
   - 고침(`ferrite-term`): Unix에서 PTY를 직접 열고(`rustix_openpty::openpty`, alacritty의 `tty::new`와 같다) slave 복사본(CLOEXEC)을 `Terminal`이 살아 있는 동안 쥐어 둔다. 그러면 셸이 끝나도 EIO 대신 WouldBlock이 와서, 읽기 스레드는 잠금을 잡을 때까지 기다렸다가 파싱한다. 셸이 끝난 것은 전처럼 SIGCHLD로 안다. alacritty에는 공개된 `tty::from_fd`로 넘긴다.
-  - 검증: 위 시험(Linux)이 고치기 전 실패, 고친 뒤 통과. 기존 `ferrite-term` 시험(종료 코드 받기, 실행 구성 명령)도 Ubuntu에서 통과. 로컬(Windows) `ferrite-term` 시험, 앱의 실행 구성 시험, clippy 통과. 전체 CI(3개 OS) RUN_ID.
+  - 검증: 위 시험(Linux)이 고치기 전 실패, 고친 뒤 통과. 기존 `ferrite-term` 시험(종료 코드 받기, 실행 구성 명령)도 Ubuntu에서 통과. 로컬(Windows) `ferrite-term` 시험, 앱의 실행 구성 시험, clippy 통과. 전체 CI(3개 OS, 실행 41780626358) 첫 시도에 통과.
   - 남은 것: alacritty_terminal에 알릴 만하다(`pty_read`가 오류로 돌아가기 전에 든 바이트를 파싱하면 된다).
 - [x] TS 7 jQuery 자동완성 시험의 흔들림(2026-11-04) — 작음
   - 까닭: `npm에서_받은_typescript_7은_jsconfig가_있으면_화면_폴더의_전역과_jquery를_안다`가 Windows CI(`full (windows-latest)`의 npm 단계)에서 가끔 실패했다(실행 41577258429·41752144558). 화면 폴더의 전역 함수는 나오고 jQuery(`$.ajax`)만 180초 내내 나오지 않았다. 다른 OS와 다시 돌린 실행은 통과했다.
