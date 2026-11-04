@@ -224,6 +224,6 @@ mod tests {
         fs::remove_file(&java).unwrap();
         wait_for(&mut watcher, &(java, FileChange::Deleted));
         drop(watcher);
-        let _ = fs::remove_dir_all(&dir);
+        crate::app::remove_project(&dir);
     }
 }
