@@ -2,7 +2,8 @@
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::thread;
+use std::path::Path;
+use std::{fs, thread};
 
 use ferrite_http::{Client, CookieJar, Environments, parse, prepare};
 
@@ -76,6 +77,19 @@ fn serve() -> u16 {
                     )
                 }
                 ["GET", "/app/main.do"] => respond(stream, "401 Unauthorized", &[], b""),
+                // 받은 본문을 그대로 돌려준다(멀티파트 바이트 확인).
+                ["POST", "/upload"] => {
+                    let kind = headers
+                        .iter()
+                        .find(|(k, _)| k == "content-type")
+                        .map_or(String::new(), |(_, v)| format!("X-Got-Type: {v}"));
+                    respond(
+                        stream,
+                        "200 OK",
+                        &["Content-Type: application/octet-stream", &kind],
+                        &body,
+                    )
+                }
                 ["GET", "/api/board"] => respond(
                     stream,
                     "200 OK",
@@ -111,7 +125,13 @@ fn 로그인_쿠키를_담아_이어_보내고_문자_집합과_json을_푼다()
     let client = Client::default();
     let mut jar = CookieJar::default();
     let mut send = |i: usize| {
-        let prepared = prepare(&file, &file.requests[i], Some((&envs, "dev"))).unwrap();
+        let prepared = prepare(
+            &file,
+            &file.requests[i],
+            Some((&envs, "dev")),
+            Path::new("."),
+        )
+        .unwrap();
         client.send(&prepared, &mut jar).unwrap()
     };
 
@@ -158,6 +178,37 @@ fn 로그인_쿠키를_담아_이어_보내고_문자_집합과_json을_푼다()
 }
 
 #[test]
+fn 멀티파트로_파일을_바이트_그대로_올린다() {
+    let port = serve();
+    let dir = std::env::temp_dir().join(format!("ferrite-http-upload-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    // PNG 머리처럼 UTF-8이 아닌 바이트와 CR·LF를 섞는다.
+    let image = [0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n', 0, 0xff];
+    fs::write(dir.join("a.png"), image).unwrap();
+    let text = format!(
+        "POST http://127.0.0.1:{port}/upload\nContent-Type: multipart/form-data; boundary=XB\n\n--XB\nContent-Disposition: form-data; name=\"title\"\n\n제목\n--XB\nContent-Disposition: form-data; name=\"file\"; filename=\"a.png\"\nContent-Type: image/png\n\n< ./a.png\n--XB--\n"
+    );
+    let file = parse(&text);
+    let prepared = prepare(&file, &file.requests[0], None, &dir).unwrap();
+    let response = Client::default()
+        .send(&prepared, &mut CookieJar::default())
+        .unwrap();
+    let mut want = "--XB\r\nContent-Disposition: form-data; name=\"title\"\r\n\r\n제목\r\n--XB\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.png\"\r\nContent-Type: image/png\r\n\r\n"
+        .as_bytes()
+        .to_vec();
+    want.extend_from_slice(&image);
+    want.extend_from_slice(b"\r\n--XB--");
+    assert_eq!(response.status, 200);
+    assert_eq!(response.body, want, "서버가 받은 본문");
+    assert_eq!(
+        response.header("x-got-type"),
+        Some("multipart/form-data; boundary=XB")
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn 연결하지_못하면_오류를_돌려준다() {
     // 바로 닫은 포트: 연결이 거절된다.
     let port = TcpListener::bind("127.0.0.1:0")
@@ -166,7 +217,7 @@ fn 연결하지_못하면_오류를_돌려준다() {
         .unwrap()
         .port();
     let file = parse(&format!("GET http://127.0.0.1:{port}/\n"));
-    let prepared = prepare(&file, &file.requests[0], None).unwrap();
+    let prepared = prepare(&file, &file.requests[0], None, Path::new(".")).unwrap();
     assert!(
         Client::default()
             .send(&prepared, &mut CookieJar::default())

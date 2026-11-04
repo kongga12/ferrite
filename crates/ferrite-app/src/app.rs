@@ -7330,7 +7330,7 @@ mod tests {
         let file = dir.join("http").join("login.http");
         fs::write(
             &file,
-            "### 로그인\nGET {{base}}/login\n\n### 내 정보\nGET {{base}}{{path}}\n",
+            "### 로그인\nGET {{base}}/login\n\n### 내 정보\nGET {{base}}{{path}}\n>> out/me.json\n",
         )
         .unwrap();
 
@@ -7386,6 +7386,23 @@ mod tests {
             harness.state().http.body(),
             Some("{\n  \"user\": \"관리자\"\n}")
         );
+        // `>> out/me.json`: 앞의 401(빈 본문)이 그 파일에 썼으므로 번호를 붙인 파일에 받은 그대로 쓴다.
+        // 앱은 연 파일의 정규화한 경로를 쓴다(CI의 임시 폴더는 macOS `/private/var`, Windows 짧은 이름).
+        let saved = match harness.state().http.saved() {
+            Some(Ok(path)) => path.clone(),
+            other => panic!("저장하지 못함: {other:?}"),
+        };
+        assert!(
+            saved.ends_with(Path::new("http").join("out").join("me-1.json")),
+            "{}",
+            saved.display()
+        );
+        assert_eq!(fs::read_to_string(&saved).unwrap(), r#"{"user":"관리자"}"#);
+        assert_eq!(
+            fs::read(dir.join("http").join("out").join("me.json")).unwrap(),
+            b""
+        );
+        harness.get_by_label(&format!("응답 본문을 저장했습니다: {}", saved.display()));
 
         // 개인 환경 파일이 git에서 빠지지 않았으면 경고하고, 누르면 .gitignore에 더한다.
         harness.get_by_label(".gitignore에 더하기").click();
