@@ -7888,24 +7888,35 @@ mod tests {
         remove_project(&dir);
     }
 
-    /// MCP 서버에 JSON-RPC 요청 하나를 보내 응답을 받는다(에이전트처럼).
-    fn mcp_call(
+    /// MCP 서버에 JSON-RPC 요청 하나를 보내 HTTP 응답을 통째로 받는다(에이전트처럼).
+    fn mcp_post(
         address: std::net::SocketAddr,
         token: &str,
-        body: serde_json::Value,
-    ) -> serde_json::Value {
+        body: &serde_json::Value,
+    ) -> std::io::Result<String> {
         use std::io::{Read, Write};
         let body = body.to_string();
-        let mut stream = std::net::TcpStream::connect(address).unwrap();
+        let mut stream =
+            std::net::TcpStream::connect_timeout(&address, std::time::Duration::from_secs(1))?;
+        stream.set_read_timeout(Some(std::time::Duration::from_secs(5)))?;
         write!(
             stream,
             "POST /mcp HTTP/1.1\r\nHost: {address}\r\nAuthorization: Bearer {token}\r\n\
              Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
             body.len()
-        )
-        .unwrap();
+        )?;
         let mut response = String::new();
-        stream.read_to_string(&mut response).unwrap();
+        stream.read_to_string(&mut response)?;
+        Ok(response)
+    }
+
+    /// MCP 서버에 JSON-RPC 요청 하나를 보내 응답 본문을 받는다.
+    fn mcp_call(
+        address: std::net::SocketAddr,
+        token: &str,
+        body: serde_json::Value,
+    ) -> serde_json::Value {
+        let response = mcp_post(address, token, &body).unwrap();
         let (_, body) = response.split_once("\r\n\r\n").unwrap();
         serde_json::from_str(body).unwrap()
     }
@@ -7977,11 +7988,24 @@ mod tests {
             call(4, "get_debug_state", json!({})),
             "디버그 세션이 없습니다"
         );
-        // 끄면 더 듣지 않는다.
-        harness.state_mut().mcp.stop();
+        // 끄면 더 듣지 않는다: 켜 있을 때 답하던 요청에 옛 주소에서 답하는 것이 없다. TCP 연결이 되는지로는
+        // 가리지 않는다. 다른 시험이 자식 프로세스를 띄우는 중이면(fork·posix_spawn부터 exec까지, macOS에서
+        // 1ms쯤) 자식이 이 프로세스의 fd를 모두 복사해 쥐고 있어, 닫은 리스너가 exec 전까지 연결을 받는다.
+        // 그 연결은 아무도 받아 가지 않아 자식이 exec하면 끊긴다.
+        let ping = json!({ "jsonrpc": "2.0", "id": 5, "method": "ping" });
         assert!(
-            std::net::TcpStream::connect_timeout(&address, std::time::Duration::from_millis(500))
-                .is_err()
+            mcp_post(address, &token, &ping)
+                .unwrap()
+                .starts_with("HTTP/1.1 200")
+        );
+        harness.state_mut().mcp.stop();
+        assert!(harness.state().mcp.address().is_none());
+        let after = mcp_post(address, &token, &ping);
+        assert!(
+            !after
+                .as_deref()
+                .is_ok_and(|r| r.starts_with("HTTP/1.1 200")),
+            "끈 뒤에도 답했다: {after:?}"
         );
         drop(harness);
         remove_project(&dir);
