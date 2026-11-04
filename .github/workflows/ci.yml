@@ -63,6 +63,18 @@ jobs:
       FERRITE_TEST_ORACLE: 127.0.0.1:1521:ferrite:ferrite:XE
       FERRITE_TEST_CUBRID: 127.0.0.1:33000:ferrite:ferrite:ferrite
     steps:
+      # 러너마다 디스크 크기가 달라, 작은 러너(빈 곳 약 13GB)에서는 이 작업(target 약 9~11GB, 컨테이너)과
+      # full 작업(릴리스 빌드까지 약 13GB, 캐시 저장 1.7GB)이 "No space left on device"로 죽었다.
+      # 이 저장소가 쓰지 않는 .NET·Android SDK·GHC·Swift·CodeQL(약 26GB)과 쓰지 않는 Docker 이미지(약 2.5GB)를 지운다.
+      # Java·Go·Node·Python·Maven·PostgreSQL과 서비스 컨테이너가 쓰는 이미지는 시험이 쓰므로 둔다.
+      - &free-disk
+        name: 쓰지 않는 러너 도구 지우기(디스크 확보)
+        if: runner.os == 'Linux'
+        run: |
+          df -h /
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /usr/local/.ghcup /usr/share/swift /opt/hostedtoolcache/CodeQL
+          docker image prune -af | tail -1
+          df -h /
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -92,6 +104,11 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+      # 다음에 디스크가 모자라면 어디까지 찼는지 보이게 한다(뒤의 캐시 저장도 이 빈 곳을 쓴다).
+      - &disk-left
+        name: 남은 디스크
+        if: always() && runner.os == 'Linux'
+        run: df -h /
 
   # 3개 OS 전체 검사: 수동 실행·주 1회만.
   full:
@@ -103,6 +120,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
+      - *free-disk
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -153,6 +171,7 @@ jobs:
             target/release/ferrite
             target/release/ferrite.exe
           if-no-files-found: error
+      - *disk-left
 
   coverage:
     name: coverage (ferrite-core ≥ 70%)
