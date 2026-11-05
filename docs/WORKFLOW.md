@@ -1184,7 +1184,7 @@
     - 단위: 실제 Surefire 3.5.4 보고서(로컬 Maven으로 오프라인 실행)와 Gradle·pytest(xunit2)·CTest·`go test -json` 형식, 도구 알아내기, 보고서 옵션·실패만 다시 명령, 이번 실행의 보고서 찾기, 줄 찾기
     - 창 시험(kittest): 결과 트리와 실패 사유, 스택의 테스트 줄을 눌러 그 파일 그 줄로
     - 실제 도구(CI 3개 OS 전체 작업): Maven(JUnit 5)·pytest·Go·CTest를 돌려 결과·테스트 줄을 확인하고 실패만 다시 돌려 실패한 것만 도는지 본다.
-  - 남은 것: Gradle 실제 실행은 CI에서 돌리지 않았다(형식 표본으로 확인), Kotlin·Scala 스택은 같은 꼴이라 읽지만 확인하지 않았다
+  - 남은 것: Kotlin·Scala 스택은 같은 꼴이라 읽지만 확인하지 않았다. Gradle 실제 실행은 백로그 "Gradle 실제 실행"(2026-11-05)에서 했다.
 - [x] 9-2 SARIF 결과 가져오기 — 작음
   - 결정(사용자): 문제 창 목록과 열린 파일의 물결선 둘 다, 프로젝트의 SARIF를 찾아 고르고 바뀌면 다시 읽기, 실제 SpotBugs로 로컬·CI 확인(로컬에서 spotbugs-maven-plugin 4.10.5.0을 받음, 53개 jar 31MB)
   - 문제 창 위 [이 파일]·[정적 분석 (N)]: 정적 분석은 프로젝트의 SARIF(`*.sarif`·`*.sarif.json`, SpotBugs의 `spotbugsSarif.json`, 최근 것이 먼저)를 골라 [불러오기], 그 밖은 [다른 파일…]. [찾기]·[지우기].
@@ -1223,7 +1223,7 @@
     - 창 시험(kittest): 오프라인 DB로 검사 → 개수·DB 없는 생태계 알림·파일별 목록, 누르면 그 줄로, 물결선·상태바 개수
     - 실제 도구(CI 3개 OS 전체 작업): `mvn dependency:tree`로 log4j-slf4j-impl 2.14.1의 전이 log4j-core 2.14.1을 풀어 직접 의존 줄에 두고, 온라인 OSV와 받은 Maven DB(약 10MB) 둘 다 CVE-2021-44228(고친 버전 2.15.0)을 찾는다.
     - 실제 앱(Windows, 릴리스 빌드): pom.xml(log4j-slf4j-impl 2.14.1)·requirements.txt·npm 잠금·Cargo.lock 예제를 온라인으로 검사해 의존성 8개·취약 56건, pom.xml 7줄 물결선과 상태바 "오류 3 · 경고 6". 오프라인은 [받기]로 Maven DB(10.5MB)를 받아 pom.xml 9건이 온라인과 같고, DB 없는 npm·PyPI·crates.io를 알린다. 확인 뒤 설정·DB 폴더를 지웠다.
-  - 남은 것: Gradle 실제 실행은 돌리지 않았다(형식 표본으로 확인), 오프라인은 검사마다 묶음을 다 푼다(npm 220MB는 오래 걸린다. 느리면 들일 때 패키지별 색인)
+  - 남은 것: 오프라인은 검사마다 묶음을 다 푼다(npm 220MB는 오래 걸린다. 느리면 들일 때 패키지별 색인). Gradle 실제 실행은 백로그 "Gradle 실제 실행"(2026-11-05)에서 했다.
 - [x] 3개 OS 검증(2026-11-02)
   - 결정(사용자): 실제 egov 템플릿으로 확인한다(웹 템플릿 egovframe-web.zip 15.5MB를 받고, 의존성 이름·버전을 api.osv.dev에 묻고, Maven DB 10.5MB를 받는다). 로컬과 `templates.yml` 3개 OS.
   - 완료 조건 (1) egov 표본 프로젝트의 `mvn test` 결과 트리와 실패 줄: 확인해 보니 egov 템플릿에서는 되지 않았다. 그래서 건너뜀 알림과 켜기 단추를 더했다.
@@ -1234,7 +1234,7 @@
   - 완료 조건 (2) SpotBugs SARIF가 문제 창에 뜬다: 9-2의 실제 SpotBugs 시험이 CI 3개 OS 전체 작업에서 통과했다.
   - 완료 조건 (3) log4j 2.14.1 pom의 경고와 오프라인 DB: 9-3의 실제 시험이 CI 3개 OS 전체 작업에서 통과했다(실행 41367369739). egov 웹 템플릿에서도 의존성(로컬 113개, CI 111개)을 풀어 취약 41건(egov RTE가 끌어온 Spring 6.2.11·log4j 2.25.3 등)을 egov 의존성 줄에 두고, 온라인과 받은 Maven DB의 결과가 같다(로컬, `templates.yml` 3개 OS 실행 41386606209).
   - CI 3개 OS 전체(실행 41386608513, `9076acc`) 통과.
-  - 확인하지 못한 것: 화면으로 직접 본 것은 Windows뿐이다. Gradle 실제 실행은 돌리지 않았다.
+  - 확인하지 못한 것: 화면으로 직접 본 것은 Windows뿐이다. Gradle 실제 실행은 돌리지 않았다(뒤에 백로그 "Gradle 실제 실행"(2026-11-05)에서 했다).
 
 ### Phase 10 — AI 에이전트 연동
 
@@ -1512,6 +1512,23 @@
     - 창 시험(kittest)으로는 보지 않았다. 내장 egov 서버는 `ferrite` 실행 파일의 플래그로 뜨는데, 시험 실행 파일은 그 플래그를 모른다.
     - 실제 앱(Windows, 릴리스 빌드, 컨트롤러 하나가 든 폴더): 엔드포인트 창에 `/board/list.do` 하나가 보였다. 에디터에서 `"/list.do"`를 `"/list2.do"`로 고치고(저장하지 않음) 다른 컨트롤러 파일을 폴더에 복사했다. [새로 고침]을 누르지 않았는데 `/board/list2.do`와 `/notice/list.do`(GET)가 컨트롤러 둘로 나뉘어 보였다.
   - 확인하지 못한 것: Spring Boot LS가 함께 답할 때와 egov 프로젝트처럼 엔드포인트가 수천 개일 때 다시 묻는 부담은 보지 않았다. macOS·Linux는 시험으로만 확인했다.
+
+- [x] Gradle 실제 실행(2026-11-05) — 작음
+  - 9-1 테스트 러너와 9-3 취약점 검사의 Gradle 처리를 형식 표본으로만 확인했다. 실제 Gradle 9.2.0을 `gradle init`이 만드는 꼴(루트에는 `settings.gradle.kts`만, 하위 프로젝트에 Kotlin DSL 빌드 파일)로 돌려 보고 틀린 셋을 고쳤다.
+  - 고친 것
+    - 실행 구성: 루트에 빌드 파일이 없고 설정 파일만 있으면 Gradle 프로젝트로 알지 못해 `gradle test`·`gradle build`가 없었다(테스트 창에도 구성이 없었다). 이제 설정 파일도 보고, 루트와 한 단계 아래 폴더의 빌드 파일에서 `application`·Spring Boot를 찾는다. 루트에서 돌린 작업은 하위 프로젝트에서 다 돈다.
+    - 취약점 검사: 플랫폼(BOM) 아래의 `(c)` 줄은 버전 제약일 뿐 의존이 아닌데 의존으로 읽어, 같은 라이브러리가 BOM 줄에 겹쳐 보일 수 있었다. 이제 뺀다.
+    - 취약점 검사: 저장소에서 받지 못한 의존(닫힌 망 등)은 `1.0 FAILED`로 나오고 Gradle은 성공으로 끝난다. 버전에 `FAILED`가 붙어 대조되지 않던 것을 적은 버전(`1.0`)으로 본다.
+  - 확인한 Gradle 동작(로컬, 받기 없이 `--offline`): 루트에서 `gradle dependencies`는 루트 프로젝트만 낸다(빌드 파일이 없으면 "No configurations"). 그래서 하위 프로젝트 빌드 파일마다 그 폴더에서 돌리는 지금 방식이 맞다.
+  - CI: 3개 OS 전체 작업에 `gradle/actions/setup-gradle@v6`(Gradle 9.2.0, 캐시 끔)을 더했다.
+  - 검증
+    - 단위: 실행 구성(설정 파일과 `app/build.gradle.kts`의 `application` → `gradle run`·`build`·`test`), 의존성 나무의 `(c)`·`FAILED`
+    - 실제 도구(`test_tools`, CI 3개 OS 전체 작업)
+      - 테스트: 루트에서 `gradle test` → `app/build/test-results`의 보고서에서 통과 1·실패 2·건너뜀 1(이름 `adds()` 꼴), 실패 스택의 줄을 `app/src/test/java/…/CalcTest.java` 16줄로 찾고, `--tests`로 실패한 둘만 다시 돈다. 실행 구성이 이 명령을 만드는지도 본다.
+      - 의존성: 하위 프로젝트 `app`·`lib`. log4j-slf4j-impl이 실행 때 끌어오는 log4j-core를 그 직접 의존 줄에, slf4j-api 1.7.x → 2.0.9(Gradle이 고른 판), `lib`가 끌어온 것은 `project(":lib")` 줄에, BOM이 정한 판(`-> 5.11.4`), BOM 제약은 빼고, 테스트 의존은 없음.
+      - 로컬: 테스트 시험은 통과했다. 의존성 시험은 하위 프로젝트로 바꾸기 전의 단일 프로젝트 판이 통과했고, 바꾼 판은 CI에서 본다(로컬 Gradle 캐시에 log4j POM이 없어 받아야 한다).
+    - 실제 앱(Windows, 릴리스 빌드, `gradle init` 꼴 프로젝트): [실행 > 테스트]에 `gradle test` 구성이 보이고, [실행] → "통과 1 · 실패 2 · 건너뜀 1" 트리, [실패만 다시] → 실패한 둘만 걸린 시간이 바뀜, `addsWrong()`를 두 번 눌러 `CalcTest.java` 16줄로 감을 화면으로 확인했다. 확인 뒤 설정 폴더와 예제 프로젝트를 지웠다.
+  - 확인하지 못한 것: Gradle 래퍼(`gradlew`)로는 돌리지 않았다(래퍼를 고르는 것은 단위 시험으로 본다). 취약점 창을 실제 앱에서 Gradle 프로젝트로 돌려 보지는 않았다.
 
 - 살폈지만 넣지 않은 것: 임베디드(MCU 플래시·시리얼 모니터·장비 설정 파일), 프레임워크별 지원(React·Vue·Angular 등, JS·TS 언어 서버로 기본은 된다), 린터 개별 연동(언어 서버나 저장 시 작업으로 된다), 원격 개발·컨테이너·SFTP 배포, 로컬 AI 완성 모델, 계정 기반 설정 동기화. egov 개발과 거리가 멀거나 크기에 비해 쓰임이 적다.
 

@@ -12,7 +12,7 @@ Rust로 작성한 크로스플랫폼(Windows / macOS / Linux) 경량 IDE.
 - 언어 확장: 널리 쓰는 편집기 확장 폴더(`package.json`, `language-configuration.json`, `.tmLanguage.json`)를 플러그인 폴더에 그대로 넣으면 tree-sitter 문법이 없는 형식을 TextMate 문법으로 강조하고, 줄 주석 기호와 괄호 짝을 쓴다. 커서 옆 괄호의 짝은 모든 언어에서 강조한다.
 
 - 폴더 열기, 지연 로딩 프로젝트 트리(파일 감시로 자동 갱신), 탭 에디터
-- 실행(`Ctrl+F5`): Maven(egov `tomcat7:run`·`spring-boot:run`)·Gradle·cargo·go·CMake·Python·Composer 구성을 자동으로 찾고, `.ferrite/run.toml`에 직접 적은 구성과 함께 터미널 탭에서 돌린다.
+- 실행(`Ctrl+F5`): Maven(egov `tomcat7:run`·`spring-boot:run`)·Gradle(루트에 설정 파일만 있는 하위 프로젝트 빌드 포함)·cargo·go·CMake·Python·Composer 구성을 자동으로 찾고, `.ferrite/run.toml`에 직접 적은 구성과 함께 터미널 탭에서 돌린다.
 - 디버그(`F5`): 거터를 눌러 중단점(오른쪽 단추로 조건), 한 줄씩(`F10`)·들어가기(`F11`)·나오기(`Shift+F11`), 호출 스택·변수 트리·디버그 출력. 어댑터(debugpy·codelldb·delve·php-debug·java-debug·js-debug)는 `도구 > 언어 서버`에서 설치한다. 목록 밖 어댑터(장비 제조사 디버거 등)는 `.ferrite/debug.toml`의 `[[adapter]]`에 실행 명령(표준 입출력)이나 TCP 주소(`IP:포트`, 명령과 함께면 띄운 뒤 붙는다)를 적어 쓴다. Python·Rust(빌드 후)·Go·PHP·Java는 열린 파일로 구성을 만든다. egov 웹 프로젝트는 실행(`Ctrl+F5`)의 "`tomcat7:run` (디버그 5005)"으로 띄운 뒤 디버그의 "5005 포트에 붙기"로 붙는다.
   - 브라우저 JS(js-debug, Node 필요): `.js`·`.jsp`·`.html`을 열고 F5. Chrome(없으면 Edge)을 따로 둔 프로필로 띄우거나, `--remote-debugging-port=9222`로 연 브라우저에 붙는다. 화면 주소는 HTTP 요청 환경 파일의 `baseUrl`(없으면 `http://localhost:8080`), 스크립트는 `src/main/webapp`(또는 `WebContent`)의 파일과 맞춘다(컨텍스트 경로 포함).
   - JSP의 인라인 스크립트는 프로젝트 파일과 줄이 맞지 않으므로, 디버그 창의 "화면 스크립트"에서 브라우저가 받은 화면을 읽기 전용으로 열어 중단점을 건다.
