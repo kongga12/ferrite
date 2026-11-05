@@ -17,6 +17,9 @@ use serde_json::Value;
 const OUTLINE_DEBOUNCE: Duration = Duration::from_millis(400);
 /// 기호 찾기에서 치는 동안 묻기 전에 기다리는 시간.
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(250);
+/// Java 파일이 바뀐 뒤 더 바뀌지 않고 이만큼 지나면 엔드포인트를 다시 묻는다. Java 파일에 입력하는
+/// 동안 큰 목록(egov 프로젝트는 수천 개)을 거듭 받지 않게 한다.
+const ENDPOINTS_SETTLE: Duration = Duration::from_millis(500);
 /// 기호 찾기에 보이는 결과 수의 상한.
 const MAX_RESULTS: usize = 500;
 /// Spring Boot LS의 엔드포인트가 있으면 egov 서버의 것은 감춘다(같은 매핑을 둘 다 준다).
@@ -389,25 +392,58 @@ pub struct Endpoints {
     /// 한 번이라도 물었다(창을 처음 열 때 묻는다).
     requested: bool,
     pending: Query,
+    /// 물을 때의 Java 변경 수([`crate::lsp_hub::LspHub::java_changes`]).
+    asked_changes: u64,
+    /// 물은 뒤 바뀐 Java 변경 수와 그것을 처음 본 때. 더 바뀌지 않고 [`ENDPOINTS_SETTLE`]이 지나면 묻는다.
+    changed: Option<(u64, Instant)>,
+    /// 다음 답이 오면 목록을 바꾼다. 다시 묻는 동안에는 지난 목록을 그대로 보인다.
+    replace: bool,
     /// (답한 서버, 기호, 위치 단위).
     items: Vec<(&'static str, WorkspaceSymbol, PositionEncoding)>,
     filter: String,
 }
 
 impl Endpoints {
-    /// 물어야 하면 true(아직 묻지 않았거나, 물었지만 맡을 서버가 없었다).
-    pub fn due(&self) -> bool {
-        !self.requested || self.pending.asked == 0
+    /// 물어야 하면 true: 아직 묻지 않았거나, 물었지만 맡을 서버가 없었거나, 물은 뒤 Java 파일이
+    /// 바뀌고(`changes`) 잠깐 더 바뀌지 않았다.
+    pub fn due(&mut self, changes: u64) -> bool {
+        if !self.requested || self.pending.asked == 0 {
+            return true;
+        }
+        if changes == self.asked_changes {
+            self.changed = None;
+            return false;
+        }
+        match self.changed {
+            Some((seen, at)) if seen == changes => at.elapsed() >= ENDPOINTS_SETTLE,
+            _ => {
+                self.changed = Some((changes, Instant::now()));
+                false
+            }
+        }
+    }
+
+    /// 바뀐 Java 파일 때문에 다시 물을 때까지 남은 시간(그때 다시 그리게 한다).
+    pub fn until_due(&self) -> Option<Duration> {
+        self.changed
+            .map(|(_, at)| ENDPOINTS_SETTLE.saturating_sub(at.elapsed()))
     }
 
     pub fn refresh(&mut self) {
         self.requested = false;
     }
 
-    pub fn started(&mut self, generation: u64, asked: usize) {
+    #[cfg(test)]
+    fn names(&self) -> Vec<&str> {
+        self.items.iter().map(|(_, s, _)| s.name.as_str()).collect()
+    }
+
+    pub fn started(&mut self, generation: u64, asked: usize, changes: u64) {
         self.requested = true;
         self.pending.started(generation, asked);
-        self.items.clear();
+        self.asked_changes = changes;
+        self.changed = None;
+        self.replace = true;
     }
 
     pub fn receive(
@@ -419,6 +455,9 @@ impl Endpoints {
     ) {
         if !self.pending.answer(generation) {
             return;
+        }
+        if std::mem::take(&mut self.replace) {
+            self.items.clear();
         }
         self.items.extend(
             parse_workspace_symbols(result)
@@ -544,6 +583,47 @@ mod tests {
         assert_eq!(split_label("@/board"), Some(("/board", "")));
         assert_eq!(split_label("@+ 'boardService'"), None);
         assert_eq!(split_label("list"), None);
+    }
+
+    #[test]
+    fn 엔드포인트는_java가_바뀌고_멈추면_다시_묻고_답이_와야_목록을_바꾼다() {
+        let uri = ferrite_lsp::uri::path_to_uri(&std::env::temp_dir().join("A.java")).unwrap();
+        let answer = |name: &str| {
+            serde_json::json!([{ "name": name, "kind": 6, "containerName": "A",
+                "location": { "uri": uri.as_str(), "range": {
+                    "start": { "line": 0, "character": 0 }, "end": { "line": 0, "character": 1 } } } }])
+        };
+        let mut e = Endpoints::default();
+        assert!(e.due(0), "처음 열면 바로");
+        e.started(1, 1, 0);
+        e.receive(1, "egov", &answer("@/a.do -- GET"), PositionEncoding::Utf16);
+        assert_eq!(e.names(), ["@/a.do -- GET"]);
+        assert!(!e.due(0), "바뀐 것이 없으면 묻지 않는다");
+        assert_eq!(e.until_due(), None);
+
+        assert!(!e.due(1), "Java 파일이 바뀌면 잠깐 기다린다");
+        assert!(e.until_due().is_some_and(|d| d <= ENDPOINTS_SETTLE));
+        std::thread::sleep(ENDPOINTS_SETTLE);
+        assert!(e.due(1));
+        e.started(2, 1, 1);
+        assert_eq!(e.until_due(), None);
+        assert_eq!(
+            e.names(),
+            ["@/a.do -- GET"],
+            "다시 묻는 동안 지난 목록을 둔다"
+        );
+        e.receive(1, "egov", &answer("@/old.do"), PositionEncoding::Utf16);
+        assert_eq!(e.names(), ["@/a.do -- GET"], "지난 물음의 답은 버린다");
+        e.receive(
+            2,
+            "egov",
+            &answer("@/b.do -- POST"),
+            PositionEncoding::Utf16,
+        );
+        assert_eq!(e.names(), ["@/b.do -- POST"], "답이 오면 바꾼다");
+
+        e.refresh();
+        assert!(e.due(1), "[새로 고침]은 바로");
     }
 
     #[test]

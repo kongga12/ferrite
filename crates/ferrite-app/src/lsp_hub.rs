@@ -163,6 +163,12 @@ pub fn language_id(lang: Lang, path: &Path) -> &'static str {
     }
 }
 
+/// 요청 매핑을 담는 Java 소스 파일인가(엔드포인트 창을 다시 물을 바뀜).
+fn is_java(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("java"))
+}
+
 pub enum ServerState {
     Starting,
     Ready,
@@ -304,6 +310,9 @@ pub struct LspHub {
     /// 프로젝트 기호를 물은 요청: (서버, 요청 ID) → 물은 차례.
     symbol_queries: HashMap<(&'static str, i64), u64>,
     symbol_generation: u64,
+    /// Java 파일의 바뀜을 서버에 알린 수(편집한 내용 보내기, 디스크에서 바뀐 파일). 엔드포인트 창은
+    /// 이 값이 바뀌면 다시 묻는다.
+    java_changes: u64,
     /// jdt.ls 확장이 Spring 프로젝트를 찾아 Spring Boot LS를 띄우라고 알렸다.
     spring_requested: bool,
     /// 실행 중에 죽은 서버(자동 재시작 대기).
@@ -331,6 +340,7 @@ impl LspHub {
             outlines: HashMap::new(),
             symbol_queries: HashMap::new(),
             symbol_generation: 0,
+            java_changes: 0,
             spring_requested: false,
             crashes: HashMap::new(),
             fan_outs: Vec::new(),
@@ -456,6 +466,9 @@ impl LspHub {
         if changes.is_empty() {
             return;
         }
+        if changes.iter().any(|(path, _)| is_java(path)) {
+            self.java_changes += 1;
+        }
         for lsp in self.servers.values().filter_map(|s| s.lsp.as_ref()) {
             lsp.did_change_watched_files(&changes);
         }
@@ -568,6 +581,7 @@ impl LspHub {
             force || since.elapsed() >= CHANGE_DEBOUNCE
         };
         let mut text = None;
+        let mut sent_change = false;
         // 이번에 연 서버는 지금 내용을 받았으니 최신이다. 이미 열려 있던 서버가 변경을 못 받았으면 아니다.
         let mut up_to_date = true;
         for spec in specs {
@@ -596,6 +610,7 @@ impl LspHub {
                 Some(lsp_version) if due => {
                     *lsp_version += 1;
                     lsp.did_change_full(path, *lsp_version, text);
+                    sent_change = true;
                 }
                 Some(_) => up_to_date &= !changed,
             }
@@ -613,6 +628,9 @@ impl LspHub {
                     server.pulled.insert(path.to_path_buf(), sent);
                 }
             }
+        }
+        if sent_change && is_java(path) {
+            self.java_changes += 1;
         }
         if due || up_to_date {
             sync.sent_version = Some(version);
@@ -653,6 +671,11 @@ impl LspHub {
             self.outlines.insert((name, id), path.to_path_buf());
         }
         true
+    }
+
+    /// Java 파일의 바뀜을 서버에 알린 수. 바뀌면 엔드포인트를 다시 묻는다.
+    pub fn java_changes(&self) -> u64 {
+        self.java_changes
     }
 
     /// 떠 있는 준비된 서버 모두에 프로젝트 기호를 묻는다. (이 물음의 차례, 물은 서버 수). 답은

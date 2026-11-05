@@ -33,7 +33,7 @@ Rust로 작성한 크로스플랫폼(Windows / macOS / Linux) 경량 IDE.
 - TODO 목록(`편집 > TODO 목록`): 프로젝트의 `TODO`·`FIXME`를 파일에서 찾기로 모아 보이고 누르면 그 줄로 간다.
 - 저장 시 작업: `.ferrite/run.toml`의 `[[on_save]]`에 패턴과 명령(`${file}` 등)을 적으면 맞는 파일을 저장할 때 창 없이 돌리고(포매터·Sass 컴파일 등) 결과를 상태바에 알린다.
 - 파일로 이동(`Ctrl+P`): 파일 이름 퍼지 검색. 파일에서 찾기(`Ctrl+Shift+F`): 프로젝트 전체 검색(대소문자·단어·정규식·파일 패턴, UTF-8·CP949 파일). 둘 다 `.gitignore`를 따른다.
-- 기호: 개요 창(`Ctrl+Shift+O`, 지금 파일의 기호 나무), 기호로 이동(`Ctrl+T`, 떠 있는 언어 서버 모두에서 찾기), 엔드포인트 창(`도구 > 엔드포인트`, 컨트롤러별 URL·HTTP 메서드. Spring Boot LS가 없는 egov 3.x는 내장 egov 서버가 `@RequestMapping` 계열을 모은다).
+- 기호: 개요 창(`Ctrl+Shift+O`, 지금 파일의 기호 나무), 기호로 이동(`Ctrl+T`, 떠 있는 언어 서버 모두에서 찾기), 엔드포인트 창(`도구 > 엔드포인트`, 컨트롤러별 URL·HTTP 메서드. Spring Boot LS가 없는 egov 3.x는 내장 egov 서버가 `@RequestMapping` 계열을 모은다. Java 파일을 고치거나 디스크에서 바뀌면 저절로 다시 모은다).
 - HTTP 요청 파일(`.http`): `###`로 나눈 요청을 거터 ▶나 `Ctrl+Enter`로 보내고 HTTP 응답 창에서 상태·걸린 시간·헤더·본문을 본다.
   - `{{변수}}`는 파일 변수(`@이름 = 값`), 환경 파일(`http-client.env.json`, 비밀 값은 `http-client.private.env.json`), `{{$uuid}}`·`{{$timestamp}}`로 채운다. 개인 환경 파일이 `.gitignore`에 없으면 알리고 더한다.
   - 쿠키를 앱이 켜진 동안 둔다(egov 로그인 뒤 `.do` 요청). 리다이렉트를 따라가며 거치는 응답의 쿠키도 담는다.
