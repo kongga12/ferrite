@@ -2957,6 +2957,33 @@ impl FerriteApp {
                     .run(ctx, &path, &doc.buffer.text(), line, root.as_deref());
                 dock::show(&mut self.layout, Pane::Http);
             }
+            Some(crate::http_ui::Task::History {
+                path,
+                line,
+                name,
+                send,
+            }) => {
+                // 닫은 파일은 연다. 다시 보낼 때 이미 연 파일이면 탭을 바꾸지 않는다.
+                let path = real_path(&path);
+                if !send || !self.docs.iter().any(|d| d.path == path) {
+                    self.open_file(path.clone());
+                }
+                let Some(doc) = self.docs.iter().find(|d| d.path == path) else {
+                    return;
+                };
+                let line = crate::http_ui::locate(&doc.buffer.text(), line, name.as_deref());
+                if send {
+                    self.http_task = Some(crate::http_ui::Task::Run { path, line });
+                    self.apply_http_task(ctx);
+                } else {
+                    let at = lsp_types::Position::new(line as u32, 0);
+                    self.navigate_to(
+                        &path,
+                        lsp_types::Range::new(at, at),
+                        PositionEncoding::Utf16,
+                    );
+                }
+            }
             Some(crate::http_ui::Task::Make {
                 controller,
                 path,
@@ -4004,7 +4031,11 @@ impl egui_tiles::Behavior<Pane> for Dock<'_> {
                 }
                 None => {}
             },
-            Pane::Http => app.http.ui(ui),
+            Pane::Http => {
+                if let Some(task) = app.http.ui(ui) {
+                    app.http_task = Some(task);
+                }
+            }
             Pane::Agent => {
                 let root = app.tree.as_ref().map(|t| t.root().to_path_buf());
                 let mcp = app.mcp.agent_server();
@@ -7409,6 +7440,47 @@ mod tests {
         harness.run_ok();
         assert!(ferrite_http::env::ignored_by_git(&dir));
         assert!(harness.query_by_label(".gitignore에 더하기").is_none());
+
+        // 기록: 보낸 요청이 새것부터 남고, 고르면 그 응답을 다시 본다.
+        assert_eq!(harness.state().http.history_len(), 3);
+        harness
+            .get_by_role_and_label(Role::ComboBox, "기록")
+            .click();
+        harness.run_ok();
+        harness
+            .get_by_role_and_label(Role::Button, "#1 401 GET 내 정보 · 방금")
+            .click();
+        harness.run_ok();
+        harness.get_by_label("401 Unauthorized");
+        assert_eq!(harness.state().http.body(), Some(""));
+        // 파일 위에 줄을 더해도 이름으로 그 요청을 찾아 다시 보낸다(이제 쿠키가 있어 200).
+        {
+            let doc = &mut harness.state_mut().docs[0];
+            doc.buffer.set_selection(Selection::caret(0));
+            doc.buffer.insert("# 위에 더한 줄\n", Instant::now());
+        }
+        harness.get_by_label("다시 보내기").click();
+        assert!(run_until(&mut harness, |app| app.http.done()));
+        assert_eq!(harness.state().http.history_len(), 4);
+        assert_eq!(
+            harness.state().http.body(),
+            Some("{\n  \"user\": \"관리자\"\n}")
+        );
+        harness.get_by_label("요청으로 가기").click();
+        harness.run_ok();
+        {
+            let app = harness.state();
+            let doc = &app.docs[app.active.unwrap()];
+            assert!(doc.path.ends_with("login.http"));
+            assert_eq!(
+                doc.buffer.pos_to_line_col(doc.buffer.selection().head),
+                (5, 0)
+            );
+        }
+        harness.get_by_label("기록 지우기").click();
+        harness.run_ok();
+        assert_eq!(harness.state().http.history_len(), 0);
+        harness.get_by_label(".http 파일에서 요청 줄의 ▶를 누르거나 Ctrl+Enter로 보냅니다");
 
         // 엔드포인트로 요청 만들기: 컨트롤러 파일 끝에 더하고, 다시 하면 더하지 않고 찾아간다.
         for _ in 0..2 {
