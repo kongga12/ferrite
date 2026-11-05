@@ -1,15 +1,20 @@
-//! HTTP 요청 파일(`.http`) 실행과 "HTTP 응답" 창. 요청은 따로 스레드에서 보내고, 쿠키는 앱이 켜진
-//! 동안 둔다(egov 로그인 뒤 이어 보내는 요청에 세션 쿠키가 붙는다).
+//! HTTP 요청 파일(`.http`) 실행과 "HTTP 응답" 창. 요청은 따로 스레드에서 보내고, 쿠키와 요청 기록은
+//! 앱이 켜진 동안 둔다(egov 로그인 뒤 이어 보내는 요청에 세션 쿠키가 붙는다).
 
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::time::{Duration, Instant};
 
 use eframe::egui;
 use ferrite_http::{Client, CookieJar, Environments, Response, env};
 
 /// 응답 창에 보이는 본문 글의 상한. 더 길면 앞만 보인다(egui 글 상자가 한 프레임에 다 배치한다).
 const SHOWN_TEXT: usize = 512 * 1024;
+
+/// 요청 기록의 수. 기록은 디스크에 남기지 않는다(채운 토큰·세션 값이 들 수 있다).
+const HISTORY: usize = 30;
 
 pub fn is_http_file(path: &Path) -> bool {
     path.extension()
@@ -30,6 +35,13 @@ pub fn run_lines(text: &str) -> Vec<usize> {
 pub enum Task {
     /// 이 파일의 이 줄(0부터)이 든 요청을 보낸다.
     Run { path: PathBuf, line: usize },
+    /// 기록의 요청을 지금 파일에서 찾아([`locate`]) 다시 보내거나(`send`) 그 줄로 간다.
+    History {
+        path: PathBuf,
+        line: usize,
+        name: Option<String>,
+        send: bool,
+    },
     /// 엔드포인트로 `http/<컨트롤러>.http`에 요청을 만든다.
     Make {
         controller: String,
@@ -38,12 +50,32 @@ pub enum Task {
     },
 }
 
+/// 기록의 요청이 지금 파일에서 든 줄. 이름이 있으면 이름으로 찾아 위에 줄을 더해도 따라가고, 없거나
+/// 찾지 못하면 보낸 때의 줄이다.
+pub fn locate(text: &str, line: usize, name: Option<&str>) -> usize {
+    name.and_then(|name| {
+        ferrite_http::parse(text)
+            .requests
+            .into_iter()
+            .find(|r| r.name.as_deref() == Some(name))
+            .map(|r| r.line)
+    })
+    .unwrap_or(line)
+}
+
 /// 보낸 요청과 그 결과.
 struct Sent {
     title: String,
     method: String,
     url: String,
     env: Option<String>,
+    /// 요청이 든 파일과 줄(0부터), 이름. 기록에서 다시 보내거나 그 줄로 갈 때 쓴다.
+    path: PathBuf,
+    line: usize,
+    name: Option<String>,
+    /// 보낸 차례(1부터). 같은 요청을 여러 번 보내도 기록에서 가려 본다.
+    number: usize,
+    at: Instant,
     /// 아직 받는 중이면 None.
     result: Option<Result<Shown, String>>,
     /// `>> 경로`로 응답 본문을 쓴 파일, 또는 쓰지 못한 까닭.
@@ -59,14 +91,38 @@ type Received = (
     Option<Result<PathBuf, String>>,
 );
 
+impl Sent {
+    /// 기록 목록의 한 줄: 결과, 메서드, 이름, 보낸 때.
+    fn label(&self) -> String {
+        let outcome = match &self.result {
+            None => "보내는 중".to_owned(),
+            Some(Ok(shown)) => shown.response.status.to_string(),
+            Some(Err(_)) => "오류".to_owned(),
+        };
+        format!(
+            "#{} {outcome} {} {} · {}",
+            self.number,
+            self.method,
+            self.title,
+            ago(self.at.elapsed())
+        )
+    }
+}
+
 /// 받은 응답과, 보일 본문 글(길면 앞만).
 struct Shown {
+    /// 본문(`body`·`text`)은 비운다. 기록에 여럿 두므로 보일 글만 남긴다(본문은 20MB까지 받는다).
     response: Response,
     text: String,
+    /// 받은 본문의 바이트 수.
+    bytes: usize,
 }
 
 impl Shown {
-    fn new(response: Response) -> Self {
+    fn new(mut response: Response) -> Self {
+        let bytes = response.body.len();
+        response.body = Vec::new();
+        let full = std::mem::take(&mut response.text);
         let content_type = response
             .header("content-type")
             .unwrap_or("")
@@ -82,22 +138,26 @@ impl Shown {
         .iter()
         .any(|t| content_type.starts_with(t));
         let text = if binary {
-            format!("(이진 본문 {}, {content_type})", size(response.body.len()))
-        } else if response.text.len() > SHOWN_TEXT {
+            format!("(이진 본문 {}, {content_type})", size(bytes))
+        } else if full.len() > SHOWN_TEXT {
             let end = (0..=SHOWN_TEXT)
                 .rev()
-                .find(|&i| response.text.is_char_boundary(i))
+                .find(|&i| full.is_char_boundary(i))
                 .unwrap_or(0);
             format!(
                 "{}\n\n… (본문이 커서 앞 {}만 보입니다. 전체 {})",
-                &response.text[..end],
+                &full[..end],
                 size(SHOWN_TEXT),
-                size(response.text.len())
+                size(full.len())
             )
         } else {
-            response.text.clone()
+            full
         };
-        Self { response, text }
+        Self {
+            response,
+            text,
+            bytes,
+        }
     }
 }
 
@@ -120,7 +180,12 @@ pub struct HttpPanel {
     env_errors: Vec<String>,
     /// 개인 환경 파일을 `.gitignore`가 빼지 않는 프로젝트 루트(경고하고 더하기를 권한다).
     unignored: Option<PathBuf>,
-    sent: Option<Sent>,
+    /// 보낸 요청, 새것이 앞. 받는 중인 요청은 늘 맨 앞이다(받는 동안에는 새로 보내거나 지우지 않는다).
+    history: VecDeque<Sent>,
+    /// 창에 보이는 기록.
+    selected: usize,
+    /// 지금까지 보낸 수(기록을 지워도 이어 센다).
+    sent_count: usize,
     rx: Option<Receiver<Received>>,
     tab: Tab,
     status: Option<String>,
@@ -174,6 +239,11 @@ impl HttpPanel {
             method: request.method.clone(),
             url: request.url.clone(),
             env: self.env.clone(),
+            path: path.to_path_buf(),
+            line: request.line,
+            name: request.name.clone(),
+            number: self.sent_count + 1,
+            at: Instant::now(),
             result: None,
             saved: None,
             handler: request.handler,
@@ -214,21 +284,31 @@ impl HttpPanel {
                 }
             }
         }
-        self.sent = Some(sent);
+        self.sent_count += 1;
+        self.history.push_front(sent);
+        self.history.truncate(HISTORY);
+        self.selected = 0;
     }
 
     pub fn running(&self) -> bool {
         self.rx.is_some()
     }
 
+    /// 가장 최근에 보낸 요청의 응답을 받았다.
     #[cfg(test)]
     pub fn done(&self) -> bool {
-        self.sent.as_ref().is_some_and(|s| s.result.is_some())
+        self.history.front().is_some_and(|s| s.result.is_some())
     }
 
     #[cfg(test)]
+    pub fn history_len(&self) -> usize {
+        self.history.len()
+    }
+
+    /// 창에 보이는 기록의 본문.
+    #[cfg(test)]
     pub fn body(&self) -> Option<&str> {
-        match &self.sent.as_ref()?.result {
+        match &self.history.get(self.selected)?.result {
             Some(Ok(shown)) => Some(&shown.text),
             _ => None,
         }
@@ -248,7 +328,7 @@ impl HttpPanel {
             Err(TryRecvError::Disconnected) => (Err("보내다가 멈췄습니다".into()), None),
         };
         self.rx = None;
-        if let Some(sent) = &mut self.sent {
+        if let Some(sent) = self.history.front_mut() {
             sent.result = Some(received);
             sent.saved = saved;
         }
@@ -256,10 +336,11 @@ impl HttpPanel {
 
     #[cfg(test)]
     pub fn saved(&self) -> Option<&Result<PathBuf, String>> {
-        self.sent.as_ref()?.saved.as_ref()
+        self.history.get(self.selected)?.saved.as_ref()
     }
 
-    pub fn ui(&mut self, ui: &mut egui::Ui) {
+    /// 창을 그린다. 기록에서 다시 보내거나 요청으로 가는 일을 돌려준다.
+    pub fn ui(&mut self, ui: &mut egui::Ui) -> Option<Task> {
         self.poll();
         let running = self.running();
         ui.horizontal(|ui| {
@@ -320,9 +401,54 @@ impl HttpPanel {
             ui.colored_label(ui.visuals().warn_fg_color, status);
         }
         ui.separator();
-        let Some(sent) = &self.sent else {
+        let mut task = None;
+        if !self.history.is_empty() {
+            ui.horizontal_wrapped(|ui| {
+                let label = ui.label("기록");
+                egui::ComboBox::from_id_salt("http_history")
+                    .selected_text(self.history[self.selected].label())
+                    .show_ui(ui, |ui| {
+                        for (i, sent) in self.history.iter().enumerate() {
+                            ui.selectable_value(&mut self.selected, i, sent.label())
+                                .on_hover_text(format!(
+                                    "{} {}\n{}:{}",
+                                    sent.method,
+                                    sent.url,
+                                    sent.path.display(),
+                                    sent.line + 1
+                                ));
+                        }
+                    })
+                    .response
+                    .labelled_by(label.id);
+                let sent = &self.history[self.selected];
+                let revisit = |send| Task::History {
+                    path: sent.path.clone(),
+                    line: sent.line,
+                    name: sent.name.clone(),
+                    send,
+                };
+                if ui
+                    .add_enabled(!running, egui::Button::new("다시 보내기"))
+                    .clicked()
+                {
+                    task = Some(revisit(true));
+                }
+                if ui.button("요청으로 가기").clicked() {
+                    task = Some(revisit(false));
+                }
+                if ui
+                    .add_enabled(!running, egui::Button::new("기록 지우기"))
+                    .clicked()
+                {
+                    self.history.clear();
+                    self.selected = 0;
+                }
+            });
+        }
+        let Some(sent) = self.history.get(self.selected) else {
             ui.weak(".http 파일에서 요청 줄의 ▶를 누르거나 Ctrl+Enter로 보냅니다");
-            return;
+            return task;
         };
         ui.strong(&sent.title);
         let env = sent
@@ -352,11 +478,11 @@ impl HttpPanel {
                     ui.spinner();
                     ui.label("보내는 중…");
                 });
-                return;
+                return task;
             }
             Some(Err(e)) => {
                 ui.colored_label(ui.visuals().error_fg_color, e);
-                return;
+                return task;
             }
             Some(Ok(shown)) => shown,
         };
@@ -374,7 +500,7 @@ impl HttpPanel {
             ui.weak(format!(
                 "{} ms · {} · {}",
                 r.elapsed.as_millis(),
-                size(r.body.len()),
+                size(shown.bytes),
                 r.charset
             ));
         });
@@ -413,6 +539,16 @@ impl HttpPanel {
                         });
                 }
             });
+        task
+    }
+}
+
+/// 보낸 지 얼마나 되었나. 기록은 앱이 켜진 동안만 두므로 시각 대신 지난 시간을 보인다.
+fn ago(elapsed: Duration) -> String {
+    match elapsed.as_secs() {
+        0..60 => "방금".to_owned(),
+        s @ 60..3600 => format!("{}분 전", s / 60),
+        s => format!("{}시간 전", s / 3600),
     }
 }
 
@@ -489,6 +625,18 @@ mod tests {
         assert_eq!(
             (size(10), size(2048), size(3 << 20)),
             ("10 B".into(), "2.0 KB".into(), "3.0 MB".into())
+        );
+    }
+
+    #[test]
+    fn 기록의_요청을_이름으로_다시_찾는다() {
+        let text = "# 위에 더한 줄\n### 로그인\nGET /a\n\n### 내 정보\nGET /b\n";
+        assert_eq!(locate(text, 3, Some("내 정보")), 5, "줄이 밀려도 이름으로");
+        assert_eq!(locate(text, 2, None), 2, "이름이 없으면 그 줄");
+        assert_eq!(locate(text, 7, Some("없음")), 7, "못 찾으면 그 줄");
+        assert_eq!(
+            [0, 59, 60, 3599, 7200].map(|s| ago(Duration::from_secs(s))),
+            ["방금", "방금", "1분 전", "59분 전", "2시간 전"]
         );
     }
 }
