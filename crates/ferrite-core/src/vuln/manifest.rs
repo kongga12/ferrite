@@ -223,7 +223,7 @@ fn pom_line(text: &str, group: &str, artifact: &str) -> usize {
 }
 
 /// `gradle dependencies`의 `runtimeClasspath` 나무(깊이마다 다섯 칸). `그룹:이름:버전`, 고른 버전은
-/// `-> 버전`, 끝에 `(*)`·`(c)`·`(n)`.
+/// `-> 버전`, 끝에 `(*)`·`(c)`·`(n)`, 받지 못한 것은 `FAILED`.
 fn gradle(manifest: &Path, build: &str, output: &str) -> Vec<Dependency> {
     let mut out = Vec::new();
     let mut direct = (String::new(), 0);
@@ -237,7 +237,17 @@ fn gradle(manifest: &Path, build: &str, output: &str) -> Vec<Dependency> {
         if prefix == 0 {
             continue;
         }
-        let coords = rest.split(" (").next().unwrap_or(rest).trim();
+        // `(c)`는 플랫폼(BOM)의 버전 제약일 뿐 의존이 아니다. 제약을 받는 의존은 나무의 다른 곳에 있다.
+        if rest.trim_end().ends_with("(c)") {
+            continue;
+        }
+        // 저장소에서 받지 못한 의존(닫힌 망 등)은 `FAILED`가 붙고 Gradle은 성공으로 끝난다. 적은 버전으로 본다.
+        let coords = rest
+            .split(" (")
+            .next()
+            .unwrap_or(rest)
+            .trim()
+            .trim_end_matches(" FAILED");
         let depth = prefix / 5;
         let (left, chosen) = match coords.split_once(" -> ") {
             Some((l, r)) => (l, Some(r.trim())),

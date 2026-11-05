@@ -417,7 +417,9 @@ fn gradle_runtime_classpath를_읽는다() {
          dependencies {\n    \
              implementation 'org.apache.logging.log4j:log4j-core:2.14.1'\n    \
              implementation(\"com.google.guava:guava:31.0-jre\")\n    \
-             implementation project(':lib')\n\
+             implementation project(':lib')\n    \
+             implementation platform('org.junit:junit-bom:5.11.4')\n    \
+             implementation 'com.example:missing:1.0'\n\
          }\n",
     );
     let output = "\n\
@@ -433,6 +435,9 @@ runtimeClasspath - Runtime classpath of source set 'main'.\n\
 |    \\--- org.apache.logging.log4j:log4j-api:2.14.1\n\
 +--- com.google.guava:guava:31.0-jre -> 32.1.0-jre\n\
 |    \\--- com.google.guava:failureaccess:1.0.1\n\
++--- org.junit:junit-bom:5.11.4\n\
+|    \\--- org.junit.jupiter:junit-jupiter-api:5.11.4 (c)\n\
++--- com.example:missing:1.0 FAILED\n\
 \\--- project :lib\n     \
      \\--- org.yaml:snakeyaml -> 1.33 (*)\n\
 \n\
@@ -471,6 +476,10 @@ runtimeClasspath - Runtime classpath of source set 'main'.\n\
                 3,
                 Some("com.google.guava:guava")
             ),
+            // BOM 아래 `(c)`(버전 제약)는 의존이 아니다.
+            ("org.junit:junit-bom", "5.11.4", 5, None),
+            // 받지 못한 것(`FAILED`)은 적은 버전으로.
+            ("com.example:missing", "1.0", 6, None),
             ("org.yaml:snakeyaml", "1.33", 4, Some("project :lib")),
         ]
     );

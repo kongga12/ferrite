@@ -1,5 +1,6 @@
-//! 실제 테스트 도구(Maven·pytest·Go·CTest)를 돌려 보고서를 읽고, 실패 스택의 줄을 프로젝트에서 찾고,
-//! 실패한 것만 다시 돌린다. 정적 분석기(SpotBugs)가 낸 SARIF도 읽는다. 도구가 필요하고 Maven은
+//! 실제 테스트 도구(Maven·Gradle·pytest·Go·CTest)를 돌려 보고서를 읽고, 실패 스택의 줄을 프로젝트에서
+//! 찾고, 실패한 것만 다시 돌린다. 정적 분석기(SpotBugs)가 낸 SARIF와 빌드 도구가 푼 의존성 나무도 읽는다.
+//! 도구가 필요하고 Maven·Gradle은
 //! 의존성을 받으므로 기본으로는 돌지 않는다. CI의 3개 OS 전체 작업이 `--ignored`로 돌린다. 도구가 없으면
 //! 로컬에서는 건너뛰고 CI에서는 실패한다.
 
@@ -168,6 +169,176 @@ fn maven_surefire_보고서와_실패만_다시() {
             ("throwsError".to_owned(), Outcome::Failed),
         ],
         "실패한 것만 다시"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// 시험용 Gradle 프로젝트 폴더. `gradle init`이 만드는 꼴로 루트에는 설정만 두고, 하위 프로젝트마다
+/// Kotlin DSL 빌드 파일을 둔다. 데몬은 띄우지 않는다(로컬에서 시험 뒤에 남지 않게).
+fn gradle_project(name: &str, projects: &[(&str, &str)]) -> PathBuf {
+    let root = temp_dir(name);
+    let names: Vec<String> = projects.iter().map(|(p, _)| format!("\"{p}\"")).collect();
+    std::fs::write(
+        root.join("settings.gradle.kts"),
+        format!(
+            "rootProject.name = \"board\"\ninclude({})\n",
+            names.join(", ")
+        ),
+    )
+    .unwrap();
+    std::fs::write(root.join("gradle.properties"), "org.gradle.daemon=false\n").unwrap();
+    for (project, build) in projects {
+        std::fs::create_dir_all(root.join(project)).unwrap();
+        std::fs::write(root.join(project).join("build.gradle.kts"), build).unwrap();
+    }
+    root
+}
+
+#[test]
+#[ignore = "Gradle로 JUnit 5 테스트를 돌린다(의존성을 받는다). Java 17 이상과 gradle이 필요하다"]
+fn gradle_test_보고서와_실패만_다시() {
+    if !require("gradle --version") {
+        return;
+    }
+    let root = gradle_project(
+        "gradle",
+        &[(
+            "app",
+            "plugins {\n    java\n}\n\nrepositories {\n    mavenCentral()\n}\n\ndependencies {\n    testImplementation(\"org.junit.jupiter:junit-jupiter:5.11.4\")\n    testRuntimeOnly(\"org.junit.platform:junit-platform-launcher\")\n}\n\ntasks.test {\n    useJUnitPlatform()\n}\n",
+        )],
+    );
+    let java = root.join("app/src/test/java/com/example/board");
+    std::fs::create_dir_all(&java).unwrap();
+    std::fs::write(
+        java.join("CalcTest.java"),
+        "package com.example.board;\n\nimport static org.junit.jupiter.api.Assertions.assertEquals;\n\nimport org.junit.jupiter.api.Disabled;\nimport org.junit.jupiter.api.Test;\n\nclass CalcTest {\n    @Test\n    void adds() {\n        assertEquals(3, 1 + 2);\n    }\n\n    @Test\n    void addsWrong() {\n        assertEquals(4, 1 + 2, \"더하기\");\n    }\n\n    @Test\n    void throwsError() {\n        throw new IllegalStateException(\"게시판 오류\");\n    }\n\n    @Disabled(\"나중에\")\n    @Test\n    void skipped() {\n    }\n}\n",
+    )
+    .unwrap();
+    // 실행 구성이 만드는 명령과 같다. 루트에서 하위 프로젝트의 테스트를 다 돌리고, 보고서는
+    // `app/build/test-results`에 남는다.
+    let command = "gradle test";
+    assert!(
+        ferrite_core::run::detect(&root)
+            .iter()
+            .any(|c| c.command == command)
+    );
+    assert_eq!(Tool::of(command), Some(Tool::Gradle));
+    let since = SystemTime::now();
+    let (ok, _) = run(
+        &root,
+        &test_report::with_report(Tool::Gradle, command, &root),
+    );
+    assert!(!ok, "실패한 테스트가 있으면 gradle이 실패한다");
+    let cases = junit(Tool::Gradle, &root, &root, since);
+    assert_eq!(
+        outcomes(&cases),
+        [
+            ("adds()".to_owned(), Outcome::Passed),
+            ("addsWrong()".to_owned(), Outcome::Failed),
+            ("skipped()".to_owned(), Outcome::Skipped),
+            ("throwsError()".to_owned(), Outcome::Failed),
+        ]
+    );
+    let wrong = cases.iter().find(|c| c.name == "addsWrong()").unwrap();
+    assert_eq!(
+        test_line(&root, &root, wrong),
+        (java.join("CalcTest.java"), 16)
+    );
+
+    let since = SystemTime::now();
+    let rerun = test_report::rerun(Tool::Gradle, command, &failed(&cases)).unwrap();
+    let (ok, _) = run(&root, &rerun);
+    assert!(!ok);
+    let again = junit(Tool::Gradle, &root, &root, since);
+    assert_eq!(
+        outcomes(&again),
+        [
+            ("addsWrong()".to_owned(), Outcome::Failed),
+            ("throwsError()".to_owned(), Outcome::Failed),
+        ],
+        "실패한 것만 다시"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+#[ignore = "Gradle로 의존성 나무를 푼다(의존성의 POM을 받는다). Java 17 이상과 gradle이 필요하다"]
+fn gradle_dependencies로_전이_의존과_고른_버전을_읽는다() {
+    use ferrite_core::vuln::manifest;
+
+    if !require("gradle --version") {
+        return;
+    }
+    // app: log4j-slf4j-impl이 끌어오는 slf4j-api 1.7.x는 직접 의존(2.0.9)으로 올라간다(`-> 2.0.9`).
+    // lib: BOM이 버전을 정하는 의존(`-> 5.11.4`)과 BOM 아래 버전 제약(`(c)`).
+    let root = gradle_project(
+        "gradle-deps",
+        &[
+            (
+                "app",
+                "plugins {\n    java\n}\n\nrepositories {\n    mavenCentral()\n}\n\ndependencies {\n    implementation(project(\":lib\"))\n    implementation(\"org.apache.logging.log4j:log4j-slf4j-impl:2.20.0\")\n    implementation(\"org.slf4j:slf4j-api:2.0.9\")\n    testImplementation(\"org.junit.jupiter:junit-jupiter:5.11.4\")\n}\n",
+            ),
+            (
+                "lib",
+                "plugins {\n    `java-library`\n}\n\nrepositories {\n    mavenCentral()\n}\n\ndependencies {\n    api(platform(\"org.junit:junit-bom:5.11.4\"))\n    api(\"org.junit.jupiter:junit-jupiter-api\")\n}\n",
+            ),
+        ],
+    );
+    // 루트에는 빌드 파일이 없다. 하위 프로젝트마다 그 폴더에서 돌린다(그 프로젝트의 나무만 낸다).
+    let manifests = manifest::find(&root);
+    assert_eq!(
+        manifests.iter().map(|m| m.path.clone()).collect::<Vec<_>>(),
+        [
+            root.join("app").join("build.gradle.kts"),
+            root.join("lib").join("build.gradle.kts")
+        ]
+    );
+    let deps = |m: &manifest::Manifest| {
+        let line = m.command(&root, &root.join("unused")).unwrap();
+        let (ok, stdout) = run(m.path.parent().unwrap(), &line);
+        assert!(ok, "의존성 나무");
+        m.read(Some(&stdout)).unwrap()
+    };
+    let find = |deps: &[ferrite_core::vuln::Dependency], name: &str| {
+        let mut found: Vec<(String, usize, Option<String>)> = deps
+            .iter()
+            .filter(|d| d.name == name)
+            .map(|d| (d.version.clone(), d.line, d.via.clone()))
+            .collect();
+        found.sort();
+        found
+    };
+    let at = |version: &str, line: usize, via: Option<&str>| {
+        (version.to_owned(), line, via.map(str::to_owned))
+    };
+
+    let app = deps(&manifests[0]);
+    let impl_ = Some("org.apache.logging.log4j:log4j-slf4j-impl");
+    assert_eq!(
+        find(&app, "org.apache.logging.log4j:log4j-core"),
+        [at("2.20.0", 10, impl_)],
+        "실행 때 끌어오는 전이 의존은 직접 의존 줄에"
+    );
+    assert_eq!(
+        find(&app, "org.slf4j:slf4j-api"),
+        [at("2.0.9", 10, impl_), at("2.0.9", 11, None)],
+        "Gradle이 고른 버전"
+    );
+    assert_eq!(
+        find(&app, "org.junit.jupiter:junit-jupiter-api"),
+        [at("5.11.4", 9, Some("project :lib"))],
+        "하위 프로젝트가 끌어온 것은 그 프로젝트 줄에(BOM의 제약은 빼고)"
+    );
+    assert!(
+        find(&app, "org.junit.jupiter:junit-jupiter").is_empty(),
+        "테스트 의존은 runtimeClasspath에 없다"
+    );
+
+    let lib = deps(&manifests[1]);
+    assert_eq!(
+        find(&lib, "org.junit.jupiter:junit-jupiter-api"),
+        [at("5.11.4", 10, None)],
+        "BOM이 정한 버전"
     );
     let _ = std::fs::remove_dir_all(&root);
 }

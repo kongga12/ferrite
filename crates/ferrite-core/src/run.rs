@@ -253,12 +253,28 @@ pub fn detect(root: &Path) -> Vec<RunConfig> {
         }
         commands.extend(["package", "test"].map(|goal| format!("{mvn} {goal}")));
     }
-    let gradle_file = ["build.gradle", "build.gradle.kts"]
+    const GRADLE_BUILDS: [&str; 2] = ["build.gradle", "build.gradle.kts"];
+    // 하위 프로젝트로 나눈 빌드(`gradle init`의 꼴)는 루트에 설정 파일만 두고 빌드 파일은 `app/` 등에
+    // 둔다. 루트에서 돌린 작업은 그 작업이 있는 하위 프로젝트에서 다 돈다.
+    if GRADLE_BUILDS
         .into_iter()
-        .find(|f| has(f));
-    if let Some(file) = gradle_file {
+        .chain(["settings.gradle", "settings.gradle.kts"])
+        .any(&has)
+    {
         let gradle = wrapper(root, "gradlew", "gradle");
-        let script = read(file);
+        // 루트와 한 단계 아래 폴더의 빌드 파일.
+        let subdirs = std::fs::read_dir(root)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.is_dir());
+        let script = std::iter::once(root.to_path_buf())
+            .chain(subdirs)
+            .flat_map(|dir| GRADLE_BUILDS.map(|f| dir.join(f)))
+            .filter_map(|path| std::fs::read_to_string(path).ok())
+            .collect::<Vec<_>>()
+            .join("\n");
         if script.contains("org.springframework.boot") {
             commands.push(format!("{gradle} bootRun"));
         }
@@ -380,6 +396,22 @@ mod tests {
 
     fn names(configs: &[RunConfig]) -> Vec<&str> {
         configs.iter().map(|c| c.name.as_str()).collect()
+    }
+
+    #[test]
+    fn gradle_init의_하위_프로젝트_빌드도_감지한다() {
+        let dir = project(
+            "gradle-init",
+            &[
+                ("settings.gradle.kts", "include(\"app\")"),
+                ("app/build.gradle.kts", "plugins {\n    application\n}"),
+            ],
+        );
+        assert_eq!(
+            names(&detect(&dir)),
+            ["gradle run", "gradle build", "gradle test"]
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
