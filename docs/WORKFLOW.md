@@ -1201,7 +1201,7 @@
     - 창 시험(kittest): 불러오기 → 파일별 목록, 누르면 그 줄로, 물결선·상태바 개수, SARIF가 바뀌면 다시 읽기
     - 실제 SpotBugs(CI 3개 OS 전체 작업): Maven으로 분석해 `spotbugsSarif.json`을 찾고, null 역참조(`NP_ALWAYS_NULL`)가 그 파일 12줄의 오류로, 메시지 틀이 채워져 나온다.
     - 실제 앱(Windows, 릴리스 빌드): SpotBugs가 낸 SARIF를 찾아 불러와 오류 1·경고 2·참고 1, 7·12줄 물결선, 상태바 "오류 1 · 경고 2", 눌러서 12줄로 가는 것을 화면으로 확인했다. 확인 뒤 설정 폴더를 지웠다.
-  - 남은 것: PMD·Semgrep·clang의 실제 SARIF는 돌려 보지 않았다(SARIF 2.1.0 공통 형식과 기준 주소 처리로 읽는다)
+  - 남은 것: clang의 실제 SARIF는 돌려 보지 않았다(SARIF 2.1.0 공통 형식과 기준 주소 처리로 읽는다). PMD·Semgrep은 백로그 "PMD·Semgrep 실제 SARIF"(2026-11-05)에서 했다.
 - [x] 9-3 의존성 취약점 검사(OSV, 오프라인 DB) — 중간
   - 결정(사용자): 온라인(api.osv.dev, 이름·버전만 보내고 화면에 알린다)과 오프라인 DB(생태계별 OSV `all.zip`을 [받기] 또는 [파일에서…]) 둘 다, Maven·Gradle은 빌드 도구로 전이 의존까지 풀고 전이 의존은 끌어온 직접 의존의 줄에, 5개 생태계, 결과는 문제 창 [취약점]과 의존성 줄 물결선(SARIF와 같은 틀)
   - 문제 창 [취약점 (N)]: [검사], 온라인·오프라인 DB 고르기. 오프라인은 생태계마다 받은 DB의 크기·받은 때와 [받기](크기 안내)·[파일에서…](인터넷이 막힌 곳).
@@ -1529,6 +1529,29 @@
       - 로컬: 테스트 시험은 통과했다. 의존성 시험은 하위 프로젝트로 바꾸기 전의 단일 프로젝트 판이 통과했고, 바꾼 판은 CI에서 본다(로컬 Gradle 캐시에 log4j POM이 없어 받아야 한다).
     - 실제 앱(Windows, 릴리스 빌드, `gradle init` 꼴 프로젝트): [실행 > 테스트]에 `gradle test` 구성이 보이고, [실행] → "통과 1 · 실패 2 · 건너뜀 1" 트리, [실패만 다시] → 실패한 둘만 걸린 시간이 바뀜, `addsWrong()`를 두 번 눌러 `CalcTest.java` 16줄로 감을 화면으로 확인했다. 확인 뒤 설정 폴더와 예제 프로젝트를 지웠다.
   - 확인하지 못한 것: Gradle 래퍼(`gradlew`)로는 돌리지 않았다(래퍼를 고르는 것은 단위 시험으로 본다). 취약점 창을 실제 앱에서 Gradle 프로젝트로 돌려 보지는 않았다.
+
+- [x] PMD·Semgrep 실제 SARIF(2026-11-05) — 작음
+  - 9-2 SARIF 가져오기는 SpotBugs만 실제로 돌렸다. PMD와 Semgrep을 실제로 돌려 낸 SARIF를 읽었다. 경로에 한글과 빈칸을 넣었다(한국어 Windows에서 흔한 `게시판 프로젝트` 꼴).
+  - 읽기는 고칠 것이 없었다. 두 도구의 실제 출력은 이렇다.
+    - PMD(maven-pmd-plugin 3.28.0, PMD 7.17.0)
+      - SARIF를 짧은 이름으로 고르지 못한다. 렌더러 클래스로 고른다: `mvn compile pmd:pmd -Dformat=net.sourceforge.pmd.renderers.SarifRenderer` → `target/pmd.sarif.json`.
+      - 파일 주소는 절대 `file:` 주소다. 빈칸은 `%20`, 한글은 그대로 적는다.
+      - 수준은 우선순위에 따라 `note`·`warning`을 결과마다 적는다.
+    - Semgrep(1.183.0)
+      - 파일 주소는 돌린 폴더 기준 상대 주소(`uriBaseId: %SRCROOT%`, 그 경로는 주지 않는다)다. Windows에서는 역슬래시(`src\main\…`)로 적는다.
+      - 결과에 수준이 없고 규칙의 `defaultConfiguration`에만 있다.
+      - Python이라 규칙 파일을 시스템 로캘 인코딩으로 읽는다. 한국어 Windows(cp949)에서는 한글 메시지가 든 UTF-8 규칙을 읽다 멈춘다. `PYTHONUTF8=1`로 돌리면 된다(Python 3.15부터는 UTF-8 모드가 기본이다). Semgrep 휠은 Python 3.14까지라 3.15에는 설치되지 않는다.
+  - 정적 분석 탭의 안내에 SpotBugs·PMD·Semgrep으로 SARIF를 내는 명령을 적었다(PMD의 렌더러 클래스, Semgrep의 `PYTHONUTF8`).
+  - CI: 3개 OS 전체 작업에서 `semgrep==1.183.0`을 pip로 설치한다.
+  - 검증
+    - 실제 도구(`test_tools`, CI 3개 OS 전체 작업, 로컬 Windows 통과)
+      - PMD: 프로젝트에서 `target/pmd.sarif.json`을 찾고, UnnecessaryImport(3줄, 참고)·UnusedPrivateField(6줄, 경고)·EmptyCatchBlock(11~12줄, 경고)를 한글·빈칸 경로의 원본 파일로 찾는다.
+      - Semgrep: 한글 메시지 규칙 둘로 `reports/semgrep.sarif`를 내고, empty-catch(9~12줄, 오류)·parse-int(10줄, 참고)와 메시지(`숫자 변환 s` 등)를 원본 파일로 찾는다.
+    - 실제 앱(Windows, 릴리스 빌드, `게시판 프로젝트` 폴더)
+      - PMD: 정적 분석 탭에서 `target/pmd.sarif.json`을 불러오면 "PMD · 오류 0 · 경고 2 · 참고 1", 파일별 목록, 3·6·11~12줄 물결선, 상태 표시줄 "경고 2"가 보인다.
+      - Semgrep: `reports/semgrep.sarif`를 불러오면 "Semgrep OSS · 오류 1 · 경고 0 · 참고 1", 한글 메시지, 물결선이 보이고, 결과를 눌러 10줄 20열로 간다.
+      - 확인 뒤 설정 폴더와 예제 프로젝트, Semgrep을 설치한 venv를 지웠다. PMD jar는 Maven 로컬 저장소에 남는다.
+  - 확인하지 못한 것: clang 정적 분석기의 SARIF, egov 표준 점검 규칙(PMD 규칙 묶음)으로 돌린 결과
 
 - 살폈지만 넣지 않은 것: 임베디드(MCU 플래시·시리얼 모니터·장비 설정 파일), 프레임워크별 지원(React·Vue·Angular 등, JS·TS 언어 서버로 기본은 된다), 린터 개별 연동(언어 서버나 저장 시 작업으로 된다), 원격 개발·컨테이너·SFTP 배포, 로컬 AI 완성 모델, 계정 기반 설정 동기화. egov 개발과 거리가 멀거나 크기에 비해 쓰임이 적다.
 

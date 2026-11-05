@@ -176,7 +176,15 @@ impl SarifPanel {
             ui.colored_label(color, text);
         }
         if self.file.is_none() {
-            ui.weak("실행 구성으로 정적 분석(예: SpotBugs `-Dspotbugs.sarifOutput=true`)을 돌린 뒤 SARIF를 불러오세요. 파일이 바뀌면 다시 읽습니다.");
+            ui.weak("실행 구성으로 정적 분석을 돌린 뒤 SARIF를 불러오세요. 파일이 바뀌면 다시 읽습니다.");
+            // 도구마다 SARIF를 내는 방법이 드러나 있지 않다(PMD는 짧은 이름이 없어 렌더러 클래스로 고른다).
+            for example in [
+                "SpotBugs: mvn compile com.github.spotbugs:spotbugs-maven-plugin:spotbugs -Dspotbugs.sarifOutput=true",
+                "PMD: mvn compile pmd:pmd -Dformat=net.sourceforge.pmd.renderers.SarifRenderer (target/pmd.sarif.json)",
+                "Semgrep: semgrep scan --sarif --output semgrep.sarif (규칙에 한글이 있으면 Windows에서는 PYTHONUTF8=1)",
+            ] {
+                ui.weak(example);
+            }
             return None;
         }
         ui.separator();
