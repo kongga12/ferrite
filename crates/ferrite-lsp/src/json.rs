@@ -94,6 +94,9 @@ pub fn settings(root: Option<&Path>, user: &[UserSchema], offline: bool) -> Valu
             "format": { "enable": true },
             "schemas": schemas,
         },
+        // 서버는 `!!http.proxyStrictSSL`로 스키마를 받을 때의 인증서 검증을 정해, 보내지 않으면 검증하지
+        // 않는다. 프록시는 서버가 HTTPS_PROXY 등 환경 변수에서 읽는다(Ferrite와 같다).
+        "http": { "proxyStrictSSL": true },
     })
 }
 
@@ -219,6 +222,10 @@ mod tests {
             settings["json"]["validate"],
             json!({ "enable": true }),
             "없으면 검사를 끈다"
+        );
+        assert_eq!(
+            settings["http"]["proxyStrictSSL"], true,
+            "없으면 스키마를 받을 때 인증서를 검증하지 않는다"
         );
         let schemas = settings["json"]["schemas"].as_array().unwrap();
         assert_eq!(schemas.len(), 8, "내장 6 + 사용자 2(빈 주소는 뺀다)");
