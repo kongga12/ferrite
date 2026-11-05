@@ -3190,10 +3190,12 @@ impl FerriteApp {
                 self.outline.asked(key, sent);
             }
         }
-        if dock::is_shown(&self.layout, Pane::Endpoints) && self.endpoints.due() {
+        // 창을 처음 열 때, 그리고 Java 파일이 바뀌면(편집한 내용이 서버에 가거나 디스크에서 바뀌면) 묻는다.
+        let changes = self.hub.java_changes();
+        if dock::is_shown(&self.layout, Pane::Endpoints) && self.endpoints.due(changes) {
             self.hub.ensure_builtin();
             let (generation, asked) = self.hub.workspace_symbols("@/");
-            self.endpoints.started(generation, asked);
+            self.endpoints.started(generation, asked, changes);
         }
     }
 
@@ -4131,6 +4133,11 @@ impl eframe::App for FerriteApp {
         self.process_debug_notices();
         self.finish_server_jobs();
         self.sync_language_servers();
+        if dock::is_shown(&self.layout, Pane::Endpoints)
+            && let Some(wait) = self.endpoints.until_due()
+        {
+            ctx.request_repaint_after(wait);
+        }
         self.check_mapper_sql();
         self.updater.poll();
         let root = self.tree.as_ref().map(|t| t.root().to_path_buf());
