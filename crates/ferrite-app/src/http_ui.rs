@@ -1,5 +1,5 @@
-//! HTTP 요청 파일(`.http`) 실행과 "HTTP 응답" 창. 요청은 따로 스레드에서 보내고 응답 처리 스크립트도
-//! 그 스레드에서 돌린다. 쿠키, 스크립트가 정한 변수, 요청 기록은 앱이 켜진 동안 둔다(egov 로그인 뒤
+//! HTTP 요청 파일(`.http`) 실행과 "HTTP 응답" 창. 요청은 따로 스레드에서 채우고 보내며, 요청 전·응답
+//! 처리 스크립트도 그 스레드에서 돌린다(스크립트가 오래 돌아도 창이 멈추지 않는다). 쿠키, 스크립트가 정한 변수, 요청 기록은 앱이 켜진 동안 둔다(egov 로그인 뒤
 //! 이어 보내는 요청에 세션 쿠키가 붙고, 받은 토큰을 다음 요청의 `{{token}}`에 쓴다).
 
 use std::collections::VecDeque;
@@ -82,18 +82,34 @@ struct Sent {
     result: Option<Result<Shown, String>>,
     /// `>> 경로`로 응답 본문을 쓴 파일, 또는 쓰지 못한 까닭.
     saved: Option<Result<PathBuf, String>>,
+    /// 요청 전 스크립트를 돌린 결과(그 스크립트에서 오류가 나면 보내지 않고 `result`에 알린다).
+    pre: Option<Outcome>,
     /// 응답 처리 스크립트를 돌린 결과. 스크립트가 없거나 응답을 받지 못했으면 None.
     script: Option<Outcome>,
-    /// 요청 전 스크립트(`< {% %}`)가 있었다(돌리지 않는다).
-    pre_script: bool,
+}
+
+impl Sent {
+    /// 돌린 스크립트들의 결과와 이름.
+    fn outcomes(&self) -> Vec<(&'static str, &Outcome)> {
+        [
+            ("요청 전 스크립트", &self.pre),
+            ("응답 스크립트", &self.script),
+        ]
+        .into_iter()
+        .filter_map(|(name, outcome)| Some((name, outcome.as_ref()?)))
+        .collect()
+    }
 }
 
 /// 보내는 스레드가 돌려주는 것. 쿠키 저장소와 변수는 그 스레드가 가졌다가 돌려준다.
 struct Received {
     result: Result<Response, String>,
+    /// 변수를 채운 주소(채우지 못했으면 None).
+    url: Option<String>,
     jar: CookieJar,
     globals: Globals,
     saved: Option<Result<PathBuf, String>>,
+    pre: Option<Outcome>,
     script: Option<Outcome>,
 }
 
@@ -239,7 +255,6 @@ impl HttpPanel {
             .map(Path::to_path_buf);
         self.status = None;
         self.tab = Tab::Body;
-        let env = self.env.as_deref().map(|e| (&self.envs, e));
         let mut sent = Sent {
             title: request
                 .name
@@ -255,27 +270,37 @@ impl HttpPanel {
             at: Instant::now(),
             result: None,
             saved: None,
+            pre: None,
             script: None,
-            pre_script: request.pre_script,
         };
-        match ferrite_http::prepare(&file, request, env, &self.globals, dir) {
-            Err(e) => {
-                sent.result = Some(Err(e));
-                self.rx = None;
-            }
-            Ok(prepared) => {
-                sent.url.clone_from(&prepared.url);
-                let client = self
-                    .client
-                    .get_or_insert_with(|| Arc::new(Client::default()))
-                    .clone();
-                let mut jar = std::mem::take(&mut self.jar);
-                let mut globals = std::mem::take(&mut self.globals);
-                let (tx, rx) = mpsc::channel();
-                let ctx = ctx.clone();
-                let spawned = std::thread::Builder::new()
-                    .name("http-request".into())
-                    .spawn(move || {
+        let client = self
+            .client
+            .get_or_insert_with(|| Arc::new(Client::default()))
+            .clone();
+        let request = request.clone();
+        let envs = self.envs.clone();
+        let selected = self.env.clone();
+        let dir = dir.to_path_buf();
+        let mut jar = std::mem::take(&mut self.jar);
+        let mut globals = std::mem::take(&mut self.globals);
+        let (tx, rx) = mpsc::channel();
+        let ctx = ctx.clone();
+        let spawned = std::thread::Builder::new()
+            .name("http-request".into())
+            .spawn(move || {
+                let env = selected.as_deref().map(|e| (&envs, e));
+                let received = match ferrite_http::prepare(&file, &request, env, &mut globals, &dir)
+                {
+                    Err(e) => Received {
+                        result: Err(e),
+                        url: None,
+                        jar,
+                        globals,
+                        saved: None,
+                        pre: None,
+                        script: None,
+                    },
+                    Ok(mut prepared) => {
                         let result = client.send(&prepared, &mut jar);
                         let saved = match (&result, &prepared.save) {
                             (Ok(response), Some((path, overwrite))) => Some(
@@ -285,26 +310,33 @@ impl HttpPanel {
                             _ => None,
                         };
                         let script = match &result {
-                            Ok(response) if !prepared.scripts.is_empty() => {
-                                Some(script::run(&prepared.scripts, response, &mut globals))
-                            }
+                            Ok(response) if !prepared.scripts.is_empty() => Some(script::run(
+                                &prepared.scripts,
+                                &mut prepared.view,
+                                Some(response),
+                                &mut globals,
+                            )),
                             _ => None,
                         };
-                        let _ = tx.send(Received {
+                        Received {
                             result,
+                            url: Some(prepared.url),
                             jar,
                             globals,
                             saved,
+                            pre: prepared.pre,
                             script,
-                        });
-                        ctx.request_repaint();
-                    });
-                match spawned {
-                    Ok(_) => self.rx = Some(rx),
-                    Err(e) => {
-                        sent.result = Some(Err(format!("보내는 스레드를 띄우지 못했습니다: {e}")))
+                        }
                     }
-                }
+                };
+                let _ = tx.send(received);
+                ctx.request_repaint();
+            });
+        match spawned {
+            Ok(_) => self.rx = Some(rx),
+            Err(e) => {
+                // 스레드에 넘긴 쿠키·변수는 잃는다(스레드를 띄우지 못하는 일은 드물다).
+                sent.result = Some(Err(format!("보내는 스레드를 띄우지 못했습니다: {e}")))
             }
         }
         self.sent_count += 1;
@@ -346,25 +378,31 @@ impl HttpPanel {
         let Some(rx) = &self.rx else {
             return;
         };
-        let (received, saved, script) = match rx.try_recv() {
-            Ok(received) => {
-                self.jar = received.jar;
-                self.globals = received.globals;
-                (
-                    received.result.map(Shown::new),
-                    received.saved,
-                    received.script,
-                )
-            }
+        let received = match rx.try_recv() {
+            Ok(received) => received,
             Err(TryRecvError::Empty) => return,
             // 스레드가 패닉했다. 쿠키와 변수는 잃는다.
-            Err(TryRecvError::Disconnected) => (Err("보내다가 멈췄습니다".into()), None, None),
+            Err(TryRecvError::Disconnected) => Received {
+                result: Err("보내다가 멈췄습니다".into()),
+                url: None,
+                jar: CookieJar::default(),
+                globals: Globals::new(),
+                saved: None,
+                pre: None,
+                script: None,
+            },
         };
         self.rx = None;
+        self.jar = received.jar;
+        self.globals = received.globals;
         if let Some(sent) = self.history.front_mut() {
-            sent.result = Some(received);
-            sent.saved = saved;
-            sent.script = script;
+            sent.result = Some(received.result.map(Shown::new));
+            if let Some(url) = received.url {
+                sent.url = url;
+            }
+            sent.saved = received.saved;
+            sent.pre = received.pre;
+            sent.script = received.script;
         }
     }
 
@@ -508,9 +546,6 @@ impl HttpPanel {
             .map(|e| format!(" · 환경 {e}"))
             .unwrap_or_default();
         ui.weak(format!("{} {}{env}", sent.method, sent.url));
-        if sent.pre_script {
-            ui.weak("요청 전 스크립트(< {% %})는 돌리지 않습니다");
-        }
         match &sent.saved {
             Some(Ok(path)) => {
                 ui.weak(format!("응답 본문을 저장했습니다: {}", path.display()));
@@ -558,10 +593,12 @@ impl HttpPanel {
         for (status, url) in &r.redirects {
             ui.weak(format!("→ {status} {url}"));
         }
-        if let Some(outcome) = &sent.script {
-            let failed = outcome.tests.iter().filter(|t| t.error.is_some()).count();
-            let total = outcome.tests.len();
-            if outcome.error.is_some() {
+        let outcomes = sent.outcomes();
+        {
+            let tests = || outcomes.iter().flat_map(|(_, o)| &o.tests);
+            let failed = tests().filter(|t| t.error.is_some()).count();
+            let total = tests().count();
+            if outcomes.iter().any(|(_, o)| o.error.is_some()) {
                 ui.colored_label(ui.visuals().error_fg_color, "응답 스크립트 오류");
             } else if failed > 0 {
                 ui.colored_label(
@@ -572,7 +609,7 @@ impl HttpPanel {
                 ui.colored_label(PASSED, format!("테스트 {total}개 통과"));
             }
         }
-        if sent.script.is_none() && self.tab == Tab::Script {
+        if outcomes.is_empty() && self.tab == Tab::Script {
             self.tab = Tab::Body;
         }
         ui.horizontal(|ui| {
@@ -582,7 +619,7 @@ impl HttpPanel {
                 Tab::Headers,
                 format!("헤더 ({})", r.headers.len()),
             );
-            if sent.script.is_some() {
+            if !outcomes.is_empty() {
                 ui.selectable_value(&mut self.tab, Tab::Script, "스크립트");
             }
         });
@@ -597,7 +634,11 @@ impl HttpPanel {
                     );
                 }
                 Tab::Script => {
-                    if let Some(outcome) = &sent.script {
+                    for (name, outcome) in &outcomes {
+                        // 둘 다 돌렸으면 어느 쪽인지 적는다.
+                        if outcomes.len() > 1 {
+                            ui.strong(*name);
+                        }
                         script_ui(ui, outcome);
                     }
                 }

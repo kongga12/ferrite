@@ -1936,9 +1936,12 @@ dependencies = [
 name = "ferrite-http"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "boa_engine",
  "encoding_rs",
+ "hmac",
  "serde_json",
+ "sha2 0.11.1",
  "ureq",
 ]
 

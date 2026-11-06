@@ -109,7 +109,7 @@
       ]
     },
     "pre-script": {
-      "comment": "요청 줄 앞의 요청 전 스크립트(돌리지 않는다). 요청 줄로 보지 않게 먼저 잡는다.",
+      "comment": "요청 줄 앞의 요청 전 스크립트(JS)와 스크립트 파일. 요청 줄로 보지 않게 먼저 잡는다.",
       "patterns": [
         {
           "begin": "^\\s*(<)\\s*(\\{%)",
@@ -160,7 +160,7 @@
           "match": "\\b(?:var|let|const|function|return|if|else|for|while|do|break|continue|try|catch|finally|throw|new|typeof|instanceof|of|in|switch|case|default)\\b",
           "name": "keyword.control.js"
         },
-        { "match": "\\b(?:client|response|console)\\b", "name": "variable.language.js" },
+        { "match": "\\b(?:client|request|response|crypto|console)\\b", "name": "variable.language.js" },
         { "match": "\\b[A-Za-z_$][\\w$]*(?=\\s*\\()", "name": "entity.name.function.js" }
       ]
     },

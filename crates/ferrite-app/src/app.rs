@@ -7514,7 +7514,7 @@ mod tests {
     }
 
     #[test]
-    fn 응답_스크립트의_테스트와_변수를_보이고_다음_요청에_쓴다() {
+    fn 요청_전과_응답_스크립트의_결과와_변수를_보이고_다음_요청에_쓴다() {
         let port = http_login_server();
         let dir = std::env::temp_dir().join(format!("ferrite-http-script-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
@@ -7527,7 +7527,7 @@ mod tests {
         let file = dir.join("http").join("script.http");
         fs::write(
             &file,
-            "### 로그인\nGET {{base}}/login\n\n> {%\nclient.global.set(\"user\", response.body.user);\nclient.global.set(\"next\", \"/me\");\nclient.test(\"관리자\", function () { client.assert(response.body.user === \"관리자\"); });\nclient.test(\"일부러 실패\", function () { client.assert(false, \"실패 메시지\"); });\nclient.log(\"받은 사용자\", response.body.user);\n%}\n\n### 내 정보\n< {% request.variables.set(\"x\", 1); %}\nGET {{base}}{{next}}\n",
+            "### 로그인\nGET {{base}}/login\n\n> {%\nclient.global.set(\"user\", response.body.user);\nclient.global.set(\"next\", \"/me\");\nclient.test(\"관리자\", function () { client.assert(response.body.user === \"관리자\"); });\nclient.test(\"일부러 실패\", function () { client.assert(false, \"실패 메시지\"); });\nclient.log(\"받은 사용자\", response.body.user);\n%}\n\n### 내 정보\n< {% if (client.global.get(\"next\")) request.variables.set(\"path\", client.global.get(\"next\")); client.log(\"서명\", crypto.sha256().updateWithText(\"a\").digest().toHex().slice(0, 8)); %}\nGET {{base}}{{path}}\n",
         )
         .unwrap();
         let mut harness = harness_builder()
@@ -7545,12 +7545,11 @@ mod tests {
             "요청 전 스크립트 줄은 요청 줄이 아니다"
         );
 
-        // 스크립트가 정하기 전에는 채우지 못한다.
+        // 응답 스크립트가 정하기 전에는 요청 전 스크립트도 주소를 정하지 않아 채우지 못한다.
         harness.state_mut().on_gutter_click(path.clone(), 13, false);
         assert!(run_until(&mut harness, |app| app.http.done()));
-        // 보내기 전에 난 오류라 곧바로 끝나므로, 창이 앞으로 오는 다음 프레임을 그린다.
         harness.run_ok();
-        harness.get_by_label("채우지 못한 변수: next (환경 dev)");
+        harness.get_by_label("채우지 못한 변수: path (환경 dev)");
 
         // 로그인 응답에서 값을 꺼내 변수로 두고, 테스트 결과를 센다.
         harness.state_mut().on_gutter_click(path.clone(), 1, false);
@@ -7570,19 +7569,22 @@ mod tests {
         harness.get_by_label("실패 메시지");
         harness.get_by_label("받은 사용자 관리자");
 
-        // 다음 요청은 스크립트가 정한 변수를 쓴다. 요청 전 스크립트는 돌리지 않는다고 알린다.
+        // 다음 요청은 요청 전 스크립트가 응답 스크립트의 변수로 주소를 정한다.
         harness.state_mut().on_gutter_click(path, 13, false);
         assert!(run_until(&mut harness, |app| app.http.done()));
+        harness.run_ok();
         harness.get_by_label("200 OK");
         harness.get_by_label(&format!("GET http://127.0.0.1:{port}/me · 환경 dev"));
-        harness.get_by_label("요청 전 스크립트(< {% %})는 돌리지 않습니다");
-        assert!(
-            harness.query_by_label("스크립트").is_none(),
-            "응답 스크립트가 없는 요청"
-        );
         assert_eq!(
             harness.state().http.body(),
             Some("{\n  \"user\": \"관리자\"\n}")
+        );
+        harness.get_by_label("스크립트").click();
+        harness.run_ok();
+        harness.get_by_label("서명 ca978112");
+        assert!(
+            harness.query_by_label("응답 스크립트").is_none(),
+            "요청 전 스크립트만 돌렸으면 이름을 달지 않는다"
         );
 
         harness.get_by_label("변수 2개 지우기").click();
