@@ -2,7 +2,7 @@
 //! 실제 어댑터처럼 launch 응답을 configurationDone 뒤로 미루고, 거꾸로 오는 요청도 섞는다.
 
 use std::collections::BTreeMap;
-use std::io::{BufReader, Write};
+use std::io::BufReader;
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::thread;
@@ -12,9 +12,10 @@ use ferrite_dap::{Adapter, Breakpoint, DebugEvent, DebugSession, Launch, State, 
 use ferrite_lsp::transport::{read_message, write_message};
 use serde_json::{Value, json};
 
+/// 받은 연결 하나로 읽고 쓴다(쓰기는 `reader.get_ref()`로). `try_clone`한 소켓은 Windows에서 다른 시험이
+/// 띄운 자식 프로세스에 물려져, 가짜가 끝나도 그 자식이 끝날 때까지 연결이 닫히지 않는다.
 struct Fake {
     reader: BufReader<TcpStream>,
-    writer: TcpStream,
     seq: i64,
 }
 
@@ -32,7 +33,11 @@ impl Fake {
     fn send(&mut self, mut message: Value) {
         self.seq += 1;
         message["seq"] = json!(self.seq);
-        write_message(&mut self.writer, &serde_json::to_vec(&message).unwrap()).unwrap();
+        write_message(
+            &mut self.reader.get_ref(),
+            &serde_json::to_vec(&message).unwrap(),
+        )
+        .unwrap();
     }
 
     fn respond(&mut self, request: &Value, body: Value) {
@@ -55,13 +60,7 @@ fn spawn_fake(
     let address = listener.local_addr().unwrap();
     let handle = thread::spawn(move || {
         let (stream, _) = listener.accept().unwrap();
-        let mut fake = Fake {
-            reader: BufReader::new(stream.try_clone().unwrap()),
-            writer: stream,
-            seq: 0,
-        };
-        script(&mut fake);
-        fake.writer.flush().unwrap();
+        script(&mut fake_on(stream));
     });
     (address, handle)
 }
@@ -350,8 +349,7 @@ fn 어댑터를_띄우지_못하면_오류() {
 /// 받은 연결로 가짜 어댑터를 만든다.
 fn fake_on(stream: TcpStream) -> Fake {
     Fake {
-        reader: BufReader::new(stream.try_clone().unwrap()),
-        writer: stream,
+        reader: BufReader::new(stream),
         seq: 0,
     }
 }
@@ -632,4 +630,34 @@ fn 띄운_어댑터가_정해_둔_주소를_늦게_열어도_붙고_먼저_끝�
         "{:?}",
         started.elapsed()
     );
+}
+
+#[test]
+fn 세션을_버리면_어댑터가_곧바로_연결이_닫힌_것을_안다() {
+    // 앱은 `terminated`를 받으면 연결이 열려 있어도 세션을 버린다. 붙은 어댑터는 계속 떠 있으므로
+    // 연결이 닫혀야 세션이 끝난 것을 안다.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let session = DebugSession::start(
+        &Adapter::Tcp(address),
+        Launch {
+            adapter_id: "fake".into(),
+            attach: false,
+            arguments: json!({}),
+        },
+        BTreeMap::new(),
+        || {},
+    )
+    .unwrap();
+    let (stream, _) = listener.accept().unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let mut reader = BufReader::new(stream);
+    let initialize: Value =
+        serde_json::from_slice(&read_message(&mut reader).unwrap().unwrap()).unwrap();
+    assert_eq!(initialize["command"], "initialize");
+    drop(session);
+    let closed = read_message(&mut reader);
+    assert!(matches!(closed, Ok(None)), "{closed:?}");
 }

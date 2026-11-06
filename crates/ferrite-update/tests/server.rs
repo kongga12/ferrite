@@ -17,7 +17,7 @@ fn serve(routes: Vec<(String, Vec<u8>)>) -> String {
     thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(mut stream) = stream else { continue };
-            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut reader = BufReader::new(&stream);
             let mut request = String::new();
             let _ = reader.read_line(&mut request);
             loop {
