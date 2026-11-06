@@ -2,8 +2,10 @@
 //! 멈추면 호출 스택과 맨 위 프레임의 변수를 스스로 불러오고, 앱에 멈춘 자리를 알린다.
 //! 로컬 파일이 없는 스크립트(브라우저 화면의 인라인 스크립트)는 어댑터에서 내용을 받아 임시 폴더에
 //! 담아 읽기 전용으로 연다. 그 파일에 건 중단점은 원래 소스로 건다.
+//! js-debug면 그 스크립트를 만든 JSP를 내용으로 찾아, JSP에 건 중단점을 화면 스크립트의 줄로 바꿔 걸고 멈춘
+//! 자리도 JSP의 줄로 보인다.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc::{Receiver, channel};
@@ -12,6 +14,7 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 use ferrite_core::debug_config::{self, CustomAdapter, DebugConfig};
+use ferrite_dap::page_lines::{self, PageLines};
 use ferrite_dap::{
     Adapter, Breakpoint, BreakpointState, DebugEvent, DebugSession, Launch, Scope, Source,
     StackFrame, State, Variable, adapters, types,
@@ -89,6 +92,43 @@ fn stored_name(source: &Source, content: &str) -> String {
     name
 }
 
+/// 아직 화면 스크립트에 걸지 못한 JSP 중단점(디버그 중에는 빈 점으로 보인다).
+static UNBOUND: BreakpointState = BreakpointState {
+    id: None,
+    verified: false,
+    line: None,
+    message: None,
+};
+
+/// js-debug 세션에서 JSP와 화면 스크립트를 잇는다. js-debug는 화면 주소를 만든 JSP를 모르므로 JSP에 건
+/// 중단점을 걸지 못한다. 그래서 화면 스크립트를 불러올 때마다 내용으로 JSP를 찾아 그 줄로 바꿔 건다.
+#[derive(Default)]
+struct Pages {
+    /// JSP 파일에 건 중단점.
+    breakpoints: BTreeMap<PathBuf, Vec<Breakpoint>>,
+    /// 담은 파일에 직접 건 중단점.
+    direct: HashMap<PathBuf, Vec<Breakpoint>>,
+    /// 담은 파일 → 그 화면 스크립트를 만든 JSP와 줄.
+    lines: HashMap<PathBuf, PageLines>,
+    /// 담은 파일에 보낸 중단점 중 JSP에서 온 것(직접 건 것 뒤에 붙인다): (JSP, 그 JSP의 중단점 번호).
+    sent: HashMap<PathBuf, Vec<(PathBuf, usize)>>,
+    /// 내용을 묻고 있는 소스(같은 소스를 거듭 묻지 않는다).
+    asking: HashSet<String>,
+}
+
+/// 멈춘 프레임이 JSP가 만든 화면 스크립트면 JSP의 그 줄로 바꾼다.
+fn to_jsp(frame: &mut StackFrame, lines: &PageLines) {
+    let Some(source) = frame.source.as_mut() else {
+        return;
+    };
+    source.path = Some(lines.file.clone());
+    source.name = lines
+        .file
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned());
+    frame.line = lines.to_file(frame.line.max(1) as usize - 1) as i64 + 1;
+}
+
 /// 빌드가 끝나기를 기다리는 시작. 빌드에 성공하면 세션을 띄운다.
 struct PendingLaunch {
     adapter: Adapter,
@@ -140,6 +180,10 @@ pub struct Debugger {
     open_after: Option<String>,
     /// 어댑터에 준 세션 임시 폴더(js-debug). 세션이 끝나면 지운다.
     scratch: Option<PathBuf>,
+    /// 프로젝트 폴더(화면 스크립트를 만든 JSP를 찾는다).
+    root: Option<PathBuf>,
+    /// js-debug 세션의 JSP 잇기. 다른 어댑터면 None.
+    pages: Option<Pages>,
 }
 
 /// 담아 둔 소스를 찾는 열쇠(같은 화면을 다시 불러도 같다. 번호는 바뀐다).
@@ -240,8 +284,25 @@ impl Debugger {
             name: config.name.clone(),
             adapter: config.adapter.clone(),
             console: format!("[디버그 시작: {}]\n", config.name),
+            root: Some(root.to_path_buf()),
             ..Default::default()
         };
+        // JSP 중단점은 js-debug에 보내지 않고 화면 스크립트를 불러올 때 그 줄로 바꿔 건다.
+        let mut breakpoints = breakpoints;
+        if config.adapter == "js-debug" {
+            let (jsp, rest): (BTreeMap<_, _>, _) = breakpoints
+                .into_iter()
+                .partition(|(path, _)| page_lines::is_page_file(path));
+            breakpoints = rest;
+            // 맞춘 JSP는 실제 경로로 적으므로 같은 꼴로 둔다(macOS `/var` 링크, Windows 짧은 이름).
+            self.pages = Some(Pages {
+                breakpoints: jsp
+                    .into_iter()
+                    .map(|(path, list)| (crate::app::real_path(&path), list))
+                    .collect(),
+                ..Default::default()
+            });
+        }
         let Some(build) = &config.build else {
             return self.launch(&adapter, launch, breakpoints);
         };
@@ -363,16 +424,109 @@ impl Debugger {
     }
 
     pub fn set_breakpoints(&mut self, path: &Path, breakpoints: Vec<Breakpoint>) {
+        let stored = self.is_stored(path);
+        if let Some(pages) = &mut self.pages {
+            if page_lines::is_page_file(path) {
+                let path = crate::app::real_path(path);
+                pages.breakpoints.insert(path.clone(), breakpoints);
+                let scripts: Vec<PathBuf> = pages
+                    .lines
+                    .iter()
+                    .filter(|(_, lines)| lines.file == path)
+                    .map(|(local, _)| local.clone())
+                    .collect();
+                for local in scripts {
+                    self.send_page(&local);
+                }
+                return;
+            }
+            if stored {
+                pages.direct.insert(path.to_path_buf(), breakpoints);
+                self.send_page(path);
+                return;
+            }
+        }
         self.states.remove(path);
         if let Some(session) = &mut self.session {
             session.set_breakpoints(path, breakpoints);
         }
     }
 
-    /// 어댑터가 확인한 그 파일 `index`번째 중단점(세션이 없으면 None).
+    /// 담은 화면 스크립트의 중단점을 보낸다: 직접 건 것과, 그 스크립트를 만든 JSP에 건 것을 화면 줄로
+    /// 바꾼 것(화면에 그대로 나온 줄만).
+    fn send_page(&mut self, local: &Path) {
+        let Some(pages) = &mut self.pages else {
+            return;
+        };
+        let mut list = pages.direct.get(local).cloned().unwrap_or_default();
+        let mut origins = Vec::new();
+        if let Some(lines) = pages.lines.get(local) {
+            for (i, b) in pages
+                .breakpoints
+                .get(&lines.file)
+                .into_iter()
+                .flatten()
+                .enumerate()
+            {
+                if let Some(line) = lines.to_page(b.line.saturating_sub(1)) {
+                    list.push(Breakpoint {
+                        line: line + 1,
+                        condition: b.condition.clone(),
+                    });
+                    origins.push((lines.file.clone(), i));
+                }
+            }
+        }
+        // 보낸 적이 없고 보낼 것도 없으면 보내지 않는다(화면을 불러올 때마다 스크립트가 여럿이다).
+        if list.is_empty() && !pages.sent.contains_key(local) {
+            return;
+        }
+        pages.sent.insert(local.to_path_buf(), origins);
+        self.states.remove(local);
+        if let Some(session) = &mut self.session {
+            session.set_breakpoints(local, list);
+        }
+    }
+
+    /// 어댑터가 확인한 그 파일 `index`번째 중단점(세션이 없으면 None). JSP면 그 중단점을 바꿔 건 화면
+    /// 스크립트의 것(걸린 것이 먼저)이고, 아직 건 곳이 없으면 걸리지 않은 것으로 본다.
     pub fn breakpoint_state(&self, path: &Path, index: usize) -> Option<&BreakpointState> {
         self.session.as_ref()?;
+        if let Some(pages) = &self.pages
+            && page_lines::is_page_file(path)
+        {
+            let mut found = None;
+            for (local, origins) in &pages.sent {
+                let direct = pages.direct.get(local).map_or(0, Vec::len);
+                let Some(k) = origins.iter().position(|(f, i)| f == path && *i == index) else {
+                    continue;
+                };
+                if let Some(state) = self.states.get(local).and_then(|s| s.get(direct + k)) {
+                    if state.verified {
+                        return Some(state);
+                    }
+                    found = Some(state);
+                }
+            }
+            return Some(found.unwrap_or(&UNBOUND));
+        }
         self.states.get(path)?.get(index)
+    }
+
+    /// 화면 스크립트 내용으로 그것을 만든 JSP와 줄을 찾는다(프로젝트의 JSP를 UTF-8·CP949로 읽는다).
+    fn match_page(&self, source: &Source, content: &str) -> Option<PageLines> {
+        let root = self.root.as_ref()?;
+        let files: Vec<(PathBuf, String)> = page_lines::candidates(root)
+            .into_iter()
+            .filter_map(|path| {
+                let bytes = std::fs::read(&path).ok()?;
+                let text = ferrite_core::text_file::decode(&bytes).ok()?.text;
+                Some((path, text))
+            })
+            .collect();
+        let mut lines = page_lines::find(content, &files, &shown(&source_key(source)))?;
+        lines.file = crate::app::real_path(&lines.file);
+        Some(lines)
     }
 
     /// 어댑터에서 받아 담아 둔 소스 파일인지(읽기 전용으로 연다).
@@ -533,6 +687,21 @@ impl Debugger {
                 DebugEvent::Exited { code } => {
                     self.push_console(&format!("[종료 코드 {code}]\n"));
                 }
+                // 화면을 불러오면 인라인 스크립트의 내용을 받아 JSP를 찾는다(JSP 중단점을 걸려고). 화면
+                // 주소가 있는 소스만 묻는다(`eval`로 만든 스크립트 등은 뺀다).
+                DebugEvent::LoadedSource { reason, source } => {
+                    let key = source_key(&source);
+                    if reason != "removed"
+                        && is_remote(&source)
+                        && key.contains('/')
+                        && self
+                            .pages
+                            .as_mut()
+                            .is_some_and(|pages| pages.asking.insert(key))
+                    {
+                        self.send(Request::Source(source));
+                    }
+                }
                 DebugEvent::Terminated => {
                     self.end("[디버그를 마쳤습니다]");
                     notices.push(DebugNotice::Status("디버그를 마쳤습니다".into()));
@@ -590,10 +759,20 @@ impl Debugger {
                 // 어댑터가 준 경로(드라이브 글자 대소문자 등)를 열린 문서 경로와 같은 꼴로 맞춘다. 로컬 파일이
                 // 없는 소스는 담아 둔 파일로 바꾸고, 아직 없으면 내용을 묻는다.
                 let mut fetch: Vec<Source> = Vec::new();
-                for source in self.frames.iter_mut().filter_map(|f| f.source.as_mut()) {
+                for frame in &mut self.frames {
+                    let Some(source) = frame.source.as_mut() else {
+                        continue;
+                    };
                     if is_remote(source) {
                         match self.stored.get(&source_key(source)) {
-                            Some(local) => source.path = Some(local.clone()),
+                            Some(local) => {
+                                source.path = Some(local.clone());
+                                if let Some(lines) =
+                                    self.pages.as_ref().and_then(|p| p.lines.get(local))
+                                {
+                                    to_jsp(frame, lines);
+                                }
+                            }
                             None if !fetch.iter().any(|f| source_key(f) == source_key(source)) => {
                                 fetch.push(source.clone());
                             }
@@ -654,10 +833,34 @@ impl Debugger {
                     session.map_source(&local, &source);
                 }
                 let key = source_key(&source);
-                // 멈춘 프레임이 이 소스면 담은 파일을 가리키게 한다.
-                for frame_source in self.frames.iter_mut().filter_map(|f| f.source.as_mut()) {
+                // js-debug면 이 스크립트를 만든 JSP를 찾아 그 JSP의 중단점을 건다. 화면을 다시 불렀으면 소스
+                // 번호가 바뀌었으므로 담은 파일의 중단점도 다시 보낸다.
+                if self.pages.is_some() {
+                    let lines = self.match_page(&source, content);
+                    if let Some(pages) = &mut self.pages {
+                        pages.asking.remove(&key);
+                        match lines {
+                            Some(lines) => pages.lines.insert(local.clone(), lines),
+                            None => pages.lines.remove(&local),
+                        };
+                    }
+                    self.send_page(&local);
+                }
+                let lines = self
+                    .pages
+                    .as_ref()
+                    .and_then(|p| p.lines.get(&local))
+                    .cloned();
+                // 멈춘 프레임이 이 소스면 담은 파일(JSP를 찾았으면 JSP)을 가리키게 한다.
+                for frame in &mut self.frames {
+                    let Some(frame_source) = frame.source.as_mut() else {
+                        continue;
+                    };
                     if is_remote(frame_source) && source_key(frame_source) == key {
                         frame_source.path = Some(local.clone());
+                        if let Some(lines) = &lines {
+                            to_jsp(frame, lines);
+                        }
                     }
                 }
                 if self.open_after.as_ref() == Some(&key) {
@@ -717,7 +920,16 @@ impl Debugger {
                         ui.weak("프로젝트 파일이 없는 스크립트가 아직 없습니다");
                     }
                     for source in &self.scripts {
-                        let name = shown(source.name.as_deref().unwrap_or("(이름 없음)"));
+                        let mut name = shown(source.name.as_deref().unwrap_or("(이름 없음)"));
+                        // JSP를 찾은 스크립트는 그 JSP 이름도 보인다.
+                        if let Some(jsp) = self
+                            .stored
+                            .get(&source_key(source))
+                            .and_then(|local| self.pages.as_ref()?.lines.get(local))
+                            .and_then(|lines| lines.file.file_name())
+                        {
+                            name.push_str(&format!(" → {}", jsp.to_string_lossy()));
+                        }
                         if ui.selectable_label(false, name).clicked() {
                             script = Some(source.clone());
                             ui.close();
@@ -1121,5 +1333,210 @@ mod tests {
             source_key(&page),
             page.path.as_ref().unwrap().to_string_lossy()
         );
+    }
+
+    /// 각본대로 답하는 가짜 js-debug: 시작한 뒤 화면 스크립트를 불러왔다고 알리고, 내용을 주고, 그
+    /// 스크립트에 중단점이 걸리면 그 줄에서 멈춘다. 받은 중단점은 (소스 번호 또는 경로, 줄들)로 돌려준다.
+    fn fake_js_debug(
+        script: &'static str,
+        page: Source,
+        stop_line: i64,
+    ) -> (
+        std::net::SocketAddr,
+        std::sync::mpsc::Receiver<(String, Vec<i64>)>,
+    ) {
+        use ferrite_lsp::transport::{read_message, write_message};
+        use serde_json::json;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (sent, received) = channel();
+        thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+            let mut writer = stream;
+            let mut seq = 0;
+            let mut send = |message: Value| {
+                seq += 1;
+                let mut message = message;
+                message["seq"] = json!(seq);
+                write_message(&mut writer, &serde_json::to_vec(&message).unwrap()).unwrap();
+            };
+            let page_json = page.to_json();
+            while let Ok(Some(body)) = read_message(&mut reader) {
+                let request: Value = serde_json::from_slice(&body).unwrap();
+                let command = request["command"].as_str().unwrap_or_default().to_owned();
+                let mut body = json!({});
+                let mut after = Vec::new();
+                match command.as_str() {
+                    "initialize" => {
+                        body = json!({ "supportsConfigurationDoneRequest": true, "supportsLoadedSourcesRequest": true });
+                        after.push(json!({ "type": "event", "event": "initialized", "body": {} }));
+                    }
+                    "setBreakpoints" => {
+                        let source = &request["arguments"]["source"];
+                        let lines: Vec<i64> = request["arguments"]["breakpoints"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .map(|b| b["line"].as_i64().unwrap())
+                            .collect();
+                        let name = match source["sourceReference"].as_i64() {
+                            Some(reference) => format!("#{reference}"),
+                            None => source["path"].as_str().unwrap_or_default().to_owned(),
+                        };
+                        body = json!({ "breakpoints": lines.iter().enumerate()
+                            .map(|(i, l)| json!({ "id": i + 1, "verified": true, "line": l }))
+                            .collect::<Vec<_>>() });
+                        if name == format!("#{}", page.source_reference)
+                            && lines.contains(&stop_line)
+                        {
+                            after.push(json!({ "type": "event", "event": "stopped",
+                                "body": { "reason": "breakpoint", "threadId": 1 } }));
+                        }
+                        let _ = sent.send((name, lines));
+                    }
+                    "configurationDone" => {
+                        after.push(json!({ "type": "event", "event": "loadedSource",
+                            "body": { "reason": "new", "source": page_json } }));
+                    }
+                    "source" => body = json!({ "content": script }),
+                    "stackTrace" => {
+                        body = json!({ "stackFrames": [{ "id": 1, "name": "fn_egov_link_page",
+                            "source": page_json, "line": stop_line, "column": 5 }] });
+                    }
+                    "scopes" => body = json!({ "scopes": [] }),
+                    "threads" => body = json!({ "threads": [{ "id": 1, "name": "main" }] }),
+                    _ => {}
+                }
+                send(
+                    json!({ "type": "response", "request_seq": request["seq"], "success": true,
+                    "command": command, "body": body }),
+                );
+                for event in after {
+                    send(event);
+                }
+                if command == "disconnect" {
+                    break;
+                }
+            }
+        });
+        (address, received)
+    }
+
+    #[test]
+    fn js_debug에서_jsp_중단점을_화면_스크립트_줄로_걸고_멈춘_자리를_jsp로_보인다() {
+        let root = std::env::temp_dir().join(format!("ferrite-jsp-debug-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let jsp = root.join("src/main/webapp/WEB-INF/jsp/board/BoardList.jsp");
+        std::fs::create_dir_all(jsp.parent().unwrap()).unwrap();
+        // CP949로 저장한 JSP(지시자 둘, `<c:url>`, 한글 문자열).
+        let text = "<%@ page contentType=\"text/html; charset=euc-kr\" %>\r\n<%@ taglib prefix=\"c\" uri=\"http://java.sun.com/jsp/jstl/core\" %>\r\n<script>\r\nfunction fn_egov_link_page(pageNo) {\r\n    alert(\"쪽 \" + pageNo);\r\n    location.href = \"<c:url value='/board/list.do'/>?pageIndex=\" + pageNo;\r\n}\r\n</script>\r\n";
+        let (bytes, _, _) = encoding_rs::EUC_KR.encode(text);
+        std::fs::write(&jsp, &bytes).unwrap();
+        // 그 JSP가 만든 화면의 인라인 스크립트(화면에서는 열 줄 아래). JSP 5줄은 화면 15줄이다.
+        static SCRIPT: &str = "\n\n\n\n\n\n\n\n\n\n\n\n\nfunction fn_egov_link_page(pageNo) {\n    alert(\"쪽 \" + pageNo);\n    location.href = \"/app/board/list.do?pageIndex=\" + pageNo;\n}\n";
+        let page = source("127.0.0.1\u{a789}8080/app/board/list.do\u{a789}13:9", 7);
+        let (address, received) = fake_js_debug(SCRIPT, page, 15);
+
+        let config = DebugConfig {
+            name: "화면".into(),
+            adapter: "js-debug".into(),
+            request: "launch".into(),
+            arguments: serde_json::json!({}),
+            build: None,
+        };
+        // 실제 경로가 아닌 꼴로 준다(macOS 임시 폴더의 `/var` 링크, Windows CI의 짧은 이름 `RUNNER~1`처럼).
+        let breakpoints = BTreeMap::from([(
+            root.join("src/main/webapp/WEB-INF/../WEB-INF/jsp/board/BoardList.jsp"),
+            vec![Breakpoint {
+                line: 5,
+                condition: None,
+            }],
+        )]);
+        let mut debugger = Debugger::default();
+        debugger
+            .start(
+                &config,
+                &root,
+                None,
+                breakpoints,
+                Adapter::Tcp(address),
+                &egui::Context::default(),
+            )
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while debugger
+            .location()
+            .is_none_or(|(path, _)| path.extension().is_none_or(|e| e != "jsp"))
+        {
+            assert!(
+                Instant::now() < deadline,
+                "JSP에서 멈추지 않음: {:?}",
+                debugger.location()
+            );
+            debugger.poll();
+            thread::sleep(Duration::from_millis(10));
+        }
+        let (path, line) = debugger.location().unwrap();
+        assert_eq!(path, crate::app::real_path(&jsp));
+        assert_eq!(line, 4, "JSP 5줄(0부터 4)");
+        // JSP는 어댑터에 보내지 않고 화면 스크립트 15줄로 걸었다. 어댑터가 확인한 것을 JSP의 점으로 보인다.
+        let sent: Vec<(String, Vec<i64>)> = received.try_iter().collect();
+        assert!(
+            sent.iter().all(|(name, _)| !name.ends_with(".jsp")),
+            "{sent:?}"
+        );
+        assert!(sent.contains(&("#7".to_owned(), vec![15])), "{sent:?}");
+        assert!(
+            debugger
+                .breakpoint_state(&crate::app::real_path(&jsp), 0)
+                .unwrap()
+                .verified
+        );
+        // 호출 스택에는 JSP 이름으로 보인다.
+        assert_eq!(
+            debugger.frames[0].source.as_ref().unwrap().name.as_deref(),
+            Some("BoardList.jsp")
+        );
+
+        // JSP의 중단점을 옮기면 화면 스크립트 줄로 다시 건다. 화면에 나오지 않는 줄(지시자)은 걸 곳이 없다.
+        let jsp_path = crate::app::real_path(&jsp);
+        debugger.set_breakpoints(
+            &jsp_path,
+            vec![
+                Breakpoint {
+                    line: 1,
+                    condition: None,
+                },
+                Breakpoint {
+                    line: 6,
+                    condition: None,
+                },
+            ],
+        );
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let moved = loop {
+            debugger.poll();
+            if let Some(found) = received.try_iter().find(|(name, _)| name == "#7") {
+                break found;
+            }
+            assert!(Instant::now() < deadline, "다시 걸지 않음");
+            thread::sleep(Duration::from_millis(10));
+        };
+        assert_eq!(moved.1, [16]);
+        while !debugger
+            .states
+            .contains_key(debugger.stored.values().next().unwrap())
+        {
+            debugger.poll();
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!debugger.breakpoint_state(&jsp_path, 0).unwrap().verified);
+        assert!(debugger.breakpoint_state(&jsp_path, 1).unwrap().verified);
+        debugger.shutdown();
+        // 담아 둔 화면 스크립트는 앱이 닫힐 때 지우므로 시험에서는 직접 지운다.
+        let _ = std::fs::remove_dir_all(sources_dir());
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -2,14 +2,17 @@
 //! (`add(41, 1)`)의 `return` 줄에서 멈춰 변수 a=41·b=1·total=42를 읽는다. 내려받기가 커서 기본은
 //! 건너뛰고, `.github/workflows/adapters.yml`이 3개 OS에서 `--ignored`로 돌린다. 필요한 도구(Go,
 //! PHP+Xdebug, node, rustc, Chrome)가 없으면 로컬에서는 건너뛰고 CI에서는 실패한다. js-debug는 브라우저 화면의
-//! 외부 스크립트와 인라인 스크립트에서 멈춘다.
+//! 외부 스크립트와 인라인 스크립트에서 멈추고, 인라인 스크립트를 만든 JSP의 줄로 중단점을 걸고 멈춘 자리를
+//! JSP 줄로 맞춘다. 화면을 다시 불러도 건 중단점에서 멈춘다.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use ferrite_dap::{Adapter, Breakpoint, DebugEvent, DebugSession, Launch, adapters, types};
+use ferrite_dap::{
+    Adapter, Breakpoint, DebugEvent, DebugSession, Launch, adapters, page_lines, types,
+};
 use ferrite_lsp::client::find_program;
 use ferrite_lsp::install;
 use serde_json::{Value, json};
@@ -481,45 +484,68 @@ setInterval(tick, 200);
 </body></html>
 ";
 
+/// `PAGE`를 만든 JSP(서버가 실제로 돌리지는 않는다). 지시자 둘이 앞에 있고 EL·`<c:url>`·`<c:out>`이
+/// 화면에서 값으로 바뀐다.
+const LIST_JSP: &str = "<%@ page contentType=\"text/html; charset=UTF-8\" %>
+<%@ taglib prefix=\"c\" uri=\"http://java.sun.com/jsp/jstl/core\" %>
+<!doctype html>
+<html><body>
+<h1>${title}</h1>
+<script src=\"<c:url value='/js/app.js'/>\"></script>
+<script>
+var count = ${start};
+function tick() {
+  count = count + 1;
+  add(count, 1);
+}
+setInterval(tick, <c:out value=\"${interval}\"/>);
+</script>
+</body></html>
+";
+
 const APP_JS: &str = "function add(a, b) {
   var total = a + b;
   return total;
 }
 ";
 
-/// 컨텍스트 경로 /app 아래에 화면(인라인 스크립트)과 외부 스크립트를 주는 웹 서버.
+/// 컨텍스트 경로 /app 아래에 화면(인라인 스크립트)과 외부 스크립트를 주는 웹 서버. 연결마다 따로 받는다:
+/// 브라우저는 요청 없이 미리 열어 둔 연결을 쥐고 있기도 해서, 차례로 받으면 그 연결을 읽다 다음 요청에
+/// 답하지 못한다(화면을 다시 부를 때 CI의 Windows에서 그랬다).
 fn web_server() -> u16 {
     use std::io::{BufRead, BufReader, Write};
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     std::thread::spawn(move || {
         for mut stream in listener.incoming().flatten() {
-            let mut line = String::new();
-            let mut reader = BufReader::new(&stream);
-            let _ = reader.read_line(&mut line);
-            loop {
-                let mut header = String::new();
-                if reader.read_line(&mut header).unwrap_or(0) == 0 || header.trim().is_empty() {
-                    break;
+            std::thread::spawn(move || {
+                let mut line = String::new();
+                let mut reader = BufReader::new(&stream);
+                let _ = reader.read_line(&mut line);
+                loop {
+                    let mut header = String::new();
+                    if reader.read_line(&mut header).unwrap_or(0) == 0 || header.trim().is_empty() {
+                        break;
+                    }
                 }
-            }
-            let (kind, body) = if line.starts_with("GET /app/list.do ") {
-                ("text/html; charset=UTF-8", PAGE)
-            } else if line.starts_with("GET /app/js/app.js ") {
-                ("application/javascript", APP_JS)
-            } else {
-                ("text/plain", "")
-            };
-            let status = if body.is_empty() {
-                "404 Not Found"
-            } else {
-                "200 OK"
-            };
-            let _ = write!(
-                stream,
-                "HTTP/1.1 {status}\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            );
+                let (kind, body) = if line.starts_with("GET /app/list.do ") {
+                    ("text/html; charset=UTF-8", PAGE)
+                } else if line.starts_with("GET /app/js/app.js ") {
+                    ("application/javascript", APP_JS)
+                } else {
+                    ("text/plain", "")
+                };
+                let status = if body.is_empty() {
+                    "404 Not Found"
+                } else {
+                    "200 OK"
+                };
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 {status}\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            });
         }
     });
     port
@@ -575,6 +601,9 @@ fn js_debug를_설치해_브라우저의_외부_스크립트와_화면_스크립
     std::fs::create_dir_all(web_root.join("js")).unwrap();
     let app_js = web_root.join("js/app.js");
     std::fs::write(&app_js, APP_JS).unwrap();
+    let list_jsp = web_root.join("WEB-INF/jsp/list.jsp");
+    std::fs::create_dir_all(list_jsp.parent().unwrap()).unwrap();
+    std::fs::write(&list_jsp, LIST_JSP).unwrap();
     let port = web_server();
     let adapter = install_adapter(&servers, "js-debug", &project);
     let mut runtime_args = vec!["--headless=new", "--disable-gpu"];
@@ -610,6 +639,13 @@ fn js_debug를_설치해_브라우저의_외부_스크립트와_화면_스크립
     let mut wait = |session: &mut DebugSession, done: &dyn Fn(&DebugEvent) -> bool| {
         wait_for(session, &mut seen, &mut next, done)
     };
+    // 0) 화면을 불러오면 인라인 스크립트를 `loadedSource`로 알린다(앱은 이때 내용을 받아 JSP를 찾는다).
+    let DebugEvent::LoadedSource { source: loaded, .. } = wait(&mut session, &|e| {
+        matches!(e, DebugEvent::LoadedSource { source, .. }
+            if source.source_reference > 0 && source.name.as_deref().is_some_and(|n| n.contains("list.do")))
+    }) else {
+        unreachable!()
+    };
     // 1) 외부 스크립트: URL /app/js/app.js가 webapp 폴더의 파일로 맞춰져 그 파일의 중단점에서 멈춘다.
     let (thread, frame) = top_frame(&mut session, &mut wait);
     let source = frame.source.clone().unwrap();
@@ -635,6 +671,7 @@ fn js_debug를_설치해_브라우저의_외부_스크립트와_화면_스크립
         })
         .expect("화면 스크립트")
         .clone();
+    assert_eq!(loaded.source_reference, page.source_reference);
     session.source(&page);
     let content = response(wait(
         &mut session,
@@ -646,6 +683,18 @@ fn js_debug를_설치해_브라우저의_외부_스크립트와_화면_스크립
         .position(|l| l.contains("count = count + 1"))
         .expect("tick 본문")
         + 1;
+    // 내용으로 그 스크립트를 만든 JSP를 찾는다. JSP 10줄(`count = count + 1;`)은 화면 8줄이다.
+    let files: Vec<(PathBuf, String)> = page_lines::candidates(&project)
+        .into_iter()
+        .map(|p| {
+            let text = std::fs::read_to_string(&p).unwrap();
+            (p, text)
+        })
+        .collect();
+    let lines = page_lines::find(&content, &files, page.name.as_deref().unwrap()).expect("JSP");
+    assert_eq!(lines.file, list_jsp);
+    assert_eq!(lines.to_page(9), Some(line - 1));
+    assert_eq!(line, 8);
     let local = project.join("list.do.html");
     std::fs::write(&local, &content).unwrap();
     session.map_source(&local, &page);
@@ -664,6 +713,44 @@ fn js_debug를_설치해_브라우저의_외부_스크립트와_화면_스크립
     assert_eq!(
         frame.source.unwrap().source_reference,
         page.source_reference
+    );
+    assert_eq!(
+        lines.to_file(frame.line as usize - 1),
+        9,
+        "멈춘 자리는 JSP 10줄"
+    );
+
+    // 3) 화면을 다시 불러도 건 중단점에서 멈추는지: 맨 위에서 바로 도는 줄(`var count = 0;`, JSP 8줄)에 걸고
+    // 다시 부른다. 그 줄은 화면을 불러오는 중에 돌므로 다시 불러야 멈출 수 있다. 멈춘 채로는 화면을 다시
+    // 부르지 못하므로 이어 간 뒤에 부르게 한다.
+    let top = lines.to_page(7).expect("JSP 8줄의 화면 줄") + 1;
+    session.set_breakpoints(
+        &local,
+        vec![Breakpoint {
+            line: top,
+            condition: None,
+        }],
+    );
+    session.request(
+        "evaluate",
+        json!({ "expression": "setTimeout(function () { location.reload(); }, 300)", "frameId": frame.id, "context": "repl" }),
+    );
+    // js-debug는 요청을 함께 처리해 답을 기다리지 않으면 이어 가기가 먼저 브라우저에 가서 식이 돌지 않는다.
+    wait(
+        &mut session,
+        &|e| matches!(e, DebugEvent::Response { command, .. } if command == "evaluate"),
+    );
+    session.resume(thread);
+    let (_, frame) = top_frame(&mut session, &mut wait);
+    eprintln!("다시 부른 화면의 프레임: {frame:?}");
+    assert_eq!(frame.line as usize, top);
+    let source = frame.source.unwrap();
+    assert!(
+        source
+            .name
+            .as_deref()
+            .is_some_and(|n| n.contains("list.do")),
+        "{source:?}"
     );
 
     session.stop();
