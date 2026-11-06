@@ -1,12 +1,14 @@
-//! HTTP 요청 파일(`.http`): 해석(`parse`), 환경 파일(`env`), 보내기(`send`). 쿠키는 세션 동안
-//! `CookieJar`에 두고 이어 보내는 요청에 붙인다. 리다이렉트는 직접 따라가며 거치는 응답의 쿠키도 담는다
-//! (로그인의 302 응답이 세션 쿠키를 준다).
+//! HTTP 요청 파일(`.http`): 해석(`parse`), 환경 파일(`env`), 보내기(`send`), 응답 처리 스크립트
+//! (`script`). 쿠키는 세션 동안 `CookieJar`에 두고 이어 보내는 요청에 붙인다. 리다이렉트는 직접 따라가며
+//! 거치는 응답의 쿠키도 담는다(로그인의 302 응답이 세션 쿠키를 준다).
 
 pub mod cookies;
 pub mod env;
 pub mod parse;
+pub mod script;
 
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::collections::hash_map::RandomState;
 use std::fs::{self, OpenOptions};
 use std::hash::{BuildHasher, Hasher};
@@ -20,7 +22,11 @@ use ureq::tls::{RootCerts, TlsConfig};
 
 pub use cookies::CookieJar;
 pub use env::Environments;
-pub use parse::{HttpFile, Request, parse};
+pub use parse::{Handler, HttpFile, Request, parse};
+pub use script::Script;
+
+/// 응답 처리 스크립트가 `client.global.set`으로 정한 변수.
+pub type Globals = BTreeMap<String, String>;
 
 /// 받는 본문의 상한.
 const MAX_BODY: u64 = 20 * 1024 * 1024;
@@ -41,21 +47,25 @@ pub struct Prepared {
     pub insecure: bool,
     pub no_redirect: bool,
     pub no_cookie_jar: bool,
+    /// 응답을 받은 뒤 돌릴 스크립트(파일은 읽어 둔다).
+    pub scripts: Vec<Script>,
 }
 
-/// 요청의 `{{변수}}`를 채운다. 찾는 순서: 파일 변수(그 안의 변수도 채운다), 고른 환경, 동적 변수
-/// (`$uuid`, `$timestamp`, `$randomInt`). 본문의 파일과 저장할 파일의 상대 경로는 `dir`(요청 파일의
-/// 폴더) 기준이다.
+/// 요청의 `{{변수}}`를 채운다. 찾는 순서: 파일 변수(그 안의 변수도 채운다), 스크립트가 정한 변수
+/// (`globals`), 고른 환경, 동적 변수(`$uuid`, `$timestamp`, `$randomInt`). 본문의 파일, 저장할 파일,
+/// 스크립트 파일의 상대 경로는 `dir`(요청 파일의 폴더) 기준이다.
 pub fn prepare(
     file: &HttpFile,
     request: &Request,
     env: Option<(&Environments, &str)>,
+    globals: &Globals,
     dir: &Path,
 ) -> Result<Prepared, String> {
     /// 파일 변수 안에서 못 채운 이름은 `nested`에 모은다(바깥의 파일 변수 이름보다 쓸모 있다).
     fn lookup(
         file: &HttpFile,
         env: Option<(&Environments, &str)>,
+        globals: &Globals,
         name: &str,
         depth: u8,
         nested: &RefCell<Vec<String>>,
@@ -64,9 +74,12 @@ pub fn prepare(
             return None;
         }
         if let Some((_, value)) = file.variables.iter().rev().find(|(n, _)| n == name) {
-            return parse::substitute(value, &|n| lookup(file, env, n, depth + 1, nested))
+            return parse::substitute(value, &|n| lookup(file, env, globals, n, depth + 1, nested))
                 .map_err(|names| nested.borrow_mut().extend(names))
                 .ok();
+        }
+        if let Some(value) = globals.get(name) {
+            return Some(value.clone());
         }
         if let Some(value) = env.and_then(|(envs, selected)| envs.get(selected, name)) {
             return Some(value.to_owned());
@@ -74,7 +87,7 @@ pub fn prepare(
         dynamic(name)
     }
     let nested = RefCell::new(Vec::new());
-    let fill = |text: &str| parse::substitute(text, &|n| lookup(file, env, n, 0, &nested));
+    let fill = |text: &str| parse::substitute(text, &|n| lookup(file, env, globals, n, 0, &nested));
     let mut missing = Vec::new();
     let mut take = |result: Result<String, Vec<String>>| {
         result.unwrap_or_else(|names| {
@@ -119,6 +132,23 @@ pub fn prepare(
     let body = body
         .map(|text| body_bytes(&text, dir, multipart))
         .transpose()?;
+    let scripts = request
+        .handlers
+        .iter()
+        .map(|handler| match handler {
+            // 앞을 빈 줄로 채워 오류의 줄이 요청 파일의 줄과 같다.
+            Handler::Inline { line, code } => Ok(Script {
+                name: "응답 스크립트".to_owned(),
+                code: "\n".repeat(*line) + code,
+            }),
+            Handler::File(name) => fs::read(dir.join(name))
+                .map(|bytes| Script {
+                    name: name.clone(),
+                    code: decode(&bytes, "").0,
+                })
+                .map_err(|e| format!("응답 스크립트 파일을 읽지 못했습니다: {name} ({e})")),
+        })
+        .collect::<Result<_, _>>()?;
     Ok(Prepared {
         method: request.method.clone(),
         url,
@@ -128,6 +158,7 @@ pub fn prepare(
         insecure: request.insecure,
         no_redirect: request.no_redirect,
         no_cookie_jar: request.no_cookie_jar,
+        scripts,
     })
 }
 
@@ -549,6 +580,7 @@ mod tests {
             &file,
             &file.requests[0],
             Some((&envs, "dev")),
+            &Globals::new(),
             Path::new("."),
         )
         .unwrap();
@@ -559,11 +591,80 @@ mod tests {
         );
         let uuid = &prepared.headers[0].1;
         assert_eq!((uuid.len(), uuid.as_bytes()[14]), (36, b'4'));
-        let err = prepare(&file, &file.requests[0], None, Path::new(".")).unwrap_err();
+        let err = prepare(
+            &file,
+            &file.requests[0],
+            None,
+            &Globals::new(),
+            Path::new("."),
+        )
+        .unwrap_err();
         assert!(
             err.contains("base") && err.contains("환경을 고르지 않았다"),
             "{err}"
         );
+        // 스크립트가 정한 변수는 환경보다 앞서고 파일 변수보다 뒤다.
+        let globals = Globals::from([
+            ("base".to_owned(), "http://g".to_owned()),
+            ("id".to_owned(), "9".to_owned()),
+        ]);
+        let prepared = prepare(
+            &file,
+            &file.requests[0],
+            Some((&envs, "dev")),
+            &globals,
+            Path::new("."),
+        )
+        .unwrap();
+        assert!(
+            prepared.url.starts_with("http://g/app/x?id=7&"),
+            "{}",
+            prepared.url
+        );
+    }
+
+    #[test]
+    fn 응답_스크립트를_읽고_오류의_줄이_요청_파일과_같다() {
+        let dir = std::env::temp_dir().join(format!("ferrite-http-script-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let (cp949, _, _) = encoding_rs::EUC_KR.encode("client.global.set('이름', '홍');");
+        fs::write(dir.join("check.js"), cp949).unwrap();
+        let file = parse(
+            "### 로그인\nGET /a\n\n> {%\n  client.global.set('t', response.body.t);\n  nothing.x;\n%}\n> ./check.js\n###\nGET /b\n\n> ./none.js\n",
+        );
+        let prepared = prepare(&file, &file.requests[0], None, &Globals::new(), &dir).unwrap();
+        assert_eq!(
+            prepared
+                .scripts
+                .iter()
+                .map(|s| s.name.as_str())
+                .collect::<Vec<_>>(),
+            ["응답 스크립트", "./check.js"]
+        );
+        assert!(prepared.scripts[1].code.contains("'이름'"), "CP949 파일");
+        let response = Response {
+            status: 200,
+            reason: "OK".into(),
+            headers: vec![("Content-Type".into(), "application/json".into())],
+            body: Vec::new(),
+            text: "{\"t\": \"abc\"}".into(),
+            charset: "UTF-8",
+            elapsed: Duration::ZERO,
+            url: String::new(),
+            redirects: Vec::new(),
+        };
+        let mut globals = Globals::new();
+        let outcome = script::run(&prepared.scripts, &response, &mut globals);
+        assert_eq!(globals.get("t").map(String::as_str), Some("abc"));
+        let error = outcome.error.unwrap();
+        assert!(
+            error.contains("nothing") && error.contains(":6:"),
+            "요청 파일의 6줄: {error}"
+        );
+        let err = prepare(&file, &file.requests[1], None, &Globals::new(), &dir).unwrap_err();
+        assert!(err.contains("none.js"), "{err}");
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -576,7 +677,7 @@ mod tests {
         let file = parse(
             "@name = a.bin\n###\nPOST /up\nContent-Type: multipart/form-data; boundary=B\n\n--B\nContent-Disposition: form-data; name=\"f\"; filename=\"a.bin\"\n\n< ./{{name}}\n--B--\n>> out/r.json\n###\nPOST /j\n\n<  q.json\n###\nPOST /x\n\n< nothing.txt\n",
         );
-        let up = prepare(&file, &file.requests[0], None, &dir).unwrap();
+        let up = prepare(&file, &file.requests[0], None, &Globals::new(), &dir).unwrap();
         let mut want =
             b"--B\r\nContent-Disposition: form-data; name=\"f\"; filename=\"a.bin\"\r\n\r\n"
                 .to_vec();
@@ -588,13 +689,13 @@ mod tests {
             "파일은 바이트 그대로, 줄은 CRLF"
         );
         assert_eq!(up.save, Some((dir.join("out/r.json"), false)));
-        let json = prepare(&file, &file.requests[1], None, &dir).unwrap();
+        let json = prepare(&file, &file.requests[1], None, &Globals::new(), &dir).unwrap();
         assert_eq!(
             json.body.as_deref(),
             Some(&b"{\"q\": {{x}}}"[..]),
             "멀티파트가 아니면 그대로, 파일 안의 변수는 채우지 않는다"
         );
-        let err = prepare(&file, &file.requests[2], None, &dir).unwrap_err();
+        let err = prepare(&file, &file.requests[2], None, &Globals::new(), &dir).unwrap_err();
         assert!(err.contains("nothing.txt"), "{err}");
 
         let target = dir.join("out/r.json");

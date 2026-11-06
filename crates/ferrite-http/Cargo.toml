@@ -1,12 +1,15 @@
 [package]
 name = "ferrite-http"
-description = "Ferrite HTTP 요청 파일(.http): 해석, 변수·환경 파일, 보내기(쿠키·리다이렉트·문자 집합)"
+description = "Ferrite HTTP 요청 파일(.http): 해석, 변수·환경 파일, 보내기(쿠키·리다이렉트·문자 집합), 응답 처리 스크립트"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
 [dependencies]
+# 응답 처리 스크립트(`> {% %}`)를 돌리는 JS 엔진. 순수 Rust라 C 컴파일러가 필요 없다.
+# 기본 기능(Temporal 등)은 빼서 의존성을 줄인다.
+boa_engine = { version = "0.22.0", default-features = false }
 encoding_rs.workspace = true
 serde_json = "1.0.154"
 # 언어 서버 받기와 같은 설정: OS 인증서 저장소로 TLS를 검증한다. 프록시는 HTTPS_PROXY 등을 따른다.

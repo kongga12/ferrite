@@ -5,6 +5,7 @@
     { "include": "#separator" },
     { "include": "#comment" },
     { "include": "#file-variable" },
+    { "include": "#pre-script" },
     { "include": "#request" }
   ],
   "repository": {
@@ -85,10 +86,82 @@
       }
     },
     "handler": {
-      "comment": "응답 처리 스크립트는 돌리지 않으므로 주석처럼 흐리게 보인다.",
+      "comment": "응답 처리 스크립트(JS)와 스크립트 파일.",
       "patterns": [
-        { "begin": "^\\s*>\\s*\\{%", "end": "%\\}", "name": "comment.block.handler.http" },
-        { "match": "^\\s*>\\s.*", "name": "comment.line.handler.http" }
+        {
+          "begin": "^\\s*(>)\\s*(\\{%)",
+          "beginCaptures": {
+            "1": { "name": "keyword.other.handler.http" },
+            "2": { "name": "keyword.other.handler.http" }
+          },
+          "end": "%\\}",
+          "endCaptures": { "0": { "name": "keyword.other.handler.http" } },
+          "contentName": "meta.embedded.block.js",
+          "patterns": [{ "include": "#js" }]
+        },
+        {
+          "match": "^\\s*(>)\\s+(.*)",
+          "captures": {
+            "1": { "name": "keyword.other.handler.http" },
+            "2": { "name": "string.unquoted.path.http" }
+          }
+        }
+      ]
+    },
+    "pre-script": {
+      "comment": "요청 줄 앞의 요청 전 스크립트(돌리지 않는다). 요청 줄로 보지 않게 먼저 잡는다.",
+      "patterns": [
+        {
+          "begin": "^\\s*(<)\\s*(\\{%)",
+          "beginCaptures": {
+            "1": { "name": "keyword.other.handler.http" },
+            "2": { "name": "keyword.other.handler.http" }
+          },
+          "end": "%\\}",
+          "endCaptures": { "0": { "name": "keyword.other.handler.http" } },
+          "contentName": "meta.embedded.block.js",
+          "patterns": [{ "include": "#js" }]
+        },
+        {
+          "match": "^\\s*(<)\\s+(.*)",
+          "captures": {
+            "1": { "name": "keyword.other.handler.http" },
+            "2": { "name": "string.unquoted.path.http" }
+          }
+        }
+      ]
+    },
+    "js": {
+      "comment": "응답 스크립트에서 흔히 쓰는 것만 칠한다.",
+      "patterns": [
+        { "match": "//.*?(?=%\\}|$)", "name": "comment.line.double-slash.js" },
+        { "begin": "/\\*", "end": "\\*/", "name": "comment.block.js" },
+        {
+          "begin": "\"",
+          "end": "\"|$",
+          "name": "string.quoted.double.js",
+          "patterns": [{ "match": "\\\\.", "name": "constant.character.escape.js" }]
+        },
+        {
+          "begin": "'",
+          "end": "'|$",
+          "name": "string.quoted.single.js",
+          "patterns": [{ "match": "\\\\.", "name": "constant.character.escape.js" }]
+        },
+        {
+          "begin": "`",
+          "end": "`",
+          "name": "string.template.js",
+          "patterns": [{ "match": "\\\\.", "name": "constant.character.escape.js" }]
+        },
+        { "match": "\\b\\d+(?:\\.\\d+)?\\b", "name": "constant.numeric.js" },
+        { "match": "\\b(?:true|false|null|undefined)\\b", "name": "constant.language.js" },
+        {
+          "match": "\\b(?:var|let|const|function|return|if|else|for|while|do|break|continue|try|catch|finally|throw|new|typeof|instanceof|of|in|switch|case|default)\\b",
+          "name": "keyword.control.js"
+        },
+        { "match": "\\b(?:client|response|console)\\b", "name": "variable.language.js" },
+        { "match": "\\b[A-Za-z_$][\\w$]*(?=\\s*\\()", "name": "entity.name.function.js" }
       ]
     },
     "file-include": {

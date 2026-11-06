@@ -358,7 +358,7 @@ fn 내장_http_문법으로_요청_파일을_칠한다() {
          {\"title\": \"{{$uuid}}\", \"n\": 1.5, \"ok\": true}\n\
          < ./a.png\n\
          > {%\n\
-         client.log(1)\n\
+         client.global.set(\"t\", 1); // 토큰\n\
          %}\n\
          >>! out/r.json\n\
          ###\n\
@@ -398,12 +398,18 @@ fn 내장_http_문법으로_요청_파일을_칠한다() {
         ]
     );
     assert_eq!(got[8], [s("<", Keyword), s("./a.png", STR)]);
-    assert!(
-        got[9..12]
-            .iter()
-            .all(|row| row.iter().all(|(_, k)| *k == Comment)),
-        "돌리지 않는 응답 스크립트는 흐리게"
+    assert_eq!(got[9], [s(">", Keyword), s("{%", Keyword)], "응답 스크립트");
+    assert_eq!(
+        got[10],
+        [
+            s("client", Keyword),
+            s("set", Function),
+            s("\"t\"", STR),
+            s("1", Constant),
+            s("// 토큰", Comment)
+        ]
     );
+    assert_eq!(got[11], [s("%}", Keyword)]);
     assert_eq!(got[12], [s(">>!", Keyword), s("out/r.json", STR)]);
     assert_eq!(got[13], [s("###", Keyword)]);
     assert_eq!(
@@ -412,6 +418,25 @@ fn 내장_http_문법으로_요청_파일을_칠한다() {
         "메서드 없는 요청 줄"
     );
     assert!(got[16].is_empty(), "빈 줄 뒤는 본문이라 헤더가 아니다");
+
+    let got = spans(
+        http.grammar().unwrap(),
+        "< {% request.variables.set(\"a\", 1) %}\n< ./pre.js\nGET /a\n",
+    );
+    assert_eq!(
+        got[0],
+        [
+            s("<", Keyword),
+            s("{%", Keyword),
+            s("set", Function),
+            s("\"a\"", STR),
+            s("1", Constant),
+            s("%}", Keyword)
+        ],
+        "요청 전 스크립트는 요청 줄이 아니다"
+    );
+    assert_eq!(got[1], [s("<", Keyword), s("./pre.js", STR)]);
+    assert_eq!(got[2], [s("GET", Keyword), s("/a", STR)]);
 }
 
 #[test]
