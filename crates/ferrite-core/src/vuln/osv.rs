@@ -1,10 +1,10 @@
 //! OSV(Open Source Vulnerabilities) 레코드 읽기와 대조, 온라인 조회(api.osv.dev), 오프라인 DB 묶음
-//! (생태계별 `all.zip`, 레코드마다 JSON 하나).
+//! (생태계별 `all.zip`, 레코드마다 JSON 하나)과 그 패키지별 색인(`all.index`).
 
-use std::collections::{HashMap, HashSet};
-use std::io::{Read, Write};
-use std::path::Path;
-use std::time::Duration;
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::io::{Read, Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
+use std::time::{Duration, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 
@@ -395,26 +395,93 @@ struct PackageName {
     name: String,
 }
 
-/// 오프라인 DB 묶음(`all.zip`)에서 이 의존성들의 패키지에 해당하는 레코드만 읽는다.
-// ponytail: 검사할 때마다 묶음을 다 푼다(Maven 10MB는 몇 초, npm 220MB는 수십 초). 느리면 들일 때
-// 패키지별 색인을 만든다.
-pub fn query_offline(zip: &Path, dependencies: &[Dependency]) -> Result<Vec<Advisory>, String> {
-    let file = std::fs::File::open(zip)
-        .map_err(|e| format!("{}을(를) 열지 못했습니다: {e}", zip.display()))?;
-    let mut archive = zip::ZipArchive::new(std::io::BufReader::new(file))
+/// 묶음 안 레코드의 자리: 압축된 데이터의 시작과 크기, deflate인지(아니면 저장만 했다). 이것만 있으면
+/// zip 목차를 읽지 않고 그 레코드를 푼다(npm 묶음은 레코드가 23만 개라 목차만 1.6초 걸린다).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct Location {
+    start: u64,
+    size: u64,
+    deflate: bool,
+}
+
+impl Location {
+    /// 색인의 `시작:크기:d|s`.
+    fn parse(text: &str) -> Option<Location> {
+        let mut parts = text.split(':');
+        let start = parts.next()?.parse().ok()?;
+        let size = parts.next()?.parse().ok()?;
+        let deflate = match parts.next()? {
+            "d" => true,
+            "s" => false,
+            _ => return None,
+        };
+        Some(Location {
+            start,
+            size,
+            deflate,
+        })
+    }
+
+    fn text(self) -> String {
+        let method = if self.deflate { "d" } else { "s" };
+        format!("{}:{}:{method}", self.start, self.size)
+    }
+
+    /// 그 자리의 레코드를 풀어 `out`에 담는다.
+    fn read(self, file: &mut std::fs::File, out: &mut Vec<u8>) -> std::io::Result<()> {
+        file.seek(SeekFrom::Start(self.start))?;
+        let raw = (&mut *file).take(self.size);
+        out.clear();
+        if self.deflate {
+            flate2::read::DeflateDecoder::new(raw).read_to_end(out)?;
+        } else {
+            let mut raw = raw;
+            raw.read_to_end(out)?;
+        }
+        Ok(())
+    }
+}
+
+/// 패키지(생태계, 맞춘 이름) → 그 패키지가 든 레코드의 자리.
+type Index = HashMap<(Ecosystem, String), Vec<Location>>;
+
+/// 색인 파일의 첫 줄 머리. 이름 맞추기(`Ecosystem::normalize`)나 꼴을 바꾸면 판을 올린다.
+const INDEX_MAGIC: &str = "ferrite-osv-index 1";
+
+/// 묶음의 색인 파일(`all.zip` 옆의 `all.index`).
+pub fn index_path(zip: &Path) -> PathBuf {
+    zip.with_extension("index")
+}
+
+/// 색인이 그 묶음의 것인지 가리는 표: 크기와 바뀐 시각(나노초).
+fn stamp(zip: &Path) -> Option<String> {
+    let meta = std::fs::metadata(zip).ok()?;
+    let modified = meta
+        .modified()
+        .ok()
+        .and_then(|m| m.duration_since(UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_nanos());
+    Some(format!("{INDEX_MAGIC} {} {modified}", meta.len()))
+}
+
+fn open_file(zip: &Path) -> Result<std::fs::File, String> {
+    std::fs::File::open(zip).map_err(|e| format!("{}을(를) 열지 못했습니다: {e}", zip.display()))
+}
+
+/// 묶음을 다 훑어 색인을 만든다(레코드마다 패키지 이름만 읽는다). 저장·deflate가 아닌 레코드는 뺀다(이
+/// 판의 zip이 풀지 못한다).
+fn scan(zip: &Path) -> Result<Index, String> {
+    let mut archive = zip::ZipArchive::new(std::io::BufReader::new(open_file(zip)?))
         .map_err(|e| format!("{}은(는) zip이 아닙니다: {e}", zip.display()))?;
-    let names: HashSet<(Ecosystem, String)> = dependencies
-        .iter()
-        .map(|d| (d.ecosystem, d.ecosystem.normalize(&d.name)))
-        .collect();
-    let wanted = |p: &PackageName| {
-        Ecosystem::from_osv(&p.ecosystem)
-            .is_some_and(|e| names.contains(&(e, e.normalize(&p.name))))
-    };
-    let mut advisories = Vec::new();
+    let mut index = Index::new();
     let mut bytes = Vec::new();
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i).map_err(|e| e.to_string())?;
+        let deflate = match entry.compression() {
+            zip::CompressionMethod::Deflated => true,
+            zip::CompressionMethod::Stored => false,
+            _ => continue,
+        };
         if !entry.name().is_ok_and(|n| n.ends_with(".json")) {
             continue;
         }
@@ -422,14 +489,117 @@ pub fn query_offline(zip: &Path, dependencies: &[Dependency]) -> Result<Vec<Advi
         if entry.read_to_end(&mut bytes).is_err() {
             continue;
         }
-        // 이름만 먼저 보고, 맞는 레코드만 다 읽는다.
-        let hit = serde_json::from_slice::<Names>(&bytes).is_ok_and(|n| {
-            n.affected
+        // 데이터의 시작은 레코드를 열 때 안다.
+        let Some(start) = entry.data_start() else {
+            continue;
+        };
+        let at = Location {
+            start,
+            size: entry.compressed_size(),
+            deflate,
+        };
+        let Ok(names) = serde_json::from_slice::<Names>(&bytes) else {
+            continue;
+        };
+        for package in names.affected.into_iter().filter_map(|a| a.package) {
+            let Some(ecosystem) = Ecosystem::from_osv(&package.ecosystem) else {
+                continue;
+            };
+            let list = index
+                .entry((ecosystem, ecosystem.normalize(&package.name)))
+                .or_default();
+            // 한 레코드가 같은 패키지를 여러 번 적기도 한다.
+            if list.last() != Some(&at) {
+                list.push(at);
+            }
+        }
+    }
+    Ok(index)
+}
+
+/// 색인을 파일에 쓴다. 첫 줄은 묶음의 표, 다음 줄부터 `생태계\t이름\t자리 자리…`. 다 쓴 뒤 바꿔 넣어
+/// 쓰다 만 색인을 읽지 않는다.
+fn write_index(zip: &Path, index: &Index) -> Result<(), String> {
+    let stamp = stamp(zip).ok_or_else(|| format!("{}을(를) 읽지 못했습니다", zip.display()))?;
+    let mut text = stamp;
+    text.push('\n');
+    for ((ecosystem, name), locations) in index {
+        let locations: Vec<String> = locations.iter().map(|l| l.text()).collect();
+        text.push_str(&format!(
+            "{}\t{name}\t{}\n",
+            ecosystem.osv(),
+            locations.join(" ")
+        ));
+    }
+    let path = index_path(zip);
+    let partial = path.with_extension("index.tmp");
+    std::fs::write(&partial, text)
+        .and_then(|()| std::fs::rename(&partial, &path))
+        .map_err(|e| {
+            let _ = std::fs::remove_file(&partial);
+            format!("색인을 쓰지 못했습니다: {e}")
+        })
+}
+
+/// 색인 파일에서 이 패키지들의 레코드 자리만 꺼낸다. 없거나, 그 묶음의 것이 아니거나(묶음을 바꿨다),
+/// 읽지 못하는 줄이 있으면 None.
+fn read_index(zip: &Path, names: &HashSet<(Ecosystem, String)>) -> Option<BTreeSet<Location>> {
+    let text = std::fs::read_to_string(index_path(zip)).ok()?;
+    let mut lines = text.lines();
+    if lines.next()? != stamp(zip)? {
+        return None;
+    }
+    let mut locations = BTreeSet::new();
+    for line in lines {
+        let mut parts = line.splitn(3, '\t');
+        let (ecosystem, name, list) = (parts.next()?, parts.next()?, parts.next()?);
+        let Some(ecosystem) = Ecosystem::from_osv(ecosystem) else {
+            continue;
+        };
+        if names.contains(&(ecosystem, name.to_owned())) {
+            for at in list.split(' ') {
+                locations.insert(Location::parse(at)?);
+            }
+        }
+    }
+    Some(locations)
+}
+
+/// 묶음의 색인을 만들어 둔다(받거나 들인 뒤). 색인한 패키지 수를 돌려준다.
+pub fn build_index(zip: &Path) -> Result<usize, String> {
+    let index = scan(zip)?;
+    write_index(zip, &index)?;
+    Ok(index.len())
+}
+
+/// 오프라인 DB 묶음(`all.zip`)에서 이 의존성들의 패키지에 해당하는 레코드만 읽는다. 색인(`all.index`)의
+/// 자리로 그 레코드만 풀고, 색인이 없거나 묶음이 바뀌었으면 한 번 다 훑어 색인을 만든다(쓰지 못해도 검사는
+/// 한다).
+pub fn query_offline(zip: &Path, dependencies: &[Dependency]) -> Result<Vec<Advisory>, String> {
+    let names: HashSet<(Ecosystem, String)> = dependencies
+        .iter()
+        .map(|d| (d.ecosystem, d.ecosystem.normalize(&d.name)))
+        .collect();
+    let locations = match read_index(zip, &names) {
+        Some(locations) => locations,
+        None => {
+            let index = scan(zip)?;
+            let _ = write_index(zip, &index);
+            names
                 .iter()
-                .filter_map(|a| a.package.as_ref())
-                .any(wanted)
-        });
-        if hit && let Ok(record) = serde_json::from_slice::<Value>(&bytes) {
+                .filter_map(|name| index.get(name))
+                .flatten()
+                .copied()
+                .collect()
+        }
+    };
+    let mut file = open_file(zip)?;
+    let mut advisories = Vec::new();
+    let mut bytes = Vec::new();
+    for at in locations {
+        if at.read(&mut file, &mut bytes).is_ok()
+            && let Ok(record) = serde_json::from_slice::<Value>(&bytes)
+        {
             advisories.extend(Advisory::parse(&record));
         }
     }

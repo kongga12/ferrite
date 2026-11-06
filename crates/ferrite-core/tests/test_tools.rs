@@ -756,5 +756,9 @@ fn 전이_의존의_log4shell을_온라인과_오프라인_db가_찾는다() {
     osv::download_database(Ecosystem::Maven, &zip, &mut |_, _| {}).unwrap();
     let offline = osv::findings(&osv::query_offline(&zip, &deps).unwrap(), &deps);
     assert_eq!(log4shell(&offline), expected, "오프라인");
+    // 처음 검사가 만든 색인으로 다시 읽어도 같다(색인은 레코드의 자리로 묶음 목차 없이 푼다).
+    assert!(osv::index_path(&zip).is_file());
+    let again = osv::findings(&osv::query_offline(&zip, &deps).unwrap(), &deps);
+    assert_eq!(again, offline, "색인으로 읽은 결과");
     let _ = std::fs::remove_dir_all(&root);
 }
