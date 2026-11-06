@@ -509,39 +509,43 @@ const APP_JS: &str = "function add(a, b) {
 }
 ";
 
-/// 컨텍스트 경로 /app 아래에 화면(인라인 스크립트)과 외부 스크립트를 주는 웹 서버.
+/// 컨텍스트 경로 /app 아래에 화면(인라인 스크립트)과 외부 스크립트를 주는 웹 서버. 연결마다 따로 받는다:
+/// 브라우저는 요청 없이 미리 열어 둔 연결을 쥐고 있기도 해서, 차례로 받으면 그 연결을 읽다 다음 요청에
+/// 답하지 못한다(화면을 다시 부를 때 CI의 Windows에서 그랬다).
 fn web_server() -> u16 {
     use std::io::{BufRead, BufReader, Write};
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     std::thread::spawn(move || {
         for mut stream in listener.incoming().flatten() {
-            let mut line = String::new();
-            let mut reader = BufReader::new(&stream);
-            let _ = reader.read_line(&mut line);
-            loop {
-                let mut header = String::new();
-                if reader.read_line(&mut header).unwrap_or(0) == 0 || header.trim().is_empty() {
-                    break;
+            std::thread::spawn(move || {
+                let mut line = String::new();
+                let mut reader = BufReader::new(&stream);
+                let _ = reader.read_line(&mut line);
+                loop {
+                    let mut header = String::new();
+                    if reader.read_line(&mut header).unwrap_or(0) == 0 || header.trim().is_empty() {
+                        break;
+                    }
                 }
-            }
-            let (kind, body) = if line.starts_with("GET /app/list.do ") {
-                ("text/html; charset=UTF-8", PAGE)
-            } else if line.starts_with("GET /app/js/app.js ") {
-                ("application/javascript", APP_JS)
-            } else {
-                ("text/plain", "")
-            };
-            let status = if body.is_empty() {
-                "404 Not Found"
-            } else {
-                "200 OK"
-            };
-            let _ = write!(
-                stream,
-                "HTTP/1.1 {status}\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            );
+                let (kind, body) = if line.starts_with("GET /app/list.do ") {
+                    ("text/html; charset=UTF-8", PAGE)
+                } else if line.starts_with("GET /app/js/app.js ") {
+                    ("application/javascript", APP_JS)
+                } else {
+                    ("text/plain", "")
+                };
+                let status = if body.is_empty() {
+                    "404 Not Found"
+                } else {
+                    "200 OK"
+                };
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 {status}\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            });
         }
     });
     port
