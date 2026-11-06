@@ -1,8 +1,7 @@
 //! 실제 테스트 도구(Maven·Gradle·pytest·Go·CTest)를 돌려 보고서를 읽고, 실패 스택의 줄을 프로젝트에서
-//! 찾고, 실패한 것만 다시 돌린다. 정적 분석기(SpotBugs)가 낸 SARIF와 빌드 도구가 푼 의존성 나무도 읽는다.
-//! 도구가 필요하고 Maven·Gradle은
-//! 의존성을 받으므로 기본으로는 돌지 않는다. CI의 3개 OS 전체 작업이 `--ignored`로 돌린다. 도구가 없으면
-//! 로컬에서는 건너뛰고 CI에서는 실패한다.
+//! 찾고, 실패한 것만 다시 돌린다. 정적 분석기(SpotBugs·PMD·Semgrep)가 낸 SARIF와 빌드 도구가 푼 의존성
+//! 나무도 읽는다. 도구가 필요하고 Maven·Gradle은 의존성을 받으므로 기본으로는 돌지 않는다. CI의 3개 OS
+//! 전체 작업이 `--ignored`로 돌린다. 도구가 없으면 로컬에서는 건너뛰고 CI에서는 실패한다.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -20,6 +19,10 @@ fn temp_dir(name: &str) -> PathBuf {
 
 /// 셸로 명령 줄을 돌려 (성공했는지, 표준 출력)을 돌려준다(테스트 창과 같은 셸).
 fn run(dir: &Path, line: &str) -> (bool, String) {
+    run_env(dir, line, &[])
+}
+
+fn run_env(dir: &Path, line: &str, env: &[(&str, &str)]) -> (bool, String) {
     #[cfg(windows)]
     let mut command = {
         use std::os::windows::process::CommandExt;
@@ -35,7 +38,11 @@ fn run(dir: &Path, line: &str) -> (bool, String) {
         command.args(["-c", line]);
         command
     };
-    let output = command.current_dir(dir).output().unwrap();
+    let output = command
+        .current_dir(dir)
+        .envs(env.iter().copied())
+        .output()
+        .unwrap();
     eprintln!("> {line}\n{}", String::from_utf8_lossy(&output.stderr));
     (
         output.status.success(),
@@ -492,6 +499,142 @@ fn ctest_output_junit과_실패만_다시() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// 의존 없는 Java 17 Maven 프로젝트.
+const JAVA17_POM: &str = r#"<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>com.example</groupId>
+  <artifactId>board</artifactId>
+  <version>1.0</version>
+  <properties>
+    <maven.compiler.release>17</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+  </properties>
+</project>
+"#;
+
+/// 정적 분석 시험의 프로젝트와 그 Java 파일. 경로에 한글과 빈칸을 넣어 SARIF 주소의 인코딩을 본다
+/// (한국어 Windows에서 흔한 경로다).
+fn analyzed_project(name: &str) -> (PathBuf, PathBuf) {
+    let root = temp_dir(name).join("게시판 프로젝트");
+    let java = root.join("src/main/java/com/example/board");
+    std::fs::create_dir_all(&java).unwrap();
+    let board = java.join("Board.java");
+    std::fs::write(
+        &board,
+        "package com.example.board;\n\nimport java.util.List;\n\npublic class Board {\n    private String unused;\n\n    public int parse(String s) {\n        try {\n            return Integer.parseInt(s);\n        } catch (NumberFormatException e) {\n        }\n        return 0;\n    }\n}\n",
+    )
+    .unwrap();
+    (root, board)
+}
+
+/// 결과를 줄 순서로 (도구, 규칙, 수준, 시작 줄, 끝 줄). 파일은 모두 `file`이어야 한다.
+fn sarif_lines(
+    findings: &[ferrite_core::sarif::Finding],
+    file: &Path,
+) -> Vec<(String, String, ferrite_core::sarif::Level, u32, u32)> {
+    let canonical = |p: &Path| std::fs::canonicalize(p).unwrap();
+    for finding in findings {
+        let path = finding.path.as_deref().expect("프로젝트의 파일");
+        assert_eq!(canonical(path), canonical(file), "{}", finding.uri);
+    }
+    let mut found: Vec<_> = findings
+        .iter()
+        .map(|f| (f.tool.clone(), f.rule.clone(), f.level, f.line, f.end_line))
+        .collect();
+    found.sort_by_key(|f| f.3);
+    found
+}
+
+#[test]
+#[ignore = "Maven으로 PMD(maven-pmd-plugin 3.28.0, PMD 7.17.0)를 받아 돌린다. Java 17 이상과 mvn이 필요하다"]
+fn pmd가_낸_sarif를_읽고_원본_파일을_찾는다() {
+    use ferrite_core::sarif::{self, Level};
+
+    if !require("mvn -v") {
+        return;
+    }
+    let (root, board) = analyzed_project("pmd");
+    std::fs::write(root.join("pom.xml"), JAVA17_POM).unwrap();
+    // maven-pmd-plugin은 SARIF를 짧은 이름으로 고르지 못해 PMD의 렌더러 클래스로 고른다. 결과는
+    // `target/pmd.sarif.json`이고, 파일 주소는 절대 `file:` 주소다(빈칸은 `%20`, 한글은 그대로).
+    let (ok, _) = run(
+        &root,
+        "mvn -B -q compile org.apache.maven.plugins:maven-pmd-plugin:3.28.0:pmd -Dformat=net.sourceforge.pmd.renderers.SarifRenderer",
+    );
+    assert!(ok, "PMD 분석");
+    let report = root.join("target").join("pmd.sarif.json");
+    assert_eq!(
+        sarif::candidates(&root),
+        std::slice::from_ref(&report),
+        "프로젝트에서 찾는다"
+    );
+    let text = std::fs::read_to_string(&report).unwrap();
+    let findings = sarif::parse(&text, &root, &root.join("target")).unwrap();
+    let pmd = |rule: &str, level, line, end| ("PMD".to_owned(), rule.to_owned(), level, line, end);
+    assert_eq!(
+        sarif_lines(&findings, &board),
+        [
+            pmd("UnnecessaryImport", Level::Note, 3, 3),
+            pmd("UnusedPrivateField", Level::Warning, 6, 6),
+            pmd("EmptyCatchBlock", Level::Warning, 11, 12),
+        ]
+    );
+    assert!(
+        findings
+            .iter()
+            .any(|f| f.message == "Avoid unused private fields such as 'unused'.")
+    );
+    let _ = std::fs::remove_dir_all(root.parent().unwrap());
+}
+
+#[test]
+#[ignore = "Semgrep이 필요하다(pip install semgrep)"]
+fn semgrep이_낸_sarif를_읽고_원본_파일을_찾는다() {
+    use ferrite_core::sarif::{self, Level};
+
+    if !require("semgrep --version") {
+        return;
+    }
+    let (root, board) = analyzed_project("semgrep");
+    std::fs::write(
+        root.join("rules.yml"),
+        "rules:\n  - id: empty-catch\n    languages: [java]\n    severity: ERROR\n    message: 예외를 삼키는 빈 catch 블록\n    pattern: |\n      try { ... } catch ($E $V) { }\n  - id: parse-int\n    languages: [java]\n    severity: INFO\n    message: 숫자 변환 $X\n    pattern: Integer.parseInt($X)\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(root.join("reports")).unwrap();
+    // Semgrep(Python)은 규칙 파일을 시스템 로캘 인코딩으로 읽어, 한국어 Windows(cp949)에서는 한글 메시지가
+    // 든 UTF-8 규칙을 읽다 멈춘다. UTF-8 모드로 돌린다.
+    let (ok, _) = run_env(
+        &root,
+        "semgrep scan --config rules.yml --sarif --output reports/semgrep.sarif --metrics=off --disable-version-check .",
+        &[("PYTHONUTF8", "1")],
+    );
+    assert!(ok, "Semgrep 분석");
+    let report = root.join("reports").join("semgrep.sarif");
+    assert_eq!(
+        sarif::candidates(&root),
+        std::slice::from_ref(&report),
+        "프로젝트에서 찾는다"
+    );
+    // 파일 주소는 돌린 폴더 기준이고(`%SRCROOT%`의 경로는 주지 않는다) Windows에서는 역슬래시로 적는다.
+    let text = std::fs::read_to_string(&report).unwrap();
+    let findings = sarif::parse(&text, &root, &root.join("reports")).unwrap();
+    let semgrep = |rule: &str, level, line, end| {
+        ("Semgrep OSS".to_owned(), rule.to_owned(), level, line, end)
+    };
+    assert_eq!(
+        sarif_lines(&findings, &board),
+        [
+            semgrep("empty-catch", Level::Error, 9, 12),
+            semgrep("parse-int", Level::Note, 10, 10),
+        ]
+    );
+    let mut messages: Vec<&str> = findings.iter().map(|f| f.message.as_str()).collect();
+    messages.sort();
+    assert_eq!(messages, ["숫자 변환 s", "예외를 삼키는 빈 catch 블록"]);
+    let _ = std::fs::remove_dir_all(root.parent().unwrap());
+}
+
 #[test]
 #[ignore = "Maven으로 SpotBugs(spotbugs-maven-plugin 4.10.5.0, 약 31MB)를 받아 돌린다. Java 17 이상과 mvn이 필요하다"]
 fn spotbugs가_낸_sarif를_읽고_원본_파일을_찾는다() {
@@ -503,21 +646,7 @@ fn spotbugs가_낸_sarif를_읽고_원본_파일을_찾는다() {
     let root = temp_dir("spotbugs");
     let java = root.join("src/main/java/com/example/board");
     std::fs::create_dir_all(&java).unwrap();
-    std::fs::write(
-        root.join("pom.xml"),
-        r#"<project xmlns="http://maven.apache.org/POM/4.0.0">
-  <modelVersion>4.0.0</modelVersion>
-  <groupId>com.example</groupId>
-  <artifactId>board</artifactId>
-  <version>1.0</version>
-  <properties>
-    <maven.compiler.release>17</maven.compiler.release>
-    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-  </properties>
-</project>
-"#,
-    )
-    .unwrap();
+    std::fs::write(root.join("pom.xml"), JAVA17_POM).unwrap();
     std::fs::write(
         java.join("Board.java"),
         "package com.example.board;\n\npublic class Board {\n    private String title;\n\n    public boolean same(String other) {\n        return title == other;\n    }\n\n    public int length(String s) {\n        if (s == null) {\n            return s.length();\n        }\n        return 0;\n    }\n}\n",

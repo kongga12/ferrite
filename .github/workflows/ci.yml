@@ -136,8 +136,8 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: '3.13'
-      - name: DAP·노트북·테스트 러너 시험용 debugpy·ipykernel·pandas·pytest 설치
-        run: python -m pip install --disable-pip-version-check debugpy==1.8.22 ipykernel==7.4.0 pandas==3.1.0 pytest==8.4.2
+      - name: DAP·노트북·테스트 러너·정적 분석 시험용 debugpy·ipykernel·pandas·pytest·semgrep 설치
+        run: python -m pip install --disable-pip-version-check debugpy==1.8.22 ipykernel==7.4.0 pandas==3.1.0 pytest==8.4.2 semgrep==1.183.0
       # DB 시험의 임시 PostgreSQL 클러스터용. Ubuntu·Windows 러너에는 깔려 있고 macOS에는 없다.
       - name: PostgreSQL 설치(macOS)
         if: runner.os == 'macOS'
@@ -152,7 +152,7 @@ jobs:
       - name: 웹 언어 서버 설치 시험(npm)
         run: cargo test -p ferrite-lsp --test download npm -- --ignored --nocapture
       # 테스트 러너: 실제 Maven(JUnit 5)·Gradle·pytest·Go·CTest를 돌려 보고서를 읽고 실패만 다시 돌린다.
-      # SpotBugs의 SARIF와 Maven·Gradle이 푼 의존성 나무(취약점 검사)도 읽는다.
+      # SpotBugs·PMD·Semgrep의 SARIF와 Maven·Gradle이 푼 의존성 나무(취약점 검사)도 읽는다.
       - uses: actions/setup-java@v6
         with:
           distribution: temurin
@@ -167,7 +167,7 @@ jobs:
           gradle-version: '9.2.0'
           cache-disabled: true
           add-job-summary: never
-      - name: 테스트 러너·정적 분석 시험(Maven·Gradle·pytest·Go·CTest·SpotBugs)
+      - name: 테스트 러너·정적 분석 시험(Maven·Gradle·pytest·Go·CTest·SpotBugs·PMD·Semgrep)
         run: cargo test -p ferrite-core --test test_tools -- --ignored --nocapture --test-threads=1
       - run: cargo build --release
       - name: 실행 파일 업로드 (OS별 수동 검증용)
