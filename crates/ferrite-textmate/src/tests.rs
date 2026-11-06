@@ -428,6 +428,7 @@ fn 내장_http_문법으로_요청_파일을_칠한다() {
         [
             s("<", Keyword),
             s("{%", Keyword),
+            s("request", Keyword),
             s("set", Function),
             s("\"a\"", STR),
             s("1", Constant),

@@ -23,9 +23,9 @@ use ureq::tls::{RootCerts, TlsConfig};
 pub use cookies::CookieJar;
 pub use env::Environments;
 pub use parse::{Handler, HttpFile, Request, parse};
-pub use script::Script;
+pub use script::{Outcome, RequestView, Script};
 
-/// 응답 처리 스크립트가 `client.global.set`으로 정한 변수.
+/// 스크립트가 정한 변수(`client.global`, `request.variables`).
 pub type Globals = BTreeMap<String, String>;
 
 /// 받는 본문의 상한.
@@ -49,16 +49,21 @@ pub struct Prepared {
     pub no_cookie_jar: bool,
     /// 응답을 받은 뒤 돌릴 스크립트(파일은 읽어 둔다).
     pub scripts: Vec<Script>,
+    /// 요청 전 스크립트를 돌린 결과(있었으면).
+    pub pre: Option<Outcome>,
+    /// 응답 스크립트가 보는 요청(`request`). 요청 전 스크립트가 정한 변수가 들어 있다.
+    pub view: RequestView,
 }
 
-/// 요청의 `{{변수}}`를 채운다. 찾는 순서: 파일 변수(그 안의 변수도 채운다), 스크립트가 정한 변수
-/// (`globals`), 고른 환경, 동적 변수(`$uuid`, `$timestamp`, `$randomInt`). 본문의 파일, 저장할 파일,
-/// 스크립트 파일의 상대 경로는 `dir`(요청 파일의 폴더) 기준이다.
+/// 보낼 요청을 만든다. 요청 전 스크립트를 먼저 돌리고(`globals`는 스크립트가 바꾼 대로 고친다), 그 오류면
+/// 보내지 않는다. 그다음 `{{변수}}`를 채운다. 찾는 순서: 요청 전 스크립트가 정한 `request.variables`,
+/// 파일 변수(그 안의 변수도 채운다), `client.global`, 고른 환경, 동적 변수(`$uuid`, `$timestamp`,
+/// `$randomInt`). 본문의 파일, 저장할 파일, 스크립트 파일의 상대 경로는 `dir`(요청 파일의 폴더) 기준이다.
 pub fn prepare(
     file: &HttpFile,
     request: &Request,
     env: Option<(&Environments, &str)>,
-    globals: &Globals,
+    globals: &mut Globals,
     dir: &Path,
 ) -> Result<Prepared, String> {
     /// 파일 변수 안에서 못 채운 이름은 `nested`에 모은다(바깥의 파일 변수 이름보다 쓸모 있다).
@@ -66,6 +71,7 @@ pub fn prepare(
         file: &HttpFile,
         env: Option<(&Environments, &str)>,
         globals: &Globals,
+        variables: &Globals,
         name: &str,
         depth: u8,
         nested: &RefCell<Vec<String>>,
@@ -73,10 +79,15 @@ pub fn prepare(
         if depth > 8 {
             return None;
         }
+        if let Some(value) = variables.get(name) {
+            return Some(value.clone());
+        }
         if let Some((_, value)) = file.variables.iter().rev().find(|(n, _)| n == name) {
-            return parse::substitute(value, &|n| lookup(file, env, globals, n, depth + 1, nested))
-                .map_err(|names| nested.borrow_mut().extend(names))
-                .ok();
+            return parse::substitute(value, &|n| {
+                lookup(file, env, globals, variables, n, depth + 1, nested)
+            })
+            .map_err(|names| nested.borrow_mut().extend(names))
+            .ok();
         }
         if let Some(value) = globals.get(name) {
             return Some(value.clone());
@@ -86,8 +97,32 @@ pub fn prepare(
         }
         dynamic(name)
     }
+    let mut view = RequestView {
+        method: request.method.clone(),
+        url: request.url.clone(),
+        body: request.body.clone(),
+        file_variables: file.variables.clone(),
+        environment: env
+            .and_then(|(envs, selected)| envs.values.get(selected))
+            .cloned()
+            .unwrap_or_default(),
+        variables: Globals::new(),
+    };
+    let pre_scripts = load_scripts(&request.pre_scripts, "요청 전 스크립트", dir)?;
+    let pre =
+        (!pre_scripts.is_empty()).then(|| script::run(&pre_scripts, &mut view, None, globals));
+    if let Some(error) = pre.as_ref().and_then(|o| o.error.as_ref()) {
+        return Err(format!(
+            "요청 전 스크립트에서 멈춰 보내지 않았습니다: {error}"
+        ));
+    }
+    let globals: &Globals = globals;
     let nested = RefCell::new(Vec::new());
-    let fill = |text: &str| parse::substitute(text, &|n| lookup(file, env, globals, n, 0, &nested));
+    let fill = |text: &str| {
+        parse::substitute(text, &|n| {
+            lookup(file, env, globals, &view.variables, n, 0, &nested)
+        })
+    };
     let mut missing = Vec::new();
     let mut take = |result: Result<String, Vec<String>>| {
         result.unwrap_or_else(|names| {
@@ -132,23 +167,7 @@ pub fn prepare(
     let body = body
         .map(|text| body_bytes(&text, dir, multipart))
         .transpose()?;
-    let scripts = request
-        .handlers
-        .iter()
-        .map(|handler| match handler {
-            // 앞을 빈 줄로 채워 오류의 줄이 요청 파일의 줄과 같다.
-            Handler::Inline { line, code } => Ok(Script {
-                name: "응답 스크립트".to_owned(),
-                code: "\n".repeat(*line) + code,
-            }),
-            Handler::File(name) => fs::read(dir.join(name))
-                .map(|bytes| Script {
-                    name: name.clone(),
-                    code: decode(&bytes, "").0,
-                })
-                .map_err(|e| format!("응답 스크립트 파일을 읽지 못했습니다: {name} ({e})")),
-        })
-        .collect::<Result<_, _>>()?;
+    let scripts = load_scripts(&request.handlers, "응답 스크립트", dir)?;
     Ok(Prepared {
         method: request.method.clone(),
         url,
@@ -159,7 +178,29 @@ pub fn prepare(
         no_redirect: request.no_redirect,
         no_cookie_jar: request.no_cookie_jar,
         scripts,
+        pre,
+        view,
     })
+}
+
+/// 스크립트를 읽는다. 요청 파일 안의 것은 `name`으로 부르고 앞을 빈 줄로 채워 오류의 줄이 요청 파일의
+/// 줄과 같다. 파일(UTF-8 또는 CP949)은 그 경로로 부른다.
+fn load_scripts(handlers: &[Handler], name: &str, dir: &Path) -> Result<Vec<Script>, String> {
+    handlers
+        .iter()
+        .map(|handler| match handler {
+            Handler::Inline { line, code } => Ok(Script {
+                name: name.to_owned(),
+                code: "\n".repeat(*line) + code,
+            }),
+            Handler::File(path) => fs::read(dir.join(path))
+                .map(|bytes| Script {
+                    name: path.clone(),
+                    code: decode(&bytes, "").0,
+                })
+                .map_err(|e| format!("{name} 파일을 읽지 못했습니다: {path} ({e})")),
+        })
+        .collect()
 }
 
 /// 본문 글을 보낼 바이트로. `< 경로` 줄은 그 파일의 바이트 그대로 넣는다(이미지 등). 멀티파트는
@@ -580,7 +621,7 @@ mod tests {
             &file,
             &file.requests[0],
             Some((&envs, "dev")),
-            &Globals::new(),
+            &mut Globals::new(),
             Path::new("."),
         )
         .unwrap();
@@ -595,7 +636,7 @@ mod tests {
             &file,
             &file.requests[0],
             None,
-            &Globals::new(),
+            &mut Globals::new(),
             Path::new("."),
         )
         .unwrap_err();
@@ -612,7 +653,7 @@ mod tests {
             &file,
             &file.requests[0],
             Some((&envs, "dev")),
-            &globals,
+            &mut globals.clone(),
             Path::new("."),
         )
         .unwrap();
@@ -620,6 +661,43 @@ mod tests {
             prepared.url.starts_with("http://g/app/x?id=7&"),
             "{}",
             prepared.url
+        );
+    }
+
+    #[test]
+    fn 요청_전_스크립트가_정한_변수가_가장_앞서고_오류면_보내지_않는다() {
+        let file = parse(
+            "@sig = {{ts}}-{{user}}\n@user = 파일\n### 서명\n< {%\n  var ts = \"1700\";\n  request.variables.set(\"ts\", ts);\n  request.variables.set(\"user\", \"요청\");\n  client.global.set(\"seen\", request.url.tryGetSubstituted());\n%}\nGET /a?sig={{sig}}&u={{user}}\nX-Ts: {{ts}}\n###\n< {% nothing(); %}\nGET /b\n###\nGET /c?u={{user}}\n",
+        );
+        let mut globals = Globals::from([("user".to_owned(), "전역".to_owned())]);
+        let prepared =
+            prepare(&file, &file.requests[0], None, &mut globals, Path::new(".")).unwrap();
+        assert_eq!(
+            prepared.url, "/a?sig=1700-요청&u=요청",
+            "요청 변수가 파일 변수보다 앞선다"
+        );
+        assert_eq!(prepared.headers, [("X-Ts".to_owned(), "1700".to_owned())]);
+        assert_eq!(
+            prepared.view.variables.get("ts").map(String::as_str),
+            Some("1700"),
+            "응답 스크립트도 본다"
+        );
+        assert_eq!(
+            globals.get("seen").map(String::as_str),
+            Some("/a?sig=1700-요청&u=요청")
+        );
+        assert_eq!(prepared.pre.map(|o| o.error), Some(None));
+        let err =
+            prepare(&file, &file.requests[1], None, &mut globals, Path::new(".")).unwrap_err();
+        assert!(
+            err.contains("요청 전 스크립트") && err.contains("nothing"),
+            "{err}"
+        );
+        let plain = prepare(&file, &file.requests[2], None, &mut globals, Path::new(".")).unwrap();
+        assert_eq!(
+            (plain.url.as_str(), plain.pre),
+            ("/c?u=파일", None),
+            "요청 변수는 그 요청에만"
         );
     }
 
@@ -633,7 +711,7 @@ mod tests {
         let file = parse(
             "### 로그인\nGET /a\n\n> {%\n  client.global.set('t', response.body.t);\n  nothing.x;\n%}\n> ./check.js\n###\nGET /b\n\n> ./none.js\n",
         );
-        let prepared = prepare(&file, &file.requests[0], None, &Globals::new(), &dir).unwrap();
+        let prepared = prepare(&file, &file.requests[0], None, &mut Globals::new(), &dir).unwrap();
         assert_eq!(
             prepared
                 .scripts
@@ -655,14 +733,19 @@ mod tests {
             redirects: Vec::new(),
         };
         let mut globals = Globals::new();
-        let outcome = script::run(&prepared.scripts, &response, &mut globals);
+        let outcome = script::run(
+            &prepared.scripts,
+            &mut prepared.view.clone(),
+            Some(&response),
+            &mut globals,
+        );
         assert_eq!(globals.get("t").map(String::as_str), Some("abc"));
         let error = outcome.error.unwrap();
         assert!(
             error.contains("nothing") && error.contains(":6:"),
             "요청 파일의 6줄: {error}"
         );
-        let err = prepare(&file, &file.requests[1], None, &Globals::new(), &dir).unwrap_err();
+        let err = prepare(&file, &file.requests[1], None, &mut Globals::new(), &dir).unwrap_err();
         assert!(err.contains("none.js"), "{err}");
         let _ = fs::remove_dir_all(&dir);
     }
@@ -677,7 +760,7 @@ mod tests {
         let file = parse(
             "@name = a.bin\n###\nPOST /up\nContent-Type: multipart/form-data; boundary=B\n\n--B\nContent-Disposition: form-data; name=\"f\"; filename=\"a.bin\"\n\n< ./{{name}}\n--B--\n>> out/r.json\n###\nPOST /j\n\n<  q.json\n###\nPOST /x\n\n< nothing.txt\n",
         );
-        let up = prepare(&file, &file.requests[0], None, &Globals::new(), &dir).unwrap();
+        let up = prepare(&file, &file.requests[0], None, &mut Globals::new(), &dir).unwrap();
         let mut want =
             b"--B\r\nContent-Disposition: form-data; name=\"f\"; filename=\"a.bin\"\r\n\r\n"
                 .to_vec();
@@ -689,13 +772,13 @@ mod tests {
             "파일은 바이트 그대로, 줄은 CRLF"
         );
         assert_eq!(up.save, Some((dir.join("out/r.json"), false)));
-        let json = prepare(&file, &file.requests[1], None, &Globals::new(), &dir).unwrap();
+        let json = prepare(&file, &file.requests[1], None, &mut Globals::new(), &dir).unwrap();
         assert_eq!(
             json.body.as_deref(),
             Some(&b"{\"q\": {{x}}}"[..]),
             "멀티파트가 아니면 그대로, 파일 안의 변수는 채우지 않는다"
         );
-        let err = prepare(&file, &file.requests[2], None, &Globals::new(), &dir).unwrap_err();
+        let err = prepare(&file, &file.requests[2], None, &mut Globals::new(), &dir).unwrap_err();
         assert!(err.contains("nothing.txt"), "{err}");
 
         let target = dir.join("out/r.json");

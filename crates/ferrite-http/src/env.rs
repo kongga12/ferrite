@@ -14,7 +14,7 @@ use serde_json::Value;
 pub const PUBLIC: &str = "http-client.env.json";
 pub const PRIVATE: &str = "http-client.private.env.json";
 
-#[derive(Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Environments {
     /// 환경 이름 → 변수. 개인 파일의 값이 이긴다.
     pub values: BTreeMap<String, BTreeMap<String, String>>,
