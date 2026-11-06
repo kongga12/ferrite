@@ -290,12 +290,16 @@ impl Debugger {
         // JSP 중단점은 js-debug에 보내지 않고 화면 스크립트를 불러올 때 그 줄로 바꿔 건다.
         let mut breakpoints = breakpoints;
         if config.adapter == "js-debug" {
-            let (jsp, rest) = breakpoints
+            let (jsp, rest): (BTreeMap<_, _>, _) = breakpoints
                 .into_iter()
                 .partition(|(path, _)| page_lines::is_page_file(path));
             breakpoints = rest;
+            // 맞춘 JSP는 실제 경로로 적으므로 같은 꼴로 둔다(macOS `/var` 링크, Windows 짧은 이름).
             self.pages = Some(Pages {
-                breakpoints: jsp,
+                breakpoints: jsp
+                    .into_iter()
+                    .map(|(path, list)| (crate::app::real_path(&path), list))
+                    .collect(),
                 ..Default::default()
             });
         }
@@ -423,7 +427,8 @@ impl Debugger {
         let stored = self.is_stored(path);
         if let Some(pages) = &mut self.pages {
             if page_lines::is_page_file(path) {
-                pages.breakpoints.insert(path.to_path_buf(), breakpoints);
+                let path = crate::app::real_path(path);
+                pages.breakpoints.insert(path.clone(), breakpoints);
                 let scripts: Vec<PathBuf> = pages
                     .lines
                     .iter()
@@ -1441,8 +1446,9 @@ mod tests {
             arguments: serde_json::json!({}),
             build: None,
         };
+        // 실제 경로가 아닌 꼴로 준다(macOS 임시 폴더의 `/var` 링크, Windows CI의 짧은 이름 `RUNNER~1`처럼).
         let breakpoints = BTreeMap::from([(
-            jsp.clone(),
+            root.join("src/main/webapp/WEB-INF/../WEB-INF/jsp/board/BoardList.jsp"),
             vec![Breakpoint {
                 line: 5,
                 condition: None,
