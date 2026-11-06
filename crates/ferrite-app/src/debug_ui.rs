@@ -1353,8 +1353,8 @@ mod tests {
         let (sent, received) = channel();
         thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
-            let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
-            let mut writer = stream;
+            let mut reader = std::io::BufReader::new(&stream);
+            let mut writer = &stream;
             let mut seq = 0;
             let mut send = |message: Value| {
                 seq += 1;

@@ -14,8 +14,8 @@ pub mod page_lines;
 pub mod types;
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
-use std::io::{BufRead, BufReader, Write};
-use std::net::{SocketAddr, TcpStream};
+use std::io::{self, BufRead, BufReader, Read, Write};
+use std::net::{Shutdown, SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -154,8 +154,31 @@ enum Incoming {
     Closed,
 }
 
+/// 읽기 스레드와 쓰기가 나눠 쓰는 TCP 연결. `try_clone`으로 나누지 않는다. Windows에서 복사한 소켓은
+/// 자식 프로세스에 물려줄 수 있어(std가 상속 금지를 걸지만 복사본에는 먹지 않는다), 세션 중에 앱이
+/// 띄운 자식(언어 서버·git 등)이 그 자식이 끝날 때까지 연결을 쥔다.
+struct Socket(Arc<TcpStream>);
+
+impl Read for Socket {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        (&*self.0).read(buf)
+    }
+}
+
+impl Write for Socket {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        (&*self.0).write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        (&*self.0).flush()
+    }
+}
+
 pub struct DebugSession {
     child: Option<Child>,
+    /// TCP 어댑터 연결. 버릴 때 닫는다(읽기 스레드도 쥐고 있어 그냥 두면 어댑터가 끊긴 줄 모른다).
+    socket: Option<Arc<TcpStream>>,
     writer: Box<dyn Write + Send>,
     incoming: Receiver<Incoming>,
     stderr_tail: Arc<Mutex<VecDeque<String>>>,
@@ -211,6 +234,7 @@ impl DebugSession {
     ) -> Result<Self, String> {
         let stderr_tail = Arc::new(Mutex::new(VecDeque::new()));
         let mut address = None;
+        let mut socket = None;
         let (child, reader, writer): (
             Option<Child>,
             Box<dyn BufRead + Send>,
@@ -295,13 +319,12 @@ impl DebugSession {
                 };
                 address = Some(found);
                 let _ = stream.set_nodelay(true);
-                let reader = stream
-                    .try_clone()
-                    .map_err(|e| format!("디버그 어댑터 연결을 나누지 못했습니다: {e}"))?;
+                let stream = Arc::new(stream);
+                socket = Some(stream.clone());
                 (
                     Some(child),
-                    Box::new(BufReader::new(reader)),
-                    Box::new(stream),
+                    Box::new(BufReader::new(Socket(stream.clone()))),
+                    Box::new(Socket(stream)),
                 )
             }
             Adapter::Tcp(at) => {
@@ -309,10 +332,13 @@ impl DebugSession {
                     .map_err(|e| format!("디버그 어댑터({at})에 붙지 못했습니다: {e}"))?;
                 address = Some(*at);
                 let _ = stream.set_nodelay(true);
-                let reader = stream
-                    .try_clone()
-                    .map_err(|e| format!("디버그 어댑터 연결을 나누지 못했습니다: {e}"))?;
-                (None, Box::new(BufReader::new(reader)), Box::new(stream))
+                let stream = Arc::new(stream);
+                socket = Some(stream.clone());
+                (
+                    None,
+                    Box::new(BufReader::new(Socket(stream.clone()))),
+                    Box::new(Socket(stream)),
+                )
             }
         };
 
@@ -336,6 +362,7 @@ impl DebugSession {
 
         let mut session = Self {
             child,
+            socket,
             writer,
             incoming,
             stderr_tail,
@@ -890,8 +917,12 @@ fn error_text(message: &Value) -> String {
 }
 
 impl Drop for DebugSession {
-    /// 프로세스 어댑터는 함께 끝낸다(남으면 디버그 대상까지 고아로 남을 수 있다).
+    /// 연결을 닫고(붙은 어댑터는 그래야 세션이 끝난 것을 안다), 프로세스 어댑터는 함께 끝낸다(남으면
+    /// 디버그 대상까지 고아로 남을 수 있다).
     fn drop(&mut self) {
+        if let Some(socket) = &self.socket {
+            let _ = socket.shutdown(Shutdown::Both);
+        }
         if let Some(mut child) = self.child.take() {
             let _ = child.kill();
             let _ = child.wait();

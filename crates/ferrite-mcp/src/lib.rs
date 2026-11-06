@@ -191,8 +191,10 @@ fn same(a: &str, b: &str) -> bool {
 
 fn serve(stream: TcpStream, shared: &Shared) -> io::Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(10)))?;
-    let mut writer = stream.try_clone()?;
-    let mut reader = BufReader::new(stream);
+    // 읽기·쓰기 모두 이 소켓 하나로 한다. Windows에서 `try_clone`한 소켓은 자식 프로세스에 물려줄 수 있어
+    // (std가 상속 금지를 걸지만 복사한 소켓에는 먹지 않는다), 그동안 앱이 띄운 자식이 연결을 쥐었다가
+    // 끝날 때 끊는다(ConnectionReset).
+    let mut reader = BufReader::new(&stream);
     let Some(request) = http::read_request(&mut reader)? else {
         return Ok(());
     };
@@ -264,7 +266,7 @@ fn serve(stream: TcpStream, shared: &Shared) -> io::Result<()> {
             _ => (405, vec![("Allow", "POST, DELETE".to_owned())], Vec::new()),
         }
     };
-    http::write_response(&mut writer, status, &headers, &body)
+    http::write_response(&mut &stream, status, &headers, &body)
 }
 
 #[cfg(test)]
@@ -293,5 +295,43 @@ mod tests {
         let token = new_token();
         assert_eq!(token.len(), 64);
         assert_ne!(token, new_token());
+    }
+
+    #[test]
+    fn 요청을_받는_중에_띄운_자식_프로세스가_연결을_물려받지_않는다() {
+        use std::io::{Read, Write};
+        use std::process::{Command, Stdio};
+
+        let server = Server::start(0, "t").unwrap();
+        let mut client = TcpStream::connect(server.address()).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        // 머리만 보내 서버가 연결을 쥐고 본문을 기다리게 한 뒤, 그동안 1초쯤 사는 자식을 띄운다.
+        let body = r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#;
+        write!(
+            client,
+            "POST /mcp HTTP/1.1\r\nAuthorization: Bearer t\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        )
+        .unwrap();
+        thread::sleep(Duration::from_millis(200));
+        let (program, args): (&str, &[&str]) = if cfg!(windows) {
+            ("cmd", &["/c", "ping -n 2 127.0.0.1"])
+        } else {
+            ("sleep", &["1"])
+        };
+        let mut child = Command::new(program)
+            .args(args)
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap();
+        client.write_all(body.as_bytes()).unwrap();
+        let mut response = String::new();
+        let read = client.read_to_string(&mut response);
+        let _ = child.kill();
+        let _ = child.wait();
+        read.unwrap();
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
     }
 }
