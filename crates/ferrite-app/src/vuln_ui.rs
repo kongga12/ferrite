@@ -1,6 +1,7 @@
 //! 문제 창의 "취약점": 프로젝트 의존성(Maven·Gradle·npm·PyPI·Cargo)을 공개 취약점 DB(OSV)와 견줘
 //! 의존성 파일별로 보이고, 누르면 그 의존성을 적은 줄로 간다. 열린 파일에는 물결선으로도 보인다.
-//! 온라인은 이름·버전만 api.osv.dev에 묻고, 오프라인은 받아 둔 생태계별 DB 묶음을 읽는다.
+//! 온라인은 이름·버전만 api.osv.dev에 묻고, 오프라인은 받아 둔 생태계별 DB 묶음을 읽는다. 묶음을 받거나
+//! 들이면 패키지별 색인을 만들어, 검사는 해당 레코드만 읽는다.
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -32,12 +33,18 @@ enum Msg {
 
 enum DbMsg {
     Progress(u64, u64),
+    /// 묶음을 두었고 색인을 만드는 중이다.
+    Indexing,
     Done(Result<(), String>),
 }
 
+/// DB 묶음을 받거나 들이고 색인을 만드는 일(따로 스레드에서 한다).
 struct Download {
     ecosystem: Ecosystem,
+    /// 파일에서 들인다(아니면 받는다).
+    import: bool,
     progress: (u64, u64),
+    indexing: bool,
     rx: Receiver<DbMsg>,
 }
 
@@ -143,10 +150,16 @@ impl VulnPanel {
             loop {
                 match download.rx.try_recv() {
                     Ok(DbMsg::Progress(got, total)) => download.progress = (got, total),
+                    Ok(DbMsg::Indexing) => download.indexing = true,
                     Ok(DbMsg::Done(result)) => {
                         let name = download.ecosystem.osv();
+                        let done = if download.import {
+                            "들였습니다"
+                        } else {
+                            "받았습니다"
+                        };
                         self.status = Some(match result {
-                            Ok(()) => (format!("{name} DB를 받았습니다"), false),
+                            Ok(()) => (format!("{name} DB를 {done}"), false),
                             Err(e) => (format!("{name} DB: {e}"), true),
                         });
                         self.download = None;
@@ -204,29 +217,66 @@ impl VulnPanel {
         }
     }
 
-    fn start_download(&mut self, ctx: &egui::Context, ecosystem: Ecosystem) {
+    /// DB 묶음을 받거나(`source`가 없으면) 그 파일에서 들이고, 색인을 만든다. 큰 묶음(npm 약 220MB)은
+    /// 복사와 색인에 시간이 걸려 따로 스레드에서 한다.
+    fn start_download(
+        &mut self,
+        ctx: &egui::Context,
+        ecosystem: Ecosystem,
+        source: Option<PathBuf>,
+    ) {
         let Some(dest) = self.database(ecosystem) else {
             return;
         };
         let (tx, rx) = mpsc::channel();
         let ctx = ctx.clone();
+        let import = source.is_some();
         thread::spawn(move || {
             let mut shown = Instant::now() - Duration::from_secs(1);
-            let result = osv::download_database(ecosystem, &dest, &mut |got, total| {
-                if shown.elapsed() >= Duration::from_millis(100) {
-                    shown = Instant::now();
-                    let _ = tx.send(DbMsg::Progress(got, total));
-                    ctx.request_repaint();
-                }
+            let placed = match &source {
+                Some(source) => osv::import_database(source, &dest),
+                None => osv::download_database(ecosystem, &dest, &mut |got, total| {
+                    if shown.elapsed() >= Duration::from_millis(100) {
+                        shown = Instant::now();
+                        let _ = tx.send(DbMsg::Progress(got, total));
+                        ctx.request_repaint();
+                    }
+                }),
+            };
+            let result = placed.and_then(|()| {
+                let _ = tx.send(DbMsg::Indexing);
+                ctx.request_repaint();
+                osv::build_index(&dest).map(|_| ())
             });
             let _ = tx.send(DbMsg::Done(result));
             ctx.request_repaint();
         });
         self.download = Some(Download {
             ecosystem,
+            import,
             progress: (0, 0),
+            indexing: false,
             rx,
         });
+    }
+
+    /// 받기·들이기가 끝날 때까지 기다린다.
+    #[cfg(test)]
+    pub fn wait_database(&mut self) {
+        while self.download.is_some() {
+            std::thread::sleep(Duration::from_millis(20));
+            self.poll();
+        }
+    }
+
+    #[cfg(test)]
+    pub fn import_for_test(&mut self, ctx: &egui::Context, ecosystem: Ecosystem, source: &Path) {
+        self.start_download(ctx, ecosystem, Some(source.to_path_buf()));
+    }
+
+    #[cfg(test)]
+    pub fn status_text(&self) -> Option<&str> {
+        self.status.as_ref().map(|(text, _)| text.as_str())
     }
 
     /// 오프라인 DB 상태와 [받기]·[파일에서…].
@@ -237,6 +287,8 @@ impl VulnPanel {
             ui.horizontal(|ui| {
                 ui.label(ecosystem.osv());
                 let state = match &self.download {
+                    Some(d) if d.ecosystem == ecosystem && d.indexing => "색인 만드는 중…".into(),
+                    Some(d) if d.ecosystem == ecosystem && d.import => "들이는 중…".into(),
                     Some(d) if d.ecosystem == ecosystem => {
                         let (got, total) = d.progress;
                         format!("받는 중 {:.1}/{:.1}MB", mb(got), mb(total))
@@ -259,26 +311,25 @@ impl VulnPanel {
                     ))
                     .clicked()
                 {
-                    fetch = Some(ecosystem);
+                    fetch = Some((ecosystem, None));
                 }
                 if ui
-                    .add_enabled(path.is_some(), egui::Button::new("파일에서…"))
+                    .add_enabled(
+                        path.is_some() && self.download.is_none(),
+                        egui::Button::new("파일에서…"),
+                    )
                     .on_hover_text("받아 둔 all.zip을 들입니다(인터넷이 막힌 곳)")
                     .clicked()
-                    && let Some(dest) = &path
                     && let Some(source) = rfd::FileDialog::new()
                         .add_filter("OSV DB", &["zip"])
                         .pick_file()
                 {
-                    self.status = Some(match osv::import_database(&source, dest) {
-                        Ok(()) => (format!("{} DB를 들였습니다", ecosystem.osv()), false),
-                        Err(e) => (e, true),
-                    });
+                    fetch = Some((ecosystem, Some(source)));
                 }
             });
         }
-        if let Some(ecosystem) = fetch {
-            self.start_download(ui.ctx(), ecosystem);
+        if let Some((ecosystem, source)) = fetch {
+            self.start_download(ui.ctx(), ecosystem, source);
         }
     }
 

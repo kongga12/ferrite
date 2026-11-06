@@ -7821,10 +7821,10 @@ mod tests {
             "[[package]]\nname = \"smallvec\"\nversion = \"1.6.0\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\n",
         )
         .unwrap();
-        // PyPI DB만 둔다(crates.io는 없어 검사하지 않았다고 알린다).
+        // PyPI DB만 들인다(crates.io는 없어 검사하지 않았다고 알린다).
         let db = dir.join(".osv");
-        fs::create_dir_all(db.join("PyPI")).unwrap();
-        let mut zip = zip::ZipWriter::new(fs::File::create(db.join("PyPI/all.zip")).unwrap());
+        let source = dir.join("pypi-all.zip");
+        let mut zip = zip::ZipWriter::new(fs::File::create(&source).unwrap());
         zip.start_file(
             "GHSA-rxjp-mfm9-w4wr.json",
             zip::write::SimpleFileOptions::default(),
@@ -7849,6 +7849,13 @@ mod tests {
             app.problems_view = ProblemsView::Vuln;
             dock::show(&mut app.layout, Pane::Problems);
         }
+        // 받아 둔 묶음을 들이면(따로 스레드) 패키지별 색인도 만든다.
+        let ctx = harness.ctx.clone();
+        let vuln = &mut harness.state_mut().vuln;
+        vuln.import_for_test(&ctx, ferrite_core::vuln::Ecosystem::PyPI, &source);
+        vuln.wait_database();
+        assert_eq!(vuln.status_text(), Some("PyPI DB를 들였습니다"));
+        assert!(db.join("PyPI/all.zip").is_file() && db.join("PyPI/all.index").is_file());
         harness.run_ok();
         harness.get_by_label("검사").click();
         assert!(
