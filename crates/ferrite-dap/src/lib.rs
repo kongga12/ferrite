@@ -10,6 +10,7 @@
 
 pub mod adapters;
 pub mod java;
+pub mod page_lines;
 pub mod types;
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -129,6 +130,12 @@ pub enum DebugEvent {
     Terminated,
     /// 어댑터와의 연결이 끊겼다. 프로세스 어댑터면 stderr 마지막 줄을 담는다.
     Closed(Option<String>),
+    /// 대상이 스크립트를 불러왔다(`reason`: "new", "changed", "removed"). js-debug는 화면을 불러올 때마다
+    /// 인라인 스크립트를 새 번호로 알린다.
+    LoadedSource {
+        reason: String,
+        source: Source,
+    },
 }
 
 /// 응답을 기다리는 요청.
@@ -789,6 +796,17 @@ impl DebugSession {
             "terminated" => {
                 self.state = State::Terminated;
                 events.push(DebugEvent::Terminated);
+            }
+            "loadedSource" => {
+                if let Some(source) = body
+                    .get("source")
+                    .and_then(|s| serde_json::from_value::<Source>(s.clone()).ok())
+                {
+                    events.push(DebugEvent::LoadedSource {
+                        reason: text("reason").unwrap_or_default(),
+                        source,
+                    });
+                }
             }
             // 어댑터가 나중에 중단점을 걸었다(js-debug는 스크립트를 불러올 때 건다). 번호로 찾아 고친다.
             "breakpoint" if text("reason").as_deref() == Some("changed") => {
