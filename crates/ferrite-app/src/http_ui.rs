@@ -1,5 +1,6 @@
-//! HTTP 요청 파일(`.http`) 실행과 "HTTP 응답" 창. 요청은 따로 스레드에서 보내고, 쿠키와 요청 기록은
-//! 앱이 켜진 동안 둔다(egov 로그인 뒤 이어 보내는 요청에 세션 쿠키가 붙는다).
+//! HTTP 요청 파일(`.http`) 실행과 "HTTP 응답" 창. 요청은 따로 스레드에서 보내고 응답 처리 스크립트도
+//! 그 스레드에서 돌린다. 쿠키, 스크립트가 정한 변수, 요청 기록은 앱이 켜진 동안 둔다(egov 로그인 뒤
+//! 이어 보내는 요청에 세션 쿠키가 붙고, 받은 토큰을 다음 요청의 `{{token}}`에 쓴다).
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -8,7 +9,8 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
 use eframe::egui;
-use ferrite_http::{Client, CookieJar, Environments, Response, env};
+use ferrite_http::script::{self, Outcome};
+use ferrite_http::{Client, CookieJar, Environments, Globals, Response, env};
 
 /// 응답 창에 보이는 본문 글의 상한. 더 길면 앞만 보인다(egui 글 상자가 한 프레임에 다 배치한다).
 const SHOWN_TEXT: usize = 512 * 1024;
@@ -80,16 +82,20 @@ struct Sent {
     result: Option<Result<Shown, String>>,
     /// `>> 경로`로 응답 본문을 쓴 파일, 또는 쓰지 못한 까닭.
     saved: Option<Result<PathBuf, String>>,
-    /// 응답 처리 스크립트(`> …`)가 있었다(돌리지 않는다).
-    handler: bool,
+    /// 응답 처리 스크립트를 돌린 결과. 스크립트가 없거나 응답을 받지 못했으면 None.
+    script: Option<Outcome>,
+    /// 요청 전 스크립트(`< {% %}`)가 있었다(돌리지 않는다).
+    pre_script: bool,
 }
 
-/// 보내는 스레드가 돌려주는 것: 응답, 쿠키 저장소, 응답을 저장한 결과.
-type Received = (
-    Result<Response, String>,
-    CookieJar,
-    Option<Result<PathBuf, String>>,
-);
+/// 보내는 스레드가 돌려주는 것. 쿠키 저장소와 변수는 그 스레드가 가졌다가 돌려준다.
+struct Received {
+    result: Result<Response, String>,
+    jar: CookieJar,
+    globals: Globals,
+    saved: Option<Result<PathBuf, String>>,
+    script: Option<Outcome>,
+}
 
 impl Sent {
     /// 기록 목록의 한 줄: 결과, 메서드, 이름, 보낸 때.
@@ -166,6 +172,7 @@ enum Tab {
     #[default]
     Body,
     Headers,
+    Script,
 }
 
 #[derive(Default)]
@@ -174,6 +181,8 @@ pub struct HttpPanel {
     client: Option<Arc<Client>>,
     /// 보내는 동안에는 보내는 스레드가 가졌다가 돌려준다.
     jar: CookieJar,
+    /// 응답 처리 스크립트가 `client.global.set`으로 정한 변수. 쿠키처럼 보내는 스레드가 가졌다 돌려준다.
+    globals: Globals,
     /// 고른 환경. 환경 파일에 없으면 첫 환경을 고른다.
     env: Option<String>,
     envs: Environments,
@@ -246,9 +255,10 @@ impl HttpPanel {
             at: Instant::now(),
             result: None,
             saved: None,
-            handler: request.handler,
+            script: None,
+            pre_script: request.pre_script,
         };
-        match ferrite_http::prepare(&file, request, env, dir) {
+        match ferrite_http::prepare(&file, request, env, &self.globals, dir) {
             Err(e) => {
                 sent.result = Some(Err(e));
                 self.rx = None;
@@ -260,6 +270,7 @@ impl HttpPanel {
                     .get_or_insert_with(|| Arc::new(Client::default()))
                     .clone();
                 let mut jar = std::mem::take(&mut self.jar);
+                let mut globals = std::mem::take(&mut self.globals);
                 let (tx, rx) = mpsc::channel();
                 let ctx = ctx.clone();
                 let spawned = std::thread::Builder::new()
@@ -273,7 +284,19 @@ impl HttpPanel {
                             ),
                             _ => None,
                         };
-                        let _ = tx.send((result, jar, saved));
+                        let script = match &result {
+                            Ok(response) if !prepared.scripts.is_empty() => {
+                                Some(script::run(&prepared.scripts, response, &mut globals))
+                            }
+                            _ => None,
+                        };
+                        let _ = tx.send(Received {
+                            result,
+                            jar,
+                            globals,
+                            saved,
+                            script,
+                        });
                         ctx.request_repaint();
                     });
                 match spawned {
@@ -305,6 +328,11 @@ impl HttpPanel {
         self.history.len()
     }
 
+    #[cfg(test)]
+    pub fn globals(&self) -> &Globals {
+        &self.globals
+    }
+
     /// 창에 보이는 기록의 본문.
     #[cfg(test)]
     pub fn body(&self) -> Option<&str> {
@@ -318,19 +346,25 @@ impl HttpPanel {
         let Some(rx) = &self.rx else {
             return;
         };
-        let (received, saved) = match rx.try_recv() {
-            Ok((result, jar, saved)) => {
-                self.jar = jar;
-                (result.map(Shown::new), saved)
+        let (received, saved, script) = match rx.try_recv() {
+            Ok(received) => {
+                self.jar = received.jar;
+                self.globals = received.globals;
+                (
+                    received.result.map(Shown::new),
+                    received.saved,
+                    received.script,
+                )
             }
             Err(TryRecvError::Empty) => return,
-            // 스레드가 패닉했다. 쿠키는 잃는다.
-            Err(TryRecvError::Disconnected) => (Err("보내다가 멈췄습니다".into()), None),
+            // 스레드가 패닉했다. 쿠키와 변수는 잃는다.
+            Err(TryRecvError::Disconnected) => (Err("보내다가 멈췄습니다".into()), None, None),
         };
         self.rx = None;
         if let Some(sent) = self.history.front_mut() {
             sent.result = Some(received);
             sent.saved = saved;
+            sent.script = script;
         }
     }
 
@@ -367,6 +401,23 @@ impl HttpPanel {
                 .clicked()
             {
                 self.jar.clear();
+            }
+            let globals = self.globals.len();
+            if globals > 0 {
+                let names: Vec<&str> = self.globals.keys().map(String::as_str).collect();
+                if ui
+                    .add_enabled(
+                        !running,
+                        egui::Button::new(format!("변수 {globals}개 지우기")),
+                    )
+                    .on_hover_text(format!(
+                        "응답 스크립트가 정한 변수(client.global): {}",
+                        names.join(", ")
+                    ))
+                    .clicked()
+                {
+                    self.globals.clear();
+                }
             }
             if running {
                 ui.spinner();
@@ -457,8 +508,8 @@ impl HttpPanel {
             .map(|e| format!(" · 환경 {e}"))
             .unwrap_or_default();
         ui.weak(format!("{} {}{env}", sent.method, sent.url));
-        if sent.handler {
-            ui.weak("응답 처리 스크립트(> …)는 돌리지 않습니다");
+        if sent.pre_script {
+            ui.weak("요청 전 스크립트(< {% %})는 돌리지 않습니다");
         }
         match &sent.saved {
             Some(Ok(path)) => {
@@ -489,7 +540,7 @@ impl HttpPanel {
         let r = &shown.response;
         ui.horizontal_wrapped(|ui| {
             let color = match r.status {
-                200..=299 => egui::Color32::from_rgb(60, 170, 90),
+                200..=299 => PASSED,
                 300..=399 => ui.visuals().hyperlink_color,
                 _ => ui.visuals().error_fg_color,
             };
@@ -507,6 +558,23 @@ impl HttpPanel {
         for (status, url) in &r.redirects {
             ui.weak(format!("→ {status} {url}"));
         }
+        if let Some(outcome) = &sent.script {
+            let failed = outcome.tests.iter().filter(|t| t.error.is_some()).count();
+            let total = outcome.tests.len();
+            if outcome.error.is_some() {
+                ui.colored_label(ui.visuals().error_fg_color, "응답 스크립트 오류");
+            } else if failed > 0 {
+                ui.colored_label(
+                    ui.visuals().error_fg_color,
+                    format!("테스트 {total}개 중 {failed}개 실패"),
+                );
+            } else if total > 0 {
+                ui.colored_label(PASSED, format!("테스트 {total}개 통과"));
+            }
+        }
+        if sent.script.is_none() && self.tab == Tab::Script {
+            self.tab = Tab::Body;
+        }
         ui.horizontal(|ui| {
             ui.selectable_value(&mut self.tab, Tab::Body, "본문");
             ui.selectable_value(
@@ -514,6 +582,9 @@ impl HttpPanel {
                 Tab::Headers,
                 format!("헤더 ({})", r.headers.len()),
             );
+            if sent.script.is_some() {
+                ui.selectable_value(&mut self.tab, Tab::Script, "스크립트");
+            }
         });
         egui::ScrollArea::both()
             .id_salt("http_response")
@@ -524,6 +595,11 @@ impl HttpPanel {
                             .code_editor()
                             .desired_width(f32::INFINITY),
                     );
+                }
+                Tab::Script => {
+                    if let Some(outcome) = &sent.script {
+                        script_ui(ui, outcome);
+                    }
                 }
                 Tab::Headers => {
                     egui::Grid::new("http_headers")
@@ -540,6 +616,37 @@ impl HttpPanel {
                 }
             });
         task
+    }
+}
+
+/// 2xx 상태와 통과한 테스트의 색.
+const PASSED: egui::Color32 = egui::Color32::from_rgb(60, 170, 90);
+
+/// 응답 스크립트의 테스트(통과·실패와 까닭), 오류, 로그.
+fn script_ui(ui: &mut egui::Ui, outcome: &Outcome) {
+    if let Some(error) = &outcome.error {
+        ui.colored_label(ui.visuals().error_fg_color, error);
+    }
+    for test in &outcome.tests {
+        ui.horizontal_wrapped(|ui| {
+            match &test.error {
+                None => ui.colored_label(PASSED, "통과"),
+                Some(_) => ui.colored_label(ui.visuals().error_fg_color, "실패"),
+            };
+            ui.label(&test.name);
+            if let Some(error) = &test.error {
+                ui.weak(error);
+            }
+        });
+    }
+    if !outcome.log.is_empty() {
+        ui.separator();
+        for line in &outcome.log {
+            ui.monospace(line);
+        }
+    }
+    if outcome.error.is_none() && outcome.tests.is_empty() && outcome.log.is_empty() {
+        ui.weak("테스트와 로그가 없습니다");
     }
 }
 

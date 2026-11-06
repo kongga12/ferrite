@@ -13,7 +13,9 @@
 //! >> ./out.json                    ← 응답 본문을 저장(`>>!`는 덮어쓴다)
 //! ```
 //!
-//! 응답 처리 스크립트(`> {% … %}`, `> ./script.js`)는 돌리지 않고 본문에서 뺀다.
+//!
+//! 응답 처리 스크립트(`> {% … %}`, `> ./script.js`)는 본문에서 빼서 따로 둔다([`crate::script`]).
+//! 요청 전 스크립트(요청 줄 앞의 `< {% … %}`, `< ./pre.js`)는 돌리지 않고 건너뛴다.
 
 use std::ops::Range;
 
@@ -36,12 +38,23 @@ pub struct Request {
     pub body: Option<String>,
     /// `>> 경로`(덮어쓰면 `>>!`): 응답 본문을 저장할 파일(변수를 채우기 전).
     pub save: Option<Save>,
-    /// 응답 처리 스크립트가 있었다(돌리지 않는다).
-    pub handler: bool,
+    /// 응답 처리 스크립트, 쓴 차례대로.
+    pub handlers: Vec<Handler>,
+    /// 요청 전 스크립트가 있었다(돌리지 않는다).
+    pub pre_script: bool,
     /// 이 요청만 서버 인증서를 검증하지 않는다(개발 서버의 자체 서명 인증서).
     pub insecure: bool,
     pub no_redirect: bool,
     pub no_cookie_jar: bool,
+}
+
+/// 응답 처리 스크립트.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Handler {
+    /// `> {% … %}`: `{%` 뒤부터 `%}` 앞까지. `line`은 `{%`가 든 줄(0부터)이다.
+    Inline { line: usize, code: String },
+    /// `> 경로`: 요청 파일의 폴더 기준 스크립트 파일.
+    File(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -115,8 +128,10 @@ fn block(
     let mut state = State::Before;
     let mut body: Vec<&str> = Vec::new();
     let mut found = false;
-    // `> {%`부터 `%}`까지(응답 처리 스크립트) 안이다.
-    let mut in_handler = false;
+    // `> {%`부터 `%}`까지(응답 처리 스크립트) 안이면 그 시작 줄과 지금까지의 글.
+    let mut handler: Option<(usize, String)> = None;
+    // 요청 줄 앞의 `< {%`부터 `%}`까지(요청 전 스크립트) 안이다.
+    let mut in_pre_script = false;
     for i in range {
         let line = lines[i];
         let trimmed = line.trim();
@@ -126,7 +141,17 @@ fn block(
         }
         match state {
             State::Before => {
+                if in_pre_script {
+                    in_pre_script = !trimmed.contains("%}");
+                    continue;
+                }
                 if trimmed.is_empty() {
+                    continue;
+                }
+                if let Some(rest) = trimmed.strip_prefix('<') {
+                    request.pre_script = true;
+                    let rest = rest.trim_start();
+                    in_pre_script = rest.starts_with("{%") && !rest.contains("%}");
                     continue;
                 }
                 let comment = trimmed
@@ -185,8 +210,18 @@ fn block(
                 }
             }
             State::Body => {
-                if in_handler {
-                    in_handler = !trimmed.contains("%}");
+                if let Some((start, mut code)) = handler.take() {
+                    code.push('\n');
+                    match line.split_once("%}") {
+                        Some((last, _)) => {
+                            code.push_str(last);
+                            request.handlers.push(Handler::Inline { line: start, code });
+                        }
+                        None => {
+                            code.push_str(line);
+                            handler = Some((start, code));
+                        }
+                    }
                 } else if let Some(rest) = trimmed.strip_prefix(">>") {
                     let (overwrite, path) = match rest.strip_prefix('!') {
                         Some(path) => (true, path),
@@ -200,13 +235,29 @@ fn block(
                         });
                     }
                 } else if let Some(rest) = trimmed.strip_prefix("> ") {
-                    request.handler = true;
-                    in_handler = rest.trim_start().starts_with("{%") && !rest.contains("%}");
+                    let rest = rest.trim();
+                    match rest.strip_prefix("{%") {
+                        Some(code) => match code.split_once("%}") {
+                            Some((code, _)) => request.handlers.push(Handler::Inline {
+                                line: i,
+                                code: code.to_owned(),
+                            }),
+                            None => handler = Some((i, code.to_owned())),
+                        },
+                        None if !rest.is_empty() => {
+                            request.handlers.push(Handler::File(rest.to_owned()))
+                        }
+                        None => {}
+                    }
                 } else {
                     body.push(line);
                 }
             }
         }
+    }
+    // 닫지 않은 스크립트도 둔다(돌리면 문법 오류로 알린다).
+    if let Some((line, code)) = handler {
+        request.handlers.push(Handler::Inline { line, code });
     }
     while body.last().is_some_and(|l| l.trim().is_empty()) {
         body.pop();
@@ -304,17 +355,22 @@ mod tests {
                 overwrite: false
             })
         );
-        assert!(up.handler);
+        assert_eq!(
+            up.handlers,
+            [Handler::Inline {
+                line: 8,
+                code: "\n  client.test(\"x\", () => {});\n".into()
+            }]
+        );
         let get = &file.requests[1];
         assert_eq!(get.body, None);
+        assert_eq!(get.handlers, [Handler::File("./check.js".into())]);
         assert!(
-            get.handler
-                && get
-                    .save
-                    .as_ref()
-                    .is_some_and(|s| s.overwrite && s.path == "b.txt")
+            get.save
+                .as_ref()
+                .is_some_and(|s| s.overwrite && s.path == "b.txt")
         );
-        assert!(!parse("GET /a\n").requests[0].handler);
+        assert!(parse("GET /a\n").requests[0].handlers.is_empty());
         let direct = &parse("GET /a\nAccept: */*\n>> a.json\n").requests[0];
         assert_eq!(
             (
@@ -324,6 +380,44 @@ mod tests {
             ),
             (1, None, true),
             "헤더 바로 뒤의 저장 줄"
+        );
+    }
+
+    #[test]
+    fn 한_줄_스크립트와_요청_전_스크립트() {
+        let file = parse(
+            "< {%\n  request.variables.set(\"a\", 1);\n%}\n< ./pre.js\nPOST /login\n\nid=a\n> {% client.global.set(\"t\", response.body.t); %}\n> {% client.log(1) %}\n",
+        );
+        let login = &file.requests[0];
+        assert_eq!(
+            (login.method.as_str(), login.url.as_str(), login.line),
+            ("POST", "/login", 4),
+            "요청 전 스크립트는 요청 줄이 아니다"
+        );
+        assert!(login.pre_script);
+        assert_eq!(login.body.as_deref(), Some("id=a"));
+        assert_eq!(
+            login.handlers,
+            [
+                Handler::Inline {
+                    line: 7,
+                    code: " client.global.set(\"t\", response.body.t); ".into()
+                },
+                Handler::Inline {
+                    line: 8,
+                    code: " client.log(1) ".into()
+                }
+            ]
+        );
+        assert!(!parse("GET /a\n").requests[0].pre_script);
+        let open = &parse("GET /a\n\n> {%\nclient.log(1)\n").requests[0];
+        assert_eq!(
+            open.handlers,
+            [Handler::Inline {
+                line: 2,
+                code: "\nclient.log(1)".into()
+            }],
+            "닫지 않은 스크립트"
         );
     }
 

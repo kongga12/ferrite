@@ -1,11 +1,12 @@
-//! 로컬 서버로 보내기: 로그인 302의 쿠키를 담아 이어 보내고, EUC-KR·JSON·404를 받는다.
+//! 로컬 서버로 보내기: 로그인 302의 쿠키를 담아 이어 보내고, EUC-KR·JSON·404를 받는다. 응답 처리
+//! 스크립트로 받은 토큰을 다음 요청에 쓴다.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::Path;
 use std::{fs, thread};
 
-use ferrite_http::{Client, CookieJar, Environments, parse, prepare};
+use ferrite_http::{Client, CookieJar, Environments, Globals, parse, prepare, script};
 
 /// 요청 줄, 헤더(소문자 이름), 본문.
 fn read_request(stream: &TcpStream) -> (String, Vec<(String, String)>, Vec<u8>) {
@@ -57,6 +58,10 @@ fn serve() -> u16 {
                 .iter()
                 .find(|(k, _)| k == "cookie")
                 .map(|(_, v)| v.as_str());
+            let authorization = headers
+                .iter()
+                .find(|(k, _)| k == "authorization")
+                .map(|(_, v)| v.as_str());
             match line.split(' ').take(2).collect::<Vec<_>>()[..] {
                 ["POST", "/app/login.do"] if body == b"id=admin" => respond(
                     stream,
@@ -90,6 +95,19 @@ fn serve() -> u16 {
                         &body,
                     )
                 }
+                ["POST", "/api/token"] if body == b"{\"id\": \"admin\"}" => respond(
+                    stream,
+                    "200 OK",
+                    &["Content-Type: application/json"],
+                    br#"{"token":"tok-1","expires":3600}"#,
+                ),
+                ["GET", "/api/me"] if authorization == Some("Bearer tok-1") => respond(
+                    stream,
+                    "200 OK",
+                    &["Content-Type: application/json"],
+                    r#"{"name":"관리자"}"#.as_bytes(),
+                ),
+                ["GET", "/api/me"] => respond(stream, "401 Unauthorized", &[], b""),
                 ["GET", "/api/board"] => respond(
                     stream,
                     "200 OK",
@@ -129,6 +147,7 @@ fn 로그인_쿠키를_담아_이어_보내고_문자_집합과_json을_푼다()
             &file,
             &file.requests[i],
             Some((&envs, "dev")),
+            &Globals::new(),
             Path::new("."),
         )
         .unwrap();
@@ -190,7 +209,7 @@ fn 멀티파트로_파일을_바이트_그대로_올린다() {
         "POST http://127.0.0.1:{port}/upload\nContent-Type: multipart/form-data; boundary=XB\n\n--XB\nContent-Disposition: form-data; name=\"title\"\n\n제목\n--XB\nContent-Disposition: form-data; name=\"file\"; filename=\"a.png\"\nContent-Type: image/png\n\n< ./a.png\n--XB--\n"
     );
     let file = parse(&text);
-    let prepared = prepare(&file, &file.requests[0], None, &dir).unwrap();
+    let prepared = prepare(&file, &file.requests[0], None, &Globals::new(), &dir).unwrap();
     let response = Client::default()
         .send(&prepared, &mut CookieJar::default())
         .unwrap();
@@ -217,10 +236,72 @@ fn 연결하지_못하면_오류를_돌려준다() {
         .unwrap()
         .port();
     let file = parse(&format!("GET http://127.0.0.1:{port}/\n"));
-    let prepared = prepare(&file, &file.requests[0], None, Path::new(".")).unwrap();
+    let prepared = prepare(
+        &file,
+        &file.requests[0],
+        None,
+        &Globals::new(),
+        Path::new("."),
+    )
+    .unwrap();
     assert!(
         Client::default()
             .send(&prepared, &mut CookieJar::default())
             .is_err()
+    );
+}
+
+#[test]
+fn 응답_스크립트로_받은_토큰을_다음_요청에_쓴다() {
+    let port = serve();
+    let text = format!(
+        "@base = http://127.0.0.1:{port}\n\
+         ### 토큰\n\
+         POST {{{{base}}}}/api/token\n\
+         Content-Type: application/json\n\
+         \n\
+         {{\"id\": \"admin\"}}\n\
+         \n\
+         > {{%\n\
+         client.global.set(\"token\", response.body.token);\n\
+         client.test(\"토큰을 받았다\", function () {{\n\
+           client.assert(response.status === 200, \"상태 \" + response.status);\n\
+           client.assert(response.body.expires > 60, \"만료가 짧다\");\n\
+         }});\n\
+         %}}\n\
+         ### 내 정보\n\
+         GET {{{{base}}}}/api/me\n\
+         Authorization: Bearer {{{{token}}}}\n\
+         \n\
+         > {{% client.test(\"이름\", () => client.assert(response.body.name === \"관리자\")); %}}\n"
+    );
+    let file = parse(&text);
+    let client = Client::default();
+    let mut jar = CookieJar::default();
+    let mut globals = Globals::new();
+    let me = prepare(&file, &file.requests[1], None, &globals, Path::new("."));
+    assert!(
+        me.is_err_and(|e| e.contains("token")),
+        "토큰을 받기 전에는 채우지 못한다"
+    );
+
+    let prepared = prepare(&file, &file.requests[0], None, &globals, Path::new(".")).unwrap();
+    let response = client.send(&prepared, &mut jar).unwrap();
+    let outcome = script::run(&prepared.scripts, &response, &mut globals);
+    assert_eq!((outcome.error, outcome.tests.len()), (None, 1));
+    assert_eq!(outcome.tests[0].error, None, "{:?}", outcome.tests);
+    assert_eq!(globals.get("token").map(String::as_str), Some("tok-1"));
+
+    let prepared = prepare(&file, &file.requests[1], None, &globals, Path::new(".")).unwrap();
+    let response = client.send(&prepared, &mut jar).unwrap();
+    assert_eq!(response.status, 200, "받은 토큰으로 보낸다");
+    let outcome = script::run(&prepared.scripts, &response, &mut globals);
+    assert_eq!(
+        outcome
+            .tests
+            .iter()
+            .map(|t| (t.name.as_str(), t.error.is_none()))
+            .collect::<Vec<_>>(),
+        [("이름", true)]
     );
 }
