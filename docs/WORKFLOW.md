@@ -1202,7 +1202,7 @@
     - 창 시험(kittest): 불러오기 → 파일별 목록, 누르면 그 줄로, 물결선·상태바 개수, SARIF가 바뀌면 다시 읽기
     - 실제 SpotBugs(CI 3개 OS 전체 작업): Maven으로 분석해 `spotbugsSarif.json`을 찾고, null 역참조(`NP_ALWAYS_NULL`)가 그 파일 12줄의 오류로, 메시지 틀이 채워져 나온다.
     - 실제 앱(Windows, 릴리스 빌드): SpotBugs가 낸 SARIF를 찾아 불러와 오류 1·경고 2·참고 1, 7·12줄 물결선, 상태바 "오류 1 · 경고 2", 눌러서 12줄로 가는 것을 화면으로 확인했다. 확인 뒤 설정 폴더를 지웠다.
-  - 남은 것: clang의 실제 SARIF는 돌려 보지 않았다(SARIF 2.1.0 공통 형식과 기준 주소 처리로 읽는다). PMD·Semgrep은 백로그 "PMD·Semgrep 실제 SARIF"(2026-11-05)에서 했다.
+  - 뒤에 한 것: PMD·Semgrep은 백로그 "PMD·Semgrep 실제 SARIF"(2026-11-05), clang 정적 분석기는 "clang 실제 SARIF"(2026-11-09)에서 했다.
 - [x] 9-3 의존성 취약점 검사(OSV, 오프라인 DB) — 중간
   - 결정(사용자): 온라인(api.osv.dev, 이름·버전만 보내고 화면에 알린다)과 오프라인 DB(생태계별 OSV `all.zip`을 [받기] 또는 [파일에서…]) 둘 다, Maven·Gradle은 빌드 도구로 전이 의존까지 풀고 전이 의존은 끌어온 직접 의존의 줄에, 5개 생태계, 결과는 문제 창 [취약점]과 의존성 줄 물결선(SARIF와 같은 틀)
   - 문제 창 [취약점 (N)]: [검사], 온라인·오프라인 DB 고르기. 오프라인은 생태계마다 받은 DB의 크기·받은 때와 [받기](크기 안내)·[파일에서…](인터넷이 막힌 곳).
@@ -1552,7 +1552,7 @@
       - PMD: 정적 분석 탭에서 `target/pmd.sarif.json`을 불러오면 "PMD · 오류 0 · 경고 2 · 참고 1", 파일별 목록, 3·6·11~12줄 물결선, 상태 표시줄 "경고 2"가 보인다.
       - Semgrep: `reports/semgrep.sarif`를 불러오면 "Semgrep OSS · 오류 1 · 경고 0 · 참고 1", 한글 메시지, 물결선이 보이고, 결과를 눌러 10줄 20열로 간다.
       - 확인 뒤 설정 폴더와 예제 프로젝트, Semgrep을 설치한 venv를 지웠다. PMD jar는 Maven 로컬 저장소에 남는다.
-  - 확인하지 못한 것: clang 정적 분석기의 SARIF, egov 표준 점검 규칙(PMD 규칙 묶음)으로 돌린 결과
+  - 확인하지 못한 것: egov 표준 점검 규칙(PMD 규칙 묶음)으로 돌린 결과. clang 정적 분석기의 SARIF는 백로그 "clang 실제 SARIF"(2026-11-09)에서 했다.
 
 - [x] JSP 화면 스크립트 줄 맞추기(2026-11-06) — 중간
   - JSP 파일에 바로 중단점을 걸고, 멈춘 자리도 JSP의 줄로 보인다. 전에는 디버그 창의 "화면 스크립트"에서 브라우저가 받은 화면을 읽기 전용으로 열어 걸어야 했다.
@@ -1707,6 +1707,18 @@
     - 패키징 워크플로(실행 42570644293): 3개 OS에서 dist 빌드로 설치 파일을 만들고 설치·실행·제거 시험을 통과했다.
       - 처음에는 Windows·Linux가 빌드를 마친 뒤 WiX·AppImage 도구를 GitHub 릴리스에서 받다가 504로 실패했다. 같은 때 돌린 main도 Linux가 같은 504였다. 실패한 작업만 다시 돌려 통과했다.
     - 설치 파일 크기(아티팩트 묶음, main 실행 42570338027과 비교): Linux 48.9MB → 41.8MB(`.deb` 25.6MB → 21.7MB), macOS 19.6MB → 16.6MB, Windows(NSIS+MSI) 35.0MB → 32.9MB. 설치 파일은 압축하므로 실행 파일보다 덜 줄어든다.
+- [x] clang 실제 SARIF(2026-11-09) — 작음
+  - clang 정적 분석기가 낸 SARIF를 실제로 읽는다. 전에는 SARIF 2.1.0 공통 형식과 기준 주소 처리로 읽을 것으로만 보았다.
+  - 시험(`test_tools`, CI 3개 OS 전체 작업)
+    - 한글·빈칸 경로(`게시판 프로젝트`)의 C 파일을 `clang --analyze --analyzer-output sarif -o reports/clang.sarif src/board.c`로 분석한다. 헤더를 쓰지 않아 OS마다 표준 헤더가 없어도 된다.
+    - 프로젝트에서 그 SARIF를 찾는다.
+    - null 역참조(`core.NullDereference`, 경고)가 4줄, 0으로 나누기(`core.DivideZero`, 경고)가 11줄로 원본 파일에 오는지 본다. 도구 이름(`clang`)과 메시지도 본다.
+  - clang의 SARIF(실행 42578914079의 원문)
+    - 판: Ubuntu clang 18.1.3, Windows clang 20.1.8, macOS Apple clang 21.0.0
+    - 도구는 `clang`(`clang static analyzer`)이고, 규칙 ID는 검사기 이름(`core.NullDereference`)이다.
+    - 파일은 절대 `file:` 주소로, 한글과 빈칸을 `%XX`로 적는다(PMD는 한글을 그대로 적었다). macOS는 `/private/var`, Windows는 긴 사용자 폴더 이름처럼 실제 경로로 적는다.
+  - 정적 분석 창의 안내에 clang 명령을 더했다.
+  - 검증: 전체 CI(실행 42578914079) 3개 OS에서 통과했다. 처음에는 macOS가 시험 전 Gradle 설치에서 504로 실패해 그 작업만 다시 돌렸다. 로컬(Windows)에는 clang이 없어 건너뛰었다.
 
 - 살폈지만 넣지 않은 것: 임베디드(MCU 플래시·시리얼 모니터·장비 설정 파일), 프레임워크별 지원(React·Vue·Angular 등, JS·TS 언어 서버로 기본은 된다), 린터 개별 연동(언어 서버나 저장 시 작업으로 된다), 원격 개발·컨테이너·SFTP 배포, 로컬 AI 완성 모델, 계정 기반 설정 동기화. egov 개발과 거리가 멀거나 크기에 비해 쓰임이 적다.
 

@@ -1,5 +1,5 @@
 //! 실제 테스트 도구(Maven·Gradle·pytest·Go·CTest)를 돌려 보고서를 읽고, 실패 스택의 줄을 프로젝트에서
-//! 찾고, 실패한 것만 다시 돌린다. 정적 분석기(SpotBugs·PMD·Semgrep)가 낸 SARIF와 빌드 도구가 푼 의존성
+//! 찾고, 실패한 것만 다시 돌린다. 정적 분석기(SpotBugs·PMD·Semgrep·clang)가 낸 SARIF와 빌드 도구가 푼 의존성
 //! 나무도 읽는다. 도구가 필요하고 Maven·Gradle은 의존성을 받으므로 기본으로는 돌지 않는다. CI의 3개 OS
 //! 전체 작업이 `--ignored`로 돌린다. 도구가 없으면 로컬에서는 건너뛰고 CI에서는 실패한다.
 
@@ -632,6 +632,65 @@ fn semgrep이_낸_sarif를_읽고_원본_파일을_찾는다() {
     let mut messages: Vec<&str> = findings.iter().map(|f| f.message.as_str()).collect();
     messages.sort();
     assert_eq!(messages, ["숫자 변환 s", "예외를 삼키는 빈 catch 블록"]);
+    let _ = std::fs::remove_dir_all(root.parent().unwrap());
+}
+
+#[test]
+#[ignore = "clang이 필요하다(CI 러너에는 3개 OS 모두 있다)"]
+fn clang_정적_분석기가_낸_sarif를_읽고_원본_파일을_찾는다() {
+    use ferrite_core::sarif::{self, Level};
+
+    if !require("clang --version") {
+        return;
+    }
+    // 경로에 한글과 빈칸을 넣어 SARIF 주소의 인코딩을 본다. 헤더를 쓰지 않아 OS마다 표준 헤더가 없어도 된다.
+    let root = temp_dir("clang").join("게시판 프로젝트");
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::create_dir_all(root.join("reports")).unwrap();
+    let board = root.join("src").join("board.c");
+    std::fs::write(
+        &board,
+        "/* 게시판 분석 시험 */\nint deref(int *p) {\n    if (p == 0) {\n        return *p;\n    }\n    return 0;\n}\n\nint divide(int a) {\n    int zero = 0;\n    return a / zero;\n}\n",
+    )
+    .unwrap();
+    let (ok, _) = run(
+        &root,
+        "clang --analyze --analyzer-output sarif -o reports/clang.sarif src/board.c",
+    );
+    assert!(ok, "clang 정적 분석");
+    let report = root.join("reports").join("clang.sarif");
+    let text = std::fs::read_to_string(&report).unwrap();
+    // 판마다 꼴이 조금씩 달라 실패하면 원문을 본다.
+    eprintln!("{text}");
+    assert_eq!(
+        sarif::candidates(&root),
+        std::slice::from_ref(&report),
+        "프로젝트에서 찾는다"
+    );
+    let findings = sarif::parse(&text, &root, &root.join("reports")).unwrap();
+    let found: Vec<(String, Level, u32)> = sarif_lines(&findings, &board)
+        .into_iter()
+        .map(|(_, rule, level, line, _)| (rule, level, line))
+        .collect();
+    assert_eq!(
+        found,
+        [
+            ("core.NullDereference".to_owned(), Level::Warning, 4),
+            ("core.DivideZero".to_owned(), Level::Warning, 11),
+        ]
+    );
+    assert!(
+        findings
+            .iter()
+            .all(|f| f.tool.to_lowercase().contains("clang")),
+        "{:?}",
+        findings.iter().map(|f| &f.tool).collect::<Vec<_>>()
+    );
+    let messages: Vec<String> = findings.iter().map(|f| f.message.to_lowercase()).collect();
+    assert!(
+        messages[0].contains("null") && messages[1].contains("zero"),
+        "{messages:?}"
+    );
     let _ = std::fs::remove_dir_all(root.parent().unwrap());
 }
 
