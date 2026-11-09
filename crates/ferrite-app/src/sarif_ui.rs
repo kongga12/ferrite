@@ -182,6 +182,7 @@ impl SarifPanel {
                 "SpotBugs: mvn compile com.github.spotbugs:spotbugs-maven-plugin:spotbugs -Dspotbugs.sarifOutput=true",
                 "PMD: mvn compile pmd:pmd -Dformat=net.sourceforge.pmd.renderers.SarifRenderer (target/pmd.sarif.json)",
                 "Semgrep: semgrep scan --sarif --output semgrep.sarif (규칙에 한글이 있으면 Windows에서는 PYTHONUTF8=1)",
+                "clang: clang --analyze --analyzer-output sarif -o clang.sarif 파일.c",
             ] {
                 ui.weak(example);
             }
