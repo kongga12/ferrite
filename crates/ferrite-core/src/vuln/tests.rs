@@ -186,9 +186,14 @@ fn 오프라인_묶음에서_해당_패키지의_레코드만_읽는다() {
         let options = zip::write::SimpleFileOptions::default();
         let other = json!({"id": "GHSA-other", "affected": [{"package": {"ecosystem": "Maven", "name": "a:b"},
             "ranges": [{"type": "ECOSYSTEM", "events": [{"introduced": "0"}]}]}]});
-        for (name, record) in [
-            ("GHSA-jfh8-c2jp-5v3q.json", log4shell_json()),
-            ("GHSA-other.json", other),
+        // 하나는 deflate, 하나는 압축하지 않고 저장한다.
+        for (name, record, options) in [
+            ("GHSA-jfh8-c2jp-5v3q.json", log4shell_json(), options),
+            (
+                "GHSA-other.json",
+                other,
+                options.compression_method(zip::CompressionMethod::Stored),
+            ),
         ] {
             zip.start_file(name, options).unwrap();
             zip.write_all(record.to_string().as_bytes()).unwrap();
@@ -200,11 +205,54 @@ fn 오프라인_묶음에서_해당_패키지의_레코드만_읽는다() {
         "org.apache.logging.log4j:log4j-core",
         "2.14.1",
     );
+    let ids = |advisories: Vec<osv::Advisory>| -> Vec<String> {
+        advisories.into_iter().map(|a| a.id).collect()
+    };
+    let index = osv::index_path(&zip_path);
+    assert!(!index.exists());
+    let advisories = osv::query_offline(&zip_path, std::slice::from_ref(&core)).unwrap();
+    assert_eq!(ids(advisories), ["GHSA-jfh8-c2jp-5v3q"]);
+    // 처음 검사가 색인을 만든다: 패키지마다 그 레코드의 자리(시작:크기:deflate면 d, 저장이면 s).
+    let text = std::fs::read_to_string(&index).unwrap();
+    let at = |name: &str| -> String {
+        let prefix = format!("Maven\t{name}\t");
+        let line = text.lines().find(|l| l.starts_with(&prefix));
+        line.unwrap_or_else(|| panic!("{name}: {text}"))[prefix.len()..].to_owned()
+    };
+    let (core_at, other_at) = (at("org.apache.logging.log4j:log4j-core"), at("a:b"));
+    assert!(
+        core_at.ends_with(":d") && other_at.ends_with(":s"),
+        "{text}"
+    );
+    // 다음 검사는 색인으로 읽는다(색인이 다른 레코드를 가리키게 고치면 그것을 읽는다).
+    let core_line = format!("log4j-core\t{core_at}");
+    std::fs::write(
+        &index,
+        text.replace(&core_line, &format!("log4j-core\t{other_at}")),
+    )
+    .unwrap();
+    let advisories = osv::query_offline(&zip_path, std::slice::from_ref(&core)).unwrap();
+    assert_eq!(ids(advisories), ["GHSA-other"], "색인을 쓴다");
+    // 묶음이 바뀌면(크기·시각) 그 색인은 버리고 다시 만든다.
+    {
+        use std::io::Write;
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(&zip_path).unwrap());
+        zip.start_file(
+            "GHSA-jfh8-c2jp-5v3q.json",
+            zip::write::SimpleFileOptions::default(),
+        )
+        .unwrap();
+        zip.write_all(log4shell_json().to_string().as_bytes())
+            .unwrap();
+        zip.finish().unwrap();
+    }
     let advisories = osv::query_offline(&zip_path, std::slice::from_ref(&core)).unwrap();
     assert_eq!(
-        advisories.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(),
-        ["GHSA-jfh8-c2jp-5v3q"]
+        ids(advisories),
+        ["GHSA-jfh8-c2jp-5v3q"],
+        "새 묶음으로 다시 만든다"
     );
+    assert_eq!(osv::build_index(&zip_path), Ok(1), "색인한 패키지 수");
     // 들이기는 zip만 받는다.
     let dest = root.join("db/Maven/all.zip");
     osv::import_database(&zip_path, &dest).unwrap();
