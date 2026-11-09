@@ -44,7 +44,8 @@ zip = { version = "9.0.5", default-features = false, features = ["deflate-flate2
 encoding_rs.workspace = true
 
 # 설치 파일(cargo-packager 0.11). 패키징 워크플로(.github/workflows/package.yml)가 OS마다
-# `cargo packager --release -p ferrite-app --formats ...`로 만든다. 서명은 하지 않는다(Phase 7 문서).
+# `cargo packager --profile dist -p ferrite-app --formats ...`로 만든다(작업 공간 Cargo.toml의 dist 빌드).
+# 서명은 하지 않는다(Phase 7 문서).
 # 설명은 영어로 둔다: WiX(MSI)의 기본 코드 페이지(1252)가 한글을 받지 못한다.
 [package.metadata.packager]
 product-name = "Ferrite"
@@ -53,7 +54,7 @@ description = "Lightweight cross-platform IDE for eGovFrame development"
 publisher = "Cheolho Choo"
 homepage = "https://github.com/kongga12/ferrite"
 category = "DeveloperTool"
-before-packaging-command = "cargo build --release -p ferrite-app"
+before-packaging-command = "cargo build --profile dist -p ferrite-app"
 icons = ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/512x512.png", "icons/icon.ico"]
 
 # 관리자 권한 없이 사용자별로 설치한다(기본값). 설치 화면은 OS 언어, 없으면 한국어.

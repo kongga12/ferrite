@@ -29,3 +29,11 @@ encoding_rs = "0.8"
 # 줄바꿈은 LF만 인정한다(CR·유니코드 줄 구분자를 줄로 세지 않음). tree-sitter의 행 계산과 맞추기 위함.
 ropey = { version = "1.6", default-features = false, features = ["simd"] }
 rfd = "0.17"
+
+# 설치 파일용 빌드(패키징 워크플로가 `--profile dist`로 쓴다). 링크할 때 크레이트 경계를 넘어 다시 최적화해
+# 실행 파일이 작아진다(Windows 64.3MB → 57.0MB). 대신 처음부터 빌드하는 데 세 배쯤(4.6분 → 15분) 걸려
+# 개발·CI의 `--release`는 그대로 둔다.
+[profile.dist]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
