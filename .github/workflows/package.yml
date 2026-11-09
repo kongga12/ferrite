@@ -8,6 +8,7 @@ name: Package
 # `v*` 태그에서는 설치 파일마다 업데이트 서명(.sig, 비밀 값 FERRITE_UPDATER_KEY·_PASSWORD)을 만들고,
 # GitHub 릴리스를 만들어 설치 파일과 latest.json(앱의 자동 업데이트가 읽는다)을 올린다.
 # 그 밖에는 아티팩트로만 올린다.
+# 실행 파일은 작업 공간 Cargo.toml의 dist 빌드(fat LTO, codegen-units 1)다.
 on:
   workflow_dispatch:
   push:
@@ -83,9 +84,9 @@ jobs:
             export CARGO_PACKAGER_SIGN_PRIVATE_KEY="$(printf %s "$UPDATER_KEY" | tr -d '\r\n')"
             export CARGO_PACKAGER_SIGN_PRIVATE_KEY_PASSWORD="$UPDATER_KEY_PASSWORD"
           fi
-          cargo packager --release -p ferrite-app --formats ${{ matrix.formats }} \
+          cargo packager --profile dist -p ferrite-app --formats ${{ matrix.formats }} \
             --out-dir "$GITHUB_WORKSPACE/target/packages" \
-            --binaries-dir "$GITHUB_WORKSPACE/target/release"
+            --binaries-dir "$GITHUB_WORKSPACE/target/dist"
       # 만든 설치 파일을 그 자리에서 설치 → 실행(`--version`) → 제거하고, 남은 것이 없는지 본다. 창을 띄우는
       # 것은 보지 못한다(러너에 화면이 없다).
       - name: 설치 시험(Windows)

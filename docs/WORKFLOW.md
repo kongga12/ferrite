@@ -926,6 +926,7 @@
 **진행 단계**:
 - [x] 7-1 설치 파일 패키징
   - 도구: cargo-packager 0.11.8. 설정은 `crates/ferrite-app/Cargo.toml`의 `[package.metadata.packager]`에 둔다.
+  - 설치 파일의 실행 파일은 작업 공간 `Cargo.toml`의 `dist` 빌드(fat LTO, codegen-units 1)다(백로그 "릴리스 실행 파일 줄이기"(2026-11-09)).
     - 제품 정보: 이름 Ferrite, 식별자 `io.github.kongga12.ferrite`, 분류 개발 도구
     - 설명은 영어로 둔다. WiX(MSI)의 기본 코드 페이지(1252)가 한글을 받지 못한다.
     - Windows: NSIS(사용자별 설치, 관리자 권한 없음. 설치 화면은 OS 언어를 따르고, 없으면 한국어)와 MSI(WiX 3.11, 시스템 전체 설치)
@@ -1657,6 +1658,26 @@
       - npm(220MB, 레코드 23만 개, 의존성 4개): 처음 검사 5.4초, 색인으로 0.029초. 색인 9.0MB.
     - 실제 앱(Windows, 릴리스 빌드): 받은 npm 묶음을 앱의 DB 자리에 색인 없이 두었다(이 판 전에 받은 것과 같다). 오프라인 검사가 `all.index`(9.4MB)를 만들고, 다시 검사해 "의존성 2개 · 취약 7건(치명 1 · 높음 3 · 보통 3) · 오프라인 DB"와 잠금 파일 15·18줄의 물결선을 화면으로 확인했다. 확인 뒤 DB·설정 폴더와 예제를 지웠다.
   - 확인하지 못한 것: 실제 앱에서 [파일에서…]로 들이는 것. Windows 파일 열기 창은 앱을 멈춘 채 뜨는데, 자동 입력이 그 창에 들어가지 않았다. 들이기·색인은 창 시험에서 확인했다.
+- [x] 릴리스 실행 파일 줄이기(2026-11-09) — 작음
+  - 까닭: JS 엔진(boa)을 넣은 뒤 실행 파일이 64MB가 되었다. 릴리스 설정은 기본값(LTO 없음, codegen-units 16)이었다.
+  - 잰 것(Windows, `ferrite-app`을 처음부터 릴리스로 빌드, 설정마다 빌드 폴더를 따로)
+    - 기본: 276초, 64.3MB
+    - thin LTO: 321초, 65.7MB(오히려 커진다)
+    - thin LTO + codegen-units 1: 403초, 59.4MB(−7.7%)
+    - fat LTO + codegen-units 1: 899초, 57.0MB(−11%)
+  - 결정: 크기는 fat LTO + codegen-units 1이 가장 작지만 처음부터 빌드하는 데 세 배 넘게 걸린다. 그래서 설치 파일에만 쓴다.
+    - 작업 공간 `Cargo.toml`에 `[profile.dist]`(`inherits = "release"`, `lto = "fat"`, `codegen-units = 1`)를 둔다.
+    - 패키징 워크플로와 cargo-packager의 빌드 명령이 `--profile dist`로 빌드하고 `target/dist`의 실행 파일을 넣는다.
+    - 개발과 CI의 `--release`(실제 앱 확인, `full` 작업의 실행 파일)는 그대로 둔다.
+  - 크기를 차지하는 것은 대부분 코드다: 그래픽 백엔드(wgpu의 Vulkan `ash`·`naga`·`wgpu_core`), Windows API 바인딩, boa, 플러그인 런타임(wasmi), tree-sitter 문법 표. 실행 파일에 넣은 파일(템플릿·스키마)은 작다.
+  - 넣지 않은 것
+    - 심볼 지우기(`strip = "symbols"`): Linux·macOS 실행 파일은 더 작아지지만, 사용자가 `RUST_BACKTRACE=1`로 보낸 패닉 기록에서 함수 이름이 사라진다.
+    - `opt-level = "s"`: 편집기 속도에 영향이 있을 수 있어 재지 않았다.
+    - 그래픽 백엔드 줄이기: Windows에서 Vulkan을 빼면 줄지만, DX12가 안 되는 PC의 대안이 없어진다.
+  - 검증
+    - dist 설정 실행 파일(위의 fat LTO 빌드)을 띄워 Java 파일 칠하기, `.http`의 요청 전 스크립트(JS 엔진)로 채운 주소로 보내기를 확인했다. `--version`도 확인했다. 확인 뒤 빌드 폴더(약 8.5GB)와 예제를 지웠다.
+    - `cargo check --profile dist`로 설정을 확인했다.
+    - 패키징 워크플로(이 PR에서 돈다)가 3개 OS에서 dist 빌드로 설치 파일을 만들고 설치·실행·제거 시험을 한다.
 
 - 살폈지만 넣지 않은 것: 임베디드(MCU 플래시·시리얼 모니터·장비 설정 파일), 프레임워크별 지원(React·Vue·Angular 등, JS·TS 언어 서버로 기본은 된다), 린터 개별 연동(언어 서버나 저장 시 작업으로 된다), 원격 개발·컨테이너·SFTP 배포, 로컬 AI 완성 모델, 계정 기반 설정 동기화. egov 개발과 거리가 멀거나 크기에 비해 쓰임이 적다.
 
