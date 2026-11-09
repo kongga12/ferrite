@@ -1589,7 +1589,21 @@
     - 서버 시험(`요청을_받는_중에_띄운_자식_프로세스가_연결을_물려받지_않는다`): 요청 머리만 보내 서버가 연결을 쥐고 본문을 기다리게 한 뒤 1초쯤 사는 자식을 띄우고, 본문을 보내 응답을 끝까지 읽는다. 고치기 전 Windows에서 10054로 실패, 고친 뒤 통과(macOS·Linux는 고치기 전에도 통과한다).
     - Windows에서 `cargo test -p ferrite-app --bin ferrite`: 고치기 전 13번 중 3번 실패, 고친 뒤 20번 연속 통과. `cargo clippy --workspace --all-targets`·`cargo fmt --check` 통과.
   - 확인하지 못한 것: 실제 앱에서 자식이 MCP 연결을 쥐는 것은 보지 않았다(같은 std 동작이라 시험으로 갈음했다).
-  - 남은 것: 같은 `try_clone`이 `ferrite-dap`의 TCP 어댑터 연결(읽기 스레드용 복사본)과 시험용 서버 몇 곳(`app.rs`의 `http_server`, `debug_ui.rs`의 가짜 js-debug, `ferrite-lsp` 설치 시험)에 있다. DAP 연결은 세션 중에 앱이 띄운 자식이 복사본을 쥐면, 앱이 연결을 닫아도 어댑터(특히 이미 떠 있는 어댑터에 붙는 TCP 구성)가 그 자식이 끝날 때까지 끊김을 모를 수 있다.
+  - 남은 것: 같은 `try_clone`이 `ferrite-dap`의 TCP 어댑터 연결(읽기 스레드용 복사본)과 시험용 서버 몇 곳(`app.rs`의 `http_server`, `debug_ui.rs`의 가짜 js-debug, `ferrite-lsp` 설치 시험)에 있다. DAP 연결은 세션 중에 앱이 띄운 자식이 복사본을 쥐면, 앱이 연결을 닫아도 어댑터(특히 이미 떠 있는 어댑터에 붙는 TCP 구성)가 그 자식이 끝날 때까지 끊김을 모를 수 있다(아래 "버린 디버그 세션의 연결이 닫히지 않던 것"에서 고쳤다).
+- [x] 버린 디버그 세션의 연결이 닫히지 않던 것(2026-11-06) — 작음
+  - 까닭: 위 MCP 항목에서 같은 `try_clone`이 `ferrite-dap`의 TCP 어댑터 연결에도 있는 것을 보았다. 읽기 스레드에 넘기는 복사본을 Windows에서는 자식 프로세스가 물려받을 수 있었다.
+  - 찾기
+    - std만 쓴 재현: 연결이 살아 있는 동안에는 복사본을 물려받은 자식이 끝나도 연결이 멀쩡했다(그 뒤에도 주고받았다). 앱이 핸들을 모두 닫은 뒤에는 자식이 끝날 때(1초 뒤) 어댑터가 EOF 대신 ConnectionReset을 받았다. `shutdown`하고 닫으면 곧바로 EOF였다.
+    - 그런데 앱은 그보다 먼저 연결을 닫지 않았다. 어댑터가 `terminated`를 보내면 앱은 연결이 아직 열려 있어도 세션을 버리고, 끝난 자식 세션(js-debug의 페이지)도 버린다. 이때 쓰기 쪽 핸들만 닫히고 읽기 스레드는 복사본으로 읽기에서 막혀 있다. 그래서 어댑터가 먼저 닫지 않으면 연결은 앱이 끝날 때까지 열려 있었다(자식 프로세스가 없어도). 이미 떠 있는 어댑터에 붙는 TCP 구성(java-debug)은 세션이 끝난 것을 연결로 알 수 없었다.
+  - 고침(`ferrite-dap`)
+    - 연결을 복사하지 않는다. `Arc<TcpStream>` 하나를 읽기 스레드와 쓰기가 나눠 쓴다(`&TcpStream`으로 읽고 쓴다). 자식에 물려줄 핸들이 없다.
+    - 세션을 버릴 때 연결을 `shutdown`한다. 어댑터는 곧바로 EOF를 받고, 읽기 스레드도 끝난다.
+    - 시험용 서버 7곳(앱의 `http_server`·가짜 js-debug, `ferrite-dap`의 가짜 어댑터, `ferrite-lsp` 설치 시험 둘, `ferrite-update` 시험 서버)도 받은 소켓 하나로 읽고 쓴다. 다른 시험이 띄운 자식이 복사본을 쥐면 가짜가 끝나도 클라이언트가 닫힘을 그 자식이 끝날 때에야(RST로) 받는다.
+  - 검증
+    - 가짜 어댑터 시험(`세션을_버리면_어댑터가_곧바로_연결이_닫힌_것을_안다`): 고치기 전 5초 동안 닫힘을 받지 못해 실패(TimedOut), 고친 뒤 통과.
+    - Windows에서 `ferrite-dap`·`ferrite-lsp`·`ferrite-update`·`ferrite-mcp` 시험과 `cargo test -p ferrite-app --bin ferrite` 10번 연속 통과. `cargo clippy --workspace --all-targets`·`cargo fmt --check` 통과.
+    - 실제 어댑터 시험(로컬 Windows): js-debug(띄운 어댑터에 TCP로 붙고 페이지마다 자식 세션을 연다)·codelldb·debugpy 통과. delve·java-debug·PHP는 이 PC에 도구가 없어 건너뛰었다(`adapters.yml`이 3개 OS에서 돌린다).
+  - 확인하지 못한 것: 실제 앱에서 java-debug 세션이 끝난 뒤 연결이 닫히는 것은 보지 않았다(시험으로 갈음했다).
 
 - [x] HTTP 응답 처리 스크립트(2026-11-06) — 중간
   - `.http` 요청 뒤의 `> {% … %}`(또는 `> ./check.js`)를 응답을 받은 뒤 돌린다. 로그인 응답의 토큰을 변수로 두고 다음 요청의 `{{token}}`에 쓰거나, `client.test`로 응답을 검사한다.

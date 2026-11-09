@@ -935,7 +935,7 @@ mod tests {
         let server_thread = thread::spawn(move || {
             for body in [served.clone(), [served, b"-extra".to_vec()].concat()] {
                 let (mut stream, _) = listener.accept().unwrap();
-                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut reader = BufReader::new(&stream);
                 let mut line = String::new();
                 while reader.read_line(&mut line).unwrap() > 2 {
                     line.clear();
@@ -986,7 +986,7 @@ mod tests {
         let server_thread = thread::spawn(move || {
             for _ in 0..2 {
                 let (mut stream, _) = listener.accept().unwrap();
-                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut reader = BufReader::new(&stream);
                 let mut line = String::new();
                 while reader.read_line(&mut line).unwrap() > 2 {
                     line.clear();
