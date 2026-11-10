@@ -292,6 +292,23 @@ pub fn with_report(tool: Tool, command: &str, dir: &Path) -> String {
     }
 }
 
+/// Windows의 Gradle(JDK 18 이상)이 경로에 든 한글 등 ASCII가 아닌 글자 때문에 테스트 클래스를 찾지 못한
+/// 실패인지. Gradle은 테스트 JVM의 클래스 경로를 인자 파일(`@…gradle-worker-classpath…txt`)로 넘기는데,
+/// JDK 18부터 기본 문자셋이 UTF-8이라(JEP 400) 그 파일을 UTF-8로 쓰고 Windows의 java는 시스템 코드
+/// 페이지(한국어 949)로 읽는다. 그러면 테스트마다가 아니라 "Gradle Test Executor N"의 실패 하나로 온다.
+pub fn gradle_path_problem(tool: Tool, dir: &Path, cases: &[Case]) -> bool {
+    cfg!(windows)
+        && tool == Tool::Gradle
+        && !dir.to_string_lossy().is_ascii()
+        && cases.iter().any(|c| {
+            c.outcome == Outcome::Failed
+                && c.message
+                    .as_deref()
+                    .is_some_and(|m| m.contains("Could not execute test class"))
+                && c.detail.contains("ClassNotFoundException")
+        })
+}
+
 /// pom.xml의 maven-surefire-plugin 설정에 박힌 `<skipTests>true</skipTests>`의 바이트 범위. egov 템플릿의
 /// 기본값이고, 설정에 직접 적은 값이라 명령 줄(`-DskipTests=false`)로는 켤 수 없다.
 pub fn pom_skips_tests(pom: &str) -> Option<std::ops::Range<usize>> {

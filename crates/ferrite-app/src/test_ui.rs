@@ -84,7 +84,15 @@ pub struct TestPanel {
     status: Option<(String, bool)>,
     /// 테스트를 건너뛰게 하는 pom.xml(egov 템플릿의 `skipTests=true`). [pom.xml에서 테스트 켜기]를 보인다.
     skipping: Option<PathBuf>,
+    /// Gradle이 경로의 한글 때문에 테스트 클래스를 찾지 못했다(Windows). 까닭과 해법을 보인다.
+    path_problem: bool,
 }
+
+pub(crate) const GRADLE_PATH_PROBLEM: &str = "Gradle이 테스트 클래스를 찾지 못했습니다. Windows에서 JDK 18 이상으로 \
+Gradle을 돌리면 프로젝트 경로에 한글 등 영문이 아닌 글자가 있을 때 이렇게 됩니다. Gradle은 테스트 JVM의 \
+클래스 경로를 파일에 UTF-8로 적어 넘기는데, Windows의 java는 그 파일을 시스템 코드 페이지로 읽습니다. \
+프로젝트를 영문 경로(예: C:\\work\\board)로 옮겨 돌리세요. 옮길 수 없으면 Gradle을 JDK 17로 돌려도 되지만\
+(JAVA_HOME), 그때는 빌드 파일에 소스 문자셋을 UTF-8로 적어야 한글이 깨지지 않습니다.";
 
 impl TestPanel {
     pub fn is_running(&self) -> bool {
@@ -166,6 +174,7 @@ impl TestPanel {
             wake.request_repaint();
         });
         self.skipping = None;
+        self.path_problem = false;
         self.output = format!("> {line}\n");
         self.view = View::Output;
         self.status = Some((format!("실행 중: {}", config.name), false));
@@ -276,6 +285,9 @@ impl TestPanel {
             self.cases = found;
             self.selected = self.cases.iter().position(|c| c.outcome == Outcome::Failed);
         }
+        self.path_problem = self.last.as_ref().is_some_and(|(_, tool, dir)| {
+            test_report::gradle_path_problem(*tool, dir, &self.cases)
+        });
         let count = |o| self.cases.iter().filter(|c| c.outcome == o).count();
         let (passed, failed, skipped) = (
             count(Outcome::Passed),
@@ -414,6 +426,9 @@ impl TestPanel {
                 ui.visuals().weak_text_color()
             };
             ui.colored_label(color, text);
+        }
+        if self.path_problem {
+            ui.colored_label(ui.visuals().warn_fg_color, GRADLE_PATH_PROBLEM);
         }
         if let Some(pom) = self.skipping.clone()
             && ui
@@ -608,6 +623,7 @@ impl TestPanel {
     pub fn show_results(&mut self, config: RunConfig, dir: PathBuf, cases: Vec<Case>) {
         let tool = Tool::of(&config.command).expect("테스트 명령");
         self.selected = cases.iter().position(|c| c.outcome == Outcome::Failed);
+        self.path_problem = test_report::gradle_path_problem(tool, &dir, &cases);
         self.cases = cases;
         self.last = Some((config, tool, dir));
     }
