@@ -2,7 +2,7 @@
 //! 로컬에 없으면(`rustup component add rust-analyzer`) 건너뛴다. CI에서는 없으면 실패한다.
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use ferrite_lsp::client::{
@@ -59,6 +59,22 @@ fn temp_project(name: &str) -> PathBuf {
     .unwrap();
     // 표준 경로로 맞춰야 서버가 돌려준 경로와 비교할 수 있다(macOS /var → /private/var 등).
     fs::canonicalize(&dir).map(dunce_like).unwrap()
+}
+
+/// 시험 폴더를 지운다. 서버는 내린 뒤에도 잠시(정상 종료 유예 2초, 그 뒤 강제 종료) 살아 그 폴더를 작업
+/// 폴더로 쥐고 `cargo check` 결과(`target`)를 쓴다. 바로 지우면 Windows에서 실패해 폴더가 남으므로, 다
+/// 지워질 때까지 다시 시도한다(최대 15초).
+fn remove(dir: &Path) {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while dir.exists() && Instant::now() < deadline {
+        let _ = std::fs::remove_dir_all(dir);
+        if dir.exists() {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+    if dir.exists() {
+        eprintln!("시험 폴더를 지우지 못했습니다: {}", dir.display());
+    }
 }
 
 /// Windows canonicalize의 `\\?\` 접두사를 뗀다(앱의 real_path와 같은 규칙).
@@ -124,7 +140,7 @@ fn rust_analyzer가_문법_오류를_진단으로_보낸다() {
         "둘째 줄의 문법 오류가 있어야 한다: {diagnostics:#?}"
     );
     drop(server);
-    let _ = fs::remove_dir_all(&root);
+    remove(&root);
 }
 
 /// 요청 하나의 응답을 기다린다(다른 이벤트는 버린다). 오류 응답이면 Err.
@@ -244,7 +260,7 @@ fn rust_analyzer로_자동완성_호버_정의를_받는다() {
     assert_eq!(targets[0].range.start.line, 5);
 
     drop(server);
-    let _ = fs::remove_dir_all(&root);
+    remove(&root);
 }
 
 /// 겹치지 않는 편집들을 뒤에서부터 적용한다(앞 위치가 바뀌지 않게).
@@ -343,5 +359,5 @@ fn rust_analyzer로_이름_바꾸기_포맷_코드_액션을_받는다() {
     }
 
     drop(server);
-    let _ = fs::remove_dir_all(&root);
+    remove(&root);
 }
