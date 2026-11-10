@@ -1552,7 +1552,7 @@
       - PMD: 정적 분석 탭에서 `target/pmd.sarif.json`을 불러오면 "PMD · 오류 0 · 경고 2 · 참고 1", 파일별 목록, 3·6·11~12줄 물결선, 상태 표시줄 "경고 2"가 보인다.
       - Semgrep: `reports/semgrep.sarif`를 불러오면 "Semgrep OSS · 오류 1 · 경고 0 · 참고 1", 한글 메시지, 물결선이 보이고, 결과를 눌러 10줄 20열로 간다.
       - 확인 뒤 설정 폴더와 예제 프로젝트, Semgrep을 설치한 venv를 지웠다. PMD jar는 Maven 로컬 저장소에 남는다.
-  - 확인하지 못한 것: egov 표준 점검 규칙(PMD 규칙 묶음)으로 돌린 결과. clang 정적 분석기의 SARIF는 백로그 "clang 실제 SARIF"(2026-11-09)에서 했다.
+  - 확인하지 못한 것: egov 표준 점검 규칙(PMD 규칙 묶음)으로 돌린 결과(뒤에 백로그 "egov 표준 점검 룰셋"(2026-11-10)에서 했다). clang 정적 분석기의 SARIF는 백로그 "clang 실제 SARIF"(2026-11-09)에서 했다.
 
 - [x] JSP 화면 스크립트 줄 맞추기(2026-11-06) — 중간
   - JSP 파일에 바로 중단점을 걸고, 멈춘 자리도 JSP의 줄로 보인다. 전에는 디버그 창의 "화면 스크립트"에서 브라우저가 받은 화면을 읽기 전용으로 열어 걸어야 했다.
@@ -1809,6 +1809,26 @@
     - 단위: JDK 8의 javac(`JAVA_HOME_8_X64`, GitHub 러너에 있다)로 사이드카를 컴파일한다. 고치기 전 코드에서는 같은 "directory not found"로 실패하는 것을 보았다. CI의 Linux·Windows에서는 그 변수가 없으면 실패하고, macOS는 건너뛴다.
     - 로컬 Windows: 기본 Java가 JDK 8일 때 사이드카 폴더를 비우고 `ferrite-db`의 JDBC 시험을 돌리면 javac 8로 새로 컴파일하고(클래스 판 52) Java 8로 띄워 드라이버의 연결 오류를 받는다. JDK 21로도 통과한다.
   - 확인하지 못한 것: 실제 앱 화면으로는 보지 않았다(시험이 앱과 같은 `Session::try_open`을 부른다). 실제 Oracle·Tibero·CUBRID 서버에 JDK 8로 붙는 것은 보지 않았다.
+- [x] egov 표준 점검 룰셋(2026-11-10) — 작음
+  - 까닭: 위 "PMD·Semgrep 실제 SARIF"는 PMD 기본 규칙으로만 돌렸다. egov 프로젝트는 표준 점검 룰셋(44개 규칙, SW 보안약점 항목 포함)으로 점검한다.
+  - 룰셋 구하기
+    - 공식 문서(GitHub `eGovFramework/egovframe-docs`의 코드 점검 문서)는 개발환경 판마다 압축 파일을 egovframe.go.kr 위키에 둔다. 그 위키는 자동 요청에 HTTP 400을 돌려줘 받지 못했다.
+    - 사용자 허락을 받아, 개발환경 4.3을 옮겨 둔 GitHub 저장소(Apache-2.0)의 `EgovInspectionRules_kor-4.3.xml`(약 59KB)을 확인에만 썼다. 저장소에는 넣지 않았다.
+    - 규칙 이름 44개가 공식 문서의 표와 맞다(문서의 `ConstantsInterface`는 `ConstantsInInterface`의 오타). `EmptyCatchBlock`은 두 번 적혀 있다. DOCTYPE·ENTITY는 없다.
+  - 찾기(로컬 Windows, JDK 21, maven-pmd-plugin 3.28.0, PMD 7.17.0, 한글·빈칸 경로)
+    - 명령 줄 `-Dpmd.rulesets=…`는 먹지 않는다(플러그인 기본 규칙으로 돌았다). pom의 maven-pmd-plugin 설정 `<rulesets>`에 적어야 한다. 그러면 PMD가 "The rule with name EmptyCatchBlock is duplicated"를 경고한다.
+    - 메시지는 룰셋의 한글로 온다(`UnnecessaryImport`만 PMD가 정한 영어 메시지). 우선순위 1·2는 error, 3은 warning, 4는 note.
+    - 룰셋이 옮겨 적은 규칙의 설명 주소는 `${pmd.website.baseurl}/pmd_rules_java_….html#…`로 풀리지 않은 채 SARIF에 온다. PMD 자기 규칙은 `https://docs.pmd-code.org/pmd-doc-7.17.0/…`로 푼다.
+    - 44개 중 19개가 XPath 규칙이다. 19개를 모두 걸리게 한 예제로 돌리면 5개가 아무것도 잡지 못한다: `EmptyCatchBlock`, `AvoidCatchingGenericException`, `AvoidThrowingRawExceptionTypes`, `ConstantsInInterface`, `FinalFieldCouldBeStatic`. 앞의 둘은 SW 보안약점 항목(빈 catch 문, 부적절한 예외 처리)이다.
+    - 까닭: 그 XPath가 PMD 7 정식판에서 이름이 바뀐 노드(`VariableDeclaratorId`→`VariableId`, `ClassOrInterfaceType`→`ClassType`, `ClassOrInterfaceDeclaration`·`ClassOrInterfaceBody`)를 쓴다. PMD는 없는 노드 이름에 오류를 내지 않는다(PMD 7.17 jar의 노드 클래스 143개와 대조했다).
+    - 같은 다섯 규칙을 PMD 7 기본 규칙(`category/java/…`)으로 가리키면 같은 예제에서 모두 잡힌다.
+  - 고침
+    - SARIF를 읽을 때 규칙 설명 주소의 `${pmd.website.baseurl}`를 PMD처럼 `https://docs.pmd-code.org/pmd-doc-<판>`으로 푼다(판을 모르면 `latest`).
+    - 정적 분석 탭의 안내에 egov 룰셋을 pom `<rulesets>`에 적는 것과 4.3 룰셋은 PMD 7에서 5개 규칙이 걸리지 않는 것을 적었다.
+  - 검증
+    - 단위: 실제 결과(줄인 것)로 한글 메시지·수준·풀린 설명 주소, 판이 없을 때 `latest`
+    - 실제 앱(Windows, 릴리스 빌드): egov 룰셋으로 낸 `target/pmd.sarif.json`을 정적 분석 탭에서 불러오면 "PMD · 오류 5 · 경고 15 · 참고 1"과 한글 메시지, 편집기의 물결선이 보이고, 결과에 마우스를 올리면 `https://docs.pmd-code.org/pmd-doc-7.17.0/pmd_rules_java_bestpractices.html#systemprintln`이 보인다. 안내 줄도 화면으로 보았다. 확인 뒤 설정 폴더를 지웠다.
+  - 확인하지 못한 것: 영문판 룰셋, 4.2 이하 룰셋, PMD 6(maven-pmd-plugin 3.21 이하)으로 돌린 결과. 4.3 룰셋은 PMD 7의 클래스 이름을 쓰므로 PMD 6에서는 읽히지 않을 것으로 본다. 룰셋을 PMD 7에 맞게 고쳐 Ferrite가 내주는 것은 하지 않았다(공식 룰셋을 고치는 일이라 따로 정한다).
 
 - 살폈지만 넣지 않은 것: 임베디드(MCU 플래시·시리얼 모니터·장비 설정 파일), 프레임워크별 지원(React·Vue·Angular 등, JS·TS 언어 서버로 기본은 된다), 린터 개별 연동(언어 서버나 저장 시 작업으로 된다), 원격 개발·컨테이너·SFTP 배포, 로컬 AI 완성 모델, 계정 기반 설정 동기화. egov 개발과 거리가 멀거나 크기에 비해 쓰임이 적다.
 
