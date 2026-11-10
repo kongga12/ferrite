@@ -155,3 +155,44 @@ fn 프로젝트의_sarif_파일을_찾는다() {
     );
     std::fs::remove_dir_all(&root).unwrap();
 }
+
+/// PMD 7.17.0(maven-pmd-plugin 3.28.0)이 egov 표준 점검 룰셋(4.3, 한글판)으로 낸 것에서 규칙 설명을 줄이고
+/// 파일 주소를 상대 경로로 바꿨다. 룰셋이 옮겨 적은 규칙의 설명 주소는 `${pmd.website.baseurl}`가 그대로 남는다.
+const PMD_EGOV: &str = r#"{
+  "version": "2.1.0",
+  "runs": [{
+    "tool": {"driver": {"name": "PMD", "version": "7.17.0", "rules": [
+      {"id": "SystemPrintln", "shortDescription": {"text": "System.out.print 가 사용됨"}, "helpUri": "${pmd.website.baseurl}/pmd_rules_java_bestpractices.html#systemprintln", "properties": {"ruleset": "pmd-eclipse", "priority": 2}}
+    ]}},
+    "results": [
+      {"ruleId": "SystemPrintln", "ruleIndex": 0, "message": {"text": "System.out.print 가 사용됨"}, "level": "error", "locations": [{"physicalLocation": {"artifactLocation": {"uri": "src/main/java/com/example/board/Board.java"}, "region": {"startLine": 20, "startColumn": 9, "endLine": 20, "endColumn": 47}}}]}
+    ]
+  }]
+}"#;
+
+#[test]
+fn pmd가_풀지_않은_규칙_설명_주소를_판의_문서_주소로_푼다() {
+    let root = temp_root("pmd-egov");
+    let findings = parse(PMD_EGOV, &root, &root).unwrap();
+    let println = &findings[0];
+    assert_eq!(
+        (println.message.as_str(), println.level),
+        ("System.out.print 가 사용됨", Level::Error)
+    );
+    assert_eq!(
+        println.help.as_deref(),
+        Some(
+            "https://docs.pmd-code.org/pmd-doc-7.17.0/pmd_rules_java_bestpractices.html#systemprintln"
+        ),
+        "PMD가 자기 규칙에 쓰는 꼴"
+    );
+    assert_eq!(
+        help_uri(
+            "${pmd.website.baseurl}/pmd_rules_java_errorprone.html",
+            None
+        ),
+        "https://docs.pmd-code.org/latest/pmd_rules_java_errorprone.html",
+        "판을 모르면 최신 문서"
+    );
+    std::fs::remove_dir_all(&root).unwrap();
+}

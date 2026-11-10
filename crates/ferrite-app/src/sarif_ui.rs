@@ -6,12 +6,46 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
 use eframe::egui;
+use ferrite_core::egov_pmd::{self, PomEdit};
 use ferrite_core::sarif::{self, Finding, Level};
 use ferrite_lsp::problem::{Problem, Severity};
 use ropey::Rope;
 
 /// 읽은 파일이 바뀌었는지 보는 간격.
 const CHECK_EVERY: Duration = Duration::from_secs(1);
+
+/// egov 룰셋 파일을 프로젝트 루트에 쓰고(있으면 사용자가 고쳤을 수 있어 둔다) pom.xml에 그 룰셋을 더한다.
+fn add_egov_ruleset(root: &Path) -> Result<String, String> {
+    let file = root.join(egov_pmd::FILE);
+    let kept = file.exists();
+    if !kept {
+        std::fs::write(&file, egov_pmd::RULESET)
+            .map_err(|e| format!("{}에 쓰지 못했습니다: {e}", file.display()))?;
+    }
+    let wrote = if kept {
+        format!("있는 {}은 그대로 두었습니다.", egov_pmd::FILE)
+    } else {
+        format!("{}을 넣었습니다.", egov_pmd::FILE)
+    };
+    let pom = root.join("pom.xml");
+    let text = std::fs::read(&pom)
+        .map_err(|e| format!("{wrote} pom.xml을 읽지 못했습니다: {e}"))
+        .and_then(|bytes| {
+            String::from_utf8(bytes)
+                .map_err(|_| format!("{wrote} pom.xml이 UTF-8이 아니어서 고치지 않았습니다."))
+        })?;
+    let pom_done = match egov_pmd::add_to_pom(&text).map_err(|e| format!("{wrote} {e}"))? {
+        PomEdit::Changed(changed) => {
+            std::fs::write(&pom, changed)
+                .map_err(|e| format!("{wrote} pom.xml에 쓰지 못했습니다: {e}"))?;
+            "pom.xml에 룰셋을 적었습니다."
+        }
+        PomEdit::Already => "pom.xml은 이미 이 룰셋을 씁니다.",
+    };
+    Ok(format!(
+        "egov 룰셋: {wrote} {pom_done} PMD를 돌린 뒤 SARIF를 불러오세요."
+    ))
+}
 
 /// 앱이 할 일.
 pub enum SarifAction {
@@ -166,6 +200,21 @@ impl SarifPanel {
                 self.status = None;
                 self.generation += 1;
             }
+            if root.join("pom.xml").is_file()
+                && ui
+                    .button("egov 룰셋 넣기")
+                    .on_hover_text(format!(
+                        "PMD 7용 egov 표준 점검 룰셋(44개 규칙)을 {}로 쓰고, pom.xml의 \
+                         maven-pmd-plugin 설정에 <rulesets>를 더합니다.",
+                        egov_pmd::FILE
+                    ))
+                    .clicked()
+            {
+                self.status = Some(match add_egov_ruleset(root) {
+                    Ok(text) => (text, false),
+                    Err(e) => (e, true),
+                });
+            }
         });
         if let Some((text, bad)) = &self.status {
             let color = if *bad {
@@ -181,6 +230,8 @@ impl SarifPanel {
             for example in [
                 "SpotBugs: mvn compile com.github.spotbugs:spotbugs-maven-plugin:spotbugs -Dspotbugs.sarifOutput=true",
                 "PMD: mvn compile pmd:pmd -Dformat=net.sourceforge.pmd.renderers.SarifRenderer (target/pmd.sarif.json)",
+                "egov 표준 점검: [egov 룰셋 넣기]로 PMD 7용 룰셋과 pom 설정을 넣은 뒤 위 PMD 명령을 돌립니다. \
+                 공식 4.3 룰셋은 PMD 7에서 EmptyCatchBlock 등 5개 규칙이 걸리지 않습니다.",
                 "Semgrep: semgrep scan --sarif --output semgrep.sarif (규칙에 한글이 있으면 Windows에서는 PYTHONUTF8=1)",
                 "clang: clang --analyze --analyzer-output sarif -o clang.sarif 파일.c",
             ] {

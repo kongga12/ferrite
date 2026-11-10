@@ -801,6 +801,67 @@ fn pmd가_낸_sarif를_읽고_원본_파일을_찾는다() {
 }
 
 #[test]
+#[ignore = "Maven으로 PMD(maven-pmd-plugin 3.28.0, PMD 7.17.0)를 받아 돌린다. Java 17 이상과 mvn이 필요하다"]
+fn egov_룰셋의_44개_규칙이_모두_잡힌다() {
+    use ferrite_core::egov_pmd::{self, PomEdit};
+    use ferrite_core::sarif;
+
+    if !require("mvn -v") {
+        return;
+    }
+    let (root, _) = analyzed_project("egov-pmd");
+    // 규칙마다 걸리게 만든 예제(공식 4.3 룰셋은 이 중 다섯 규칙을 잡지 못한다).
+    let java = root.join("src/main/java/com/example/board");
+    for (name, text) in [
+        ("Board.java", include_str!("egov_pmd/Board.java")),
+        ("Extra.java", include_str!("egov_pmd/Extra.java")),
+        ("Sample.java", include_str!("egov_pmd/Sample.java")),
+        ("Page.java", include_str!("egov_pmd/Page.java")),
+    ] {
+        std::fs::write(java.join(name), text).unwrap();
+    }
+    // [egov 룰셋 넣기]와 같다: 룰셋 파일을 쓰고 pom에 적는다.
+    std::fs::write(root.join(egov_pmd::FILE), egov_pmd::RULESET).unwrap();
+    let PomEdit::Changed(pom) = egov_pmd::add_to_pom(JAVA17_POM).unwrap() else {
+        panic!("pom을 고치지 않음");
+    };
+    std::fs::write(root.join("pom.xml"), pom).unwrap();
+    let (ok, _) = run(
+        &root,
+        "mvn -B -q compile pmd:pmd -Dformat=net.sourceforge.pmd.renderers.SarifRenderer",
+    );
+    assert!(ok, "PMD 분석");
+    let target = root.join("target");
+    let text = std::fs::read_to_string(target.join("pmd.sarif.json")).unwrap();
+    let findings = sarif::parse(&text, &root, &target).unwrap();
+    let fired: std::collections::BTreeSet<&str> =
+        findings.iter().map(|f| f.rule.as_str()).collect();
+    let rules: std::collections::BTreeSet<&str> = egov_pmd::RULESET
+        .split("category/java/")
+        .skip(1)
+        .map(|s| s.split(['/', '"']).nth(1).unwrap())
+        .collect();
+    assert_eq!(rules.len(), 44);
+    assert_eq!(fired, rules, "44개 규칙이 모두 잡히고 다른 규칙은 없다");
+    let empty_catch = findings
+        .iter()
+        .find(|f| f.rule == "EmptyCatchBlock")
+        .unwrap();
+    // PMD는 실제 경로로 적는다(macOS `/private/var`, Windows 긴 사용자 폴더 이름). 끝부분만 견준다.
+    let path = empty_catch.path.as_deref().expect("프로젝트의 파일");
+    assert!(
+        path.ends_with("src/main/java/com/example/board/Board.java"),
+        "{}",
+        path.display()
+    );
+    assert_eq!(
+        (empty_catch.line, empty_catch.message.as_str()),
+        (14, "내용이 없는 Catch Block이 존재, 오류 상황 대응 부재")
+    );
+    let _ = std::fs::remove_dir_all(root.parent().unwrap());
+}
+
+#[test]
 #[ignore = "Semgrep이 필요하다(pip install semgrep)"]
 fn semgrep이_낸_sarif를_읽고_원본_파일을_찾는다() {
     use ferrite_core::sarif::{self, Level};

@@ -7908,6 +7908,51 @@ Caused by: java.lang.ClassNotFoundException: com.example.board.CalcTest
     }
 
     #[test]
+    fn egov_룰셋_넣기는_룰셋_파일을_쓰고_pom의_pmd_플러그인에_적는다() {
+        let dir =
+            std::env::temp_dir().join(format!("ferrite-egov-pmd-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        // egov 템플릿처럼 설정 없는 maven-pmd-plugin.
+        let pom = "<project>\n\t<build>\n\t\t<plugins>\n\t\t\t<plugin>\n\t\t\t\t<artifactId>maven-pmd-plugin</artifactId>\n\t\t\t</plugin>\n\t\t</plugins>\n\t</build>\n</project>\n";
+        fs::write(dir.join("pom.xml"), pom).unwrap();
+
+        let mut harness = harness_builder()
+            .with_size(egui::vec2(1200.0, 1000.0))
+            .build_eframe(|cc| FerriteApp::new(cc, Some(dir.clone())));
+        {
+            let app = harness.state_mut();
+            app.problems_view = ProblemsView::Sarif;
+            dock::show(&mut app.layout, Pane::Problems);
+        }
+        harness.run_ok();
+        harness.get_by_label("egov 룰셋 넣기").click();
+        harness.run_ok();
+        harness.get_by_label(
+            "egov 룰셋: egov-inspection-rules.xml을 넣었습니다. pom.xml에 룰셋을 적었습니다. \
+             PMD를 돌린 뒤 SARIF를 불러오세요.",
+        );
+        assert_eq!(
+            fs::read_to_string(dir.join("egov-inspection-rules.xml")).unwrap(),
+            ferrite_core::egov_pmd::RULESET
+        );
+        assert!(
+            fs::read_to_string(dir.join("pom.xml"))
+                .unwrap()
+                .contains("<ruleset>${basedir}/egov-inspection-rules.xml</ruleset>")
+        );
+        // 다시 누르면 고치지 않는다.
+        harness.get_by_label("egov 룰셋 넣기").click();
+        harness.run_ok();
+        harness.get_by_label(
+            "egov 룰셋: 있는 egov-inspection-rules.xml은 그대로 두었습니다. pom.xml은 이미 이 \
+             룰셋을 씁니다. PMD를 돌린 뒤 SARIF를 불러오세요.",
+        );
+        drop(harness);
+        remove_project(&dir);
+    }
+
+    #[test]
     fn 취약점_오프라인_db로_의존성을_검사해_줄로_가고_물결선을_보인다() {
         use std::io::Write;
 

@@ -1552,7 +1552,7 @@
       - PMD: 정적 분석 탭에서 `target/pmd.sarif.json`을 불러오면 "PMD · 오류 0 · 경고 2 · 참고 1", 파일별 목록, 3·6·11~12줄 물결선, 상태 표시줄 "경고 2"가 보인다.
       - Semgrep: `reports/semgrep.sarif`를 불러오면 "Semgrep OSS · 오류 1 · 경고 0 · 참고 1", 한글 메시지, 물결선이 보이고, 결과를 눌러 10줄 20열로 간다.
       - 확인 뒤 설정 폴더와 예제 프로젝트, Semgrep을 설치한 venv를 지웠다. PMD jar는 Maven 로컬 저장소에 남는다.
-  - 확인하지 못한 것: egov 표준 점검 규칙(PMD 규칙 묶음)으로 돌린 결과. clang 정적 분석기의 SARIF는 백로그 "clang 실제 SARIF"(2026-11-09)에서 했다.
+  - 확인하지 못한 것: egov 표준 점검 규칙(PMD 규칙 묶음)으로 돌린 결과(뒤에 백로그 "egov 표준 점검 룰셋"(2026-11-10)에서 했다). clang 정적 분석기의 SARIF는 백로그 "clang 실제 SARIF"(2026-11-09)에서 했다.
 
 - [x] JSP 화면 스크립트 줄 맞추기(2026-11-06) — 중간
   - JSP 파일에 바로 중단점을 걸고, 멈춘 자리도 JSP의 줄로 보인다. 전에는 디버그 창의 "화면 스크립트"에서 브라우저가 받은 화면을 읽기 전용으로 열어 걸어야 했다.
@@ -1809,6 +1809,45 @@
     - 단위: JDK 8의 javac(`JAVA_HOME_8_X64`, GitHub 러너에 있다)로 사이드카를 컴파일한다. 고치기 전 코드에서는 같은 "directory not found"로 실패하는 것을 보았다. CI의 Linux·Windows에서는 그 변수가 없으면 실패하고, macOS는 건너뛴다.
     - 로컬 Windows: 기본 Java가 JDK 8일 때 사이드카 폴더를 비우고 `ferrite-db`의 JDBC 시험을 돌리면 javac 8로 새로 컴파일하고(클래스 판 52) Java 8로 띄워 드라이버의 연결 오류를 받는다. JDK 21로도 통과한다.
   - 확인하지 못한 것: 실제 앱 화면으로는 보지 않았다(시험이 앱과 같은 `Session::try_open`을 부른다). 실제 Oracle·Tibero·CUBRID 서버에 JDK 8로 붙는 것은 보지 않았다.
+- [x] egov 표준 점검 룰셋(2026-11-10) — 작음
+  - 까닭: 위 "PMD·Semgrep 실제 SARIF"는 PMD 기본 규칙으로만 돌렸다. egov 프로젝트는 표준 점검 룰셋(44개 규칙, SW 보안약점 항목 포함)으로 점검한다.
+  - 룰셋 구하기
+    - 공식 문서(GitHub `eGovFramework/egovframe-docs`의 코드 점검 문서)는 개발환경 판마다 압축 파일을 egovframe.go.kr 위키에 둔다. 그 위키는 자동 요청에 HTTP 400을 돌려줘 받지 못했다.
+    - 사용자 허락을 받아, 개발환경 4.3을 옮겨 둔 GitHub 저장소(Apache-2.0)의 `EgovInspectionRules_kor-4.3.xml`(약 59KB)을 확인에만 썼다. 저장소에는 넣지 않았다.
+    - 규칙 이름 44개가 공식 문서의 표와 맞다(문서의 `ConstantsInterface`는 `ConstantsInInterface`의 오타). `EmptyCatchBlock`은 두 번 적혀 있다. DOCTYPE·ENTITY는 없다.
+  - 찾기(로컬 Windows, JDK 21, maven-pmd-plugin 3.28.0, PMD 7.17.0, 한글·빈칸 경로)
+    - 명령 줄 `-Dpmd.rulesets=…`는 먹지 않는다(플러그인 기본 규칙으로 돌았다). pom의 maven-pmd-plugin 설정 `<rulesets>`에 적어야 한다. 그러면 PMD가 "The rule with name EmptyCatchBlock is duplicated"를 경고한다.
+    - 메시지는 룰셋의 한글로 온다(`UnnecessaryImport`만 PMD가 정한 영어 메시지). 우선순위 1·2는 error, 3은 warning, 4는 note.
+    - 룰셋이 옮겨 적은 규칙의 설명 주소는 `${pmd.website.baseurl}/pmd_rules_java_….html#…`로 풀리지 않은 채 SARIF에 온다. PMD 자기 규칙은 `https://docs.pmd-code.org/pmd-doc-7.17.0/…`로 푼다.
+    - 44개 중 19개가 XPath 규칙이다. 19개를 모두 걸리게 한 예제로 돌리면 5개가 아무것도 잡지 못한다: `EmptyCatchBlock`, `AvoidCatchingGenericException`, `AvoidThrowingRawExceptionTypes`, `ConstantsInInterface`, `FinalFieldCouldBeStatic`. 앞의 둘은 SW 보안약점 항목(빈 catch 문, 부적절한 예외 처리)이다.
+    - 까닭: 그 XPath가 PMD 7 정식판에서 이름이 바뀐 노드(`VariableDeclaratorId`→`VariableId`, `ClassOrInterfaceType`→`ClassType`, `ClassOrInterfaceDeclaration`·`ClassOrInterfaceBody`)를 쓴다. PMD는 없는 노드 이름에 오류를 내지 않는다(PMD 7.17 jar의 노드 클래스 143개와 대조했다).
+    - 같은 다섯 규칙을 PMD 7 기본 규칙(`category/java/…`)으로 가리키면 같은 예제에서 모두 잡힌다.
+  - 고침
+    - SARIF를 읽을 때 규칙 설명 주소의 `${pmd.website.baseurl}`를 PMD처럼 `https://docs.pmd-code.org/pmd-doc-<판>`으로 푼다(판을 모르면 `latest`).
+    - 정적 분석 탭의 안내에 egov 룰셋을 pom `<rulesets>`에 적는 것과 4.3 룰셋은 PMD 7에서 5개 규칙이 걸리지 않는 것을 적었다.
+  - 검증
+    - 단위: 실제 결과(줄인 것)로 한글 메시지·수준·풀린 설명 주소, 판이 없을 때 `latest`
+    - 실제 앱(Windows, 릴리스 빌드): egov 룰셋으로 낸 `target/pmd.sarif.json`을 정적 분석 탭에서 불러오면 "PMD · 오류 5 · 경고 15 · 참고 1"과 한글 메시지, 편집기의 물결선이 보이고, 결과에 마우스를 올리면 `https://docs.pmd-code.org/pmd-doc-7.17.0/pmd_rules_java_bestpractices.html#systemprintln`이 보인다. 안내 줄도 화면으로 보았다. 확인 뒤 설정 폴더를 지웠다.
+  - 확인하지 못한 것: 영문판 룰셋, 4.2 이하 룰셋, PMD 6(maven-pmd-plugin 3.21 이하)으로 돌린 결과. 4.3 룰셋은 PMD 7의 클래스 이름을 쓰므로 PMD 6에서는 읽히지 않을 것으로 본다. 룰셋을 PMD 7에 맞게 고쳐 Ferrite가 내주는 것은 하지 않았다(공식 룰셋을 고치는 일이라 따로 정한다. 뒤에 백로그 "PMD 7용 egov 룰셋 넣기"(2026-11-10)에서 했다).
+- [x] PMD 7용 egov 룰셋 넣기(2026-11-10) — 작음
+  - 까닭: 위 "egov 표준 점검 룰셋"에서 공식 4.3 룰셋은 PMD 7에서 5개 규칙(빈 catch 문 등 SW 보안약점 둘 포함)이 아무것도 잡지 못했다. egov 프로젝트가 PMD 7로 44개 규칙을 다 쓰게 한다.
+  - 정한 것(사용자와): 룰셋 파일과 pom 설정을 함께 넣는다. 메시지는 공식 문서(egovframe-docs 코드 점검) 표의 한글 설명을 쓴다.
+  - 룰셋(`crates/ferrite-core/src/egov_pmd/egov-inspection-rules.xml`)
+    - 44개 규칙을 PMD 7 기본 규칙(`category/java/…`)으로 가리킨다. 44개 모두 PMD 7.17에 있다. `SwitchStmtsShouldHaveDefault`는 PMD 7에서 이름이 `NonExhaustiveSwitch`로 바뀌어 그것을 가리킨다.
+    - 우선순위는 공식 4.3 룰셋과 같다. 규칙의 세부 설정은 PMD 기본값이다.
+    - 공식 문서 표, 4.3 룰셋의 우선순위, PMD jar의 범주로 만들었다(문서의 `ConstantsInterface`는 `ConstantsInInterface`의 오타).
+    - 규칙 몇 개(`UnnecessaryImport`·`UselessParentheses`·`EmptyControlStatement`·`BrokenNullCheck`)는 PMD가 메시지를 직접 정해 룰셋의 메시지 대신 영어로 온다(공식 룰셋도 같다).
+  - [egov 룰셋 넣기](문제 창 > 정적 분석, 프로젝트 루트에 pom.xml이 있을 때)
+    - 루트에 `egov-inspection-rules.xml`을 쓴다. 이미 있으면 사용자가 고쳤을 수 있어 그대로 둔다.
+    - pom.xml의 maven-pmd-plugin 설정에 `<rulesets><ruleset>${basedir}/egov-inspection-rules.xml</ruleset></rulesets>`를 더한다. egov 5.0.7 웹·심플 템플릿은 판·설정 없는 maven-pmd-plugin이 이미 있어 그 플러그인에 `<configuration>`을 넣는다. 설정이 있으면 그 안에, 플러그인이 없으면 `<build><plugins>`에(판 3.28.0), build가 없으면 build째 넣는다.
+    - pom의 들여쓰기 단위(탭·빈칸)와 줄 끝(CRLF·LF)을 따른다.
+    - 이미 이 룰셋을 쓰면 고치지 않는다. 다른 룰셋(`<rulesets>`)이 있거나 여러 모듈을 묶는 pom(`<modules>`, `${basedir}`가 모듈마다 달라진다)이면 고치지 않고 직접 적을 것을 알린다.
+  - 검증
+    - 단위: egov 템플릿 꼴(탭, CRLF, 설정 없는 플러그인), 빈칸 네 칸과 여러 줄 project 속성, build 없음, 설정 있음, 한 줄 태그, 다른 룰셋·여러 모듈·깨진 pom, 룰셋 44개 규칙(PMD 기본 규칙, 한글 메시지, 우선순위)
+    - 창 시험(kittest): [egov 룰셋 넣기]가 룰셋 파일을 쓰고 pom에 적고, 다시 누르면 고치지 않는다.
+    - 실제 PMD(`--ignored`, 3개 OS CI): 규칙마다 걸리게 만든 예제(`crates/ferrite-core/tests/egov_pmd/`)를 이 룰셋으로 돌리면 44개 규칙이 모두 잡히고 다른 규칙은 없다. 빈 catch 문은 한글 메시지로 그 줄에 온다. 예제를 만들다 알게 된 것: PMD 7의 `UnusedFormalParameter`는 이름이 `unused`·`ignored`로 시작하는 매개변수를 건너뛴다.
+    - 실제 앱(Windows, 릴리스 빌드, `egov 게시판` 폴더, egov 템플릿 꼴의 탭·CRLF pom): [egov 룰셋 넣기] → 상태 줄의 알림과 트리의 `egov-inspection-rules.xml`, pom에는 탭·CRLF 그대로 `<configuration><rulesets>`가 들어갔다. 안내의 PMD 명령을 돌리고 불러오면 "PMD · 오류 11 · 경고 35 · 참고 2", 공식 룰셋으로는 빠졌던 14줄 `EmptyCatchBlock`·24줄 `AvoidCatchingGenericException`이 한글 메시지와 물결선으로 보였다. 확인 뒤 예제 프로젝트와 설정 폴더를 지웠다.
+  - 확인하지 못한 것: 판이 적히지 않은 maven-pmd-plugin(egov 템플릿 그대로)은 Maven이 저장소의 최신 판을 고르므로 PMD 6으로 도는 옛 판이 골라질 일은 없다고 보지만 돌려 보지는 않았다(로컬 확인은 판을 적은 pom으로 했다). Gradle의 PMD 플러그인에는 넣지 않는다.
 - [x] 바쁜 기계에서 줄 비교가 파일 전체를 바꾼 것으로 나오던 흔들림(2026-11-10) — 작음
   - 까닭: PR #77의 CI 3개 OS 전체(실행 42780144000 첫 시도) macOS(러너 이미지 macos-26-arm64)에서 `git::diff_tests::줄_diff는_앞뒤_두_줄을_붙여_덩어리로_보인다`가 실패했다. 9줄과 10줄을 견주었는데 기대한 `" -+  ~  +"` 대신 `" --------+++++++++"`(첫 줄 뒤를 통째로 지우고 다시 넣음)가 나왔다.
   - 원인: `diff_lines`·`line_changes`가 크기와 상관없이 similar에 50ms 벽시계 제한을 걸었다. similar는 기한이 지나면 남은 부분을 통째 바꿈으로 근사한다. 시험이 많이 동시에 도는 러너에서 스레드가 50ms 넘게 밀려나면 몇 줄짜리 비교도 그렇게 끝난다. 앱에서도 기계가 바쁘면 거터의 변경 표시와 에이전트 diff 창이 파일 전체를 바꾼 것으로 보일 수 있었다.
