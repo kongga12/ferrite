@@ -1784,6 +1784,14 @@
     - 창 시험(kittest): 한글 경로 프로젝트에서 이 결과를 보이면 안내가 보인다(Windows에서만)
     - 실제 앱(Windows, 릴리스 빌드, JDK 21, `자바 게시판` 폴더): [실행 > 테스트]의 `gradle test` → "통과 0 · 실패 1" 아래에 안내가 주황색으로 줄 바꿔 보이는 것을 화면으로 확인했다. 확인 뒤 예제 프로젝트와 설정 폴더를 지웠다.
   - 확인하지 못한 것: Windows의 "Beta: 세계 언어 지원을 위해 Unicode UTF-8 사용"을 켜면 될 것으로 보지만 시스템 설정이라 바꾸지 않았다. Windows 사용자 이름이 한글이라 Gradle 홈(`~/.gradle`)이 한글 경로인 경우(모든 Gradle 테스트가 깨질 것으로 본다)는 이 안내의 조건(돌린 폴더 경로)에 걸리지 않는다. Maven(Surefire)은 같은 문제가 없는지 보지 않았다.
+- [x] JDK 8의 JDBC 사이드카 컴파일(2026-11-10) — 작음
+  - 까닭: 위 "Maven 다중 모듈 테스트"의 전체 시험을 로컬 기본 Java(JDK 8)로 돌리다 `ferrite-db`의 JDBC 시험이 "JDBC 사이드카를 컴파일하지 못했습니다: javac: directory not found: …\classes"로 실패했다. JDK 8만 있는 PC(egov 사용자에게 흔하다)에서는 Oracle·Tibero·CUBRID 연결이 모두 막힌다.
+  - 원인: 사이드카를 컴파일할 때 `-d` 출력 폴더를 만들지 않고 javac에 넘겼다. javac 9부터는 그 폴더를 스스로 만들지만 javac 8은 실패한다. `--release 8`을 모르는 javac 8을 위한 대체 실행(옵션 없이)도 같은 까닭으로 실패했다. CI와 그동안의 확인은 JDK 17·21로 돌아 드러나지 않았다.
+  - 고침: javac를 돌리기 전에 출력 폴더를 만든다.
+  - 검증
+    - 단위: JDK 8의 javac(`JAVA_HOME_8_X64`, GitHub 러너에 있다)로 사이드카를 컴파일한다. 고치기 전 코드에서는 같은 "directory not found"로 실패하는 것을 보았다. CI의 Linux·Windows에서는 그 변수가 없으면 실패하고, macOS는 건너뛴다.
+    - 로컬 Windows: 기본 Java가 JDK 8일 때 사이드카 폴더를 비우고 `ferrite-db`의 JDBC 시험을 돌리면 javac 8로 새로 컴파일하고(클래스 판 52) Java 8로 띄워 드라이버의 연결 오류를 받는다. JDK 21로도 통과한다.
+  - 확인하지 못한 것: 실제 앱 화면으로는 보지 않았다(시험이 앱과 같은 `Session::try_open`을 부른다). 실제 Oracle·Tibero·CUBRID 서버에 JDK 8로 붙는 것은 보지 않았다.
 
 - 살폈지만 넣지 않은 것: 임베디드(MCU 플래시·시리얼 모니터·장비 설정 파일), 프레임워크별 지원(React·Vue·Angular 등, JS·TS 언어 서버로 기본은 된다), 린터 개별 연동(언어 서버나 저장 시 작업으로 된다), 원격 개발·컨테이너·SFTP 배포, 로컬 AI 완성 모델, 계정 기반 설정 동기화. egov 개발과 거리가 멀거나 크기에 비해 쓰임이 적다.
 
