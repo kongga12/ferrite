@@ -1766,7 +1766,7 @@
     - 실제 도구(`test_tools`, CI 3개 OS 전체 작업, 로컬 Windows 통과): Kotlin·Scala 하위 프로젝트를 루트에서 돌려 통과 2·실패 2, 실패 줄 `kt/src/test/kotlin/CalcTest.kt` 14줄과 `sc/src/test/scala/com/example/board/CalcSuite.scala` 12줄, 실패만 다시(둘 다), Scala 실패만 다시(`:kt:test`는 "No tests found"로 실패하지만 `:sc:test`가 돈다)
     - 실제 앱(Windows, 릴리스 빌드, Gradle 9.2.0, `kotlin board` 폴더): [실행 > 테스트]의 `gradle test` → "통과 2 · 실패 2" 트리(두 하위 프로젝트), `adds wrong numbers()`를 두 번 눌러 `kt/src/test/kotlin/CalcTest.kt` 14줄, `addsWrong()`로 `CalcSuite.scala` 12줄, [실패만 다시]의 출력 첫 줄이 `gradle test --tests "com.example.board.CalcTest.adds wrong numbers" --tests "com.example.board.CalcSuite.addsWrong" --continue`인 것을 화면으로 확인했다. 확인 뒤 예제 프로젝트와 설정 폴더를 지웠다. Kotlin·Scala 컴파일러와 의존성은 Gradle 캐시(`~/.gradle`, 약 220MB 늘어남)에 남는다.
   - 찾은 것(Ferrite 밖): Windows에서 프로젝트 경로에 한글이 있으면(`코틀린 게시판`, `코틀린게시판`) Gradle 테스트 실행기가 테스트 클래스를 찾지 못한다(`ClassNotFoundException`, 결과는 "Gradle Test Executor N"의 "failed to execute tests"). 명령 줄에서도 같고, 빈칸만 든 ASCII 경로(`kotlin board`)는 된다. 컴파일은 되고 테스트 JVM에서만 실패한다. 같은 증상을 한글 폴더 밖으로 옮겨 푼 사용자 글이 있다.
-  - 남은 것: Maven 다중 모듈도 기본으로 첫 실패에서 멈춘다(`-fae`가 없으면 뒤 모듈의 테스트가 돌지 않는다). 확인하지 않아 그대로 두었다. Scala의 ScalaTest·MUnit(자체 실행기)으로는 돌려 보지 않았다. 한글 경로의 Gradle 실패는 테스트 창이 까닭을 알리지 않는다(뒤에 백로그 "한글 경로의 Gradle 테스트"(2026-11-10)에서 했다).
+  - 남은 것: Maven 다중 모듈도 기본으로 첫 실패에서 멈춘다(`-fae`가 없으면 뒤 모듈의 테스트가 돌지 않는다). 확인하지 않아 그대로 두었다(뒤에 백로그 "Maven 다중 모듈 테스트"(2026-11-10)에서 했다). Scala의 ScalaTest·MUnit(자체 실행기)으로는 돌려 보지 않았다. 한글 경로의 Gradle 실패는 테스트 창이 까닭을 알리지 않는다(뒤에 백로그 "한글 경로의 Gradle 테스트"(2026-11-10)에서 했다).
 - [x] 한글 경로의 Gradle 테스트(2026-11-10) — 작음
   - 까닭: 위 "Kotlin·Scala 테스트 확인"에서 Windows의 한글 경로 프로젝트는 Gradle 테스트가 "Gradle Test Executor N"의 "failed to execute tests" 하나로만 끝났다(`ClassNotFoundException`). 한국어 사용자에게는 흔한 경로라 까닭을 찾았다.
   - 찾기(로컬 Windows, 코드 페이지 949, Gradle 9.2.0)
@@ -1783,7 +1783,24 @@
     - 단위: 실제 실패 보고서(줄인 스택)로 알아보기, ASCII 경로·Maven·보통 실패는 아님, Windows가 아니면 아님
     - 창 시험(kittest): 한글 경로 프로젝트에서 이 결과를 보이면 안내가 보인다(Windows에서만)
     - 실제 앱(Windows, 릴리스 빌드, JDK 21, `자바 게시판` 폴더): [실행 > 테스트]의 `gradle test` → "통과 0 · 실패 1" 아래에 안내가 주황색으로 줄 바꿔 보이는 것을 화면으로 확인했다. 확인 뒤 예제 프로젝트와 설정 폴더를 지웠다.
-  - 확인하지 못한 것: Windows의 "Beta: 세계 언어 지원을 위해 Unicode UTF-8 사용"을 켜면 될 것으로 보지만 시스템 설정이라 바꾸지 않았다. Windows 사용자 이름이 한글이라 Gradle 홈(`~/.gradle`)이 한글 경로인 경우(모든 Gradle 테스트가 깨질 것으로 본다)는 이 안내의 조건(돌린 폴더 경로)에 걸리지 않는다. Maven(Surefire)은 같은 문제가 없는지 보지 않았다.
+  - 확인하지 못한 것: Windows의 "Beta: 세계 언어 지원을 위해 Unicode UTF-8 사용"을 켜면 될 것으로 보지만 시스템 설정이라 바꾸지 않았다. Windows 사용자 이름이 한글이라 Gradle 홈(`~/.gradle`)이 한글 경로인 경우(모든 Gradle 테스트가 깨질 것으로 본다)는 이 안내의 조건(돌린 폴더 경로)에 걸리지 않는다. Maven(Surefire)은 같은 문제가 없는지 보지 않았다(뒤에 백로그 "Maven 다중 모듈 테스트"(2026-11-10)에서 보았다. 없다).
+- [x] Maven 다중 모듈 테스트(2026-11-10) — 작음
+  - 까닭: 위 "Kotlin·Scala 테스트 확인"에서 Gradle에는 `--continue`를 붙였지만 Maven은 확인하지 않아 그대로 두었다.
+  - 찾기(로컬 Windows, Maven 3.10.0, JDK 21, Surefire 3.5.4): 모듈 셋(common, common에 기대는 web, 상관없는 batch)에서 common과 batch의 테스트가 하나씩 실패할 때
+    - 옵션 없이: common만 돌고 web·batch는 건너뛴다(SKIPPED).
+    - `-fae`: batch는 돌지만 web은 실패한 common에 기대어 건너뛴다. Gradle은 web의 테스트가 common의 jar에만 기대므로 돈다.
+    - `-Dmaven.test.failure.ignore=true`: 셋 다 돈다. 테스트 실패로는 모듈을 실패시키지 않으므로 종료 코드는 0이다.
+    - common의 테스트 컴파일을 깨뜨리면 `maven.test.failure.ignore`만으로는 다시 web·batch를 건너뛰고, `-fae`를 함께 주면 batch는 돈다(web은 건너뜀).
+  - 고침
+    - 테스트 창의 Maven 명령에 `-fae`와 `-Dmaven.test.failure.ignore=true`를 붙인다. 명령에 이미 실패 방식(`-fae`·`-ff`·`-fn`과 긴 이름)이나 `maven.test.failure.ignore`가 있으면 그대로 둔다. [실패만 다시]도 같다.
+    - 그러면 Maven의 0이 아닌 종료 코드는 테스트 실패가 아니라 빌드 오류다. `-fae`로 다른 모듈의 결과가 보여도 컴파일이 깨진 모듈은 결과에 없으므로, 상태 줄에 "보고서에 없는 실패가 있습니다(빌드 오류 등, 출력을 보세요)"를 붙이고 빨갛게 보인다. 다른 도구(Gradle `--continue` 등)는 실패한 테스트가 없는데 종료 코드가 0이 아닐 때 붙인다. 멈춘 실행은 따로 알리므로 붙이지 않는다.
+  - 검증
+    - 단위: 명령에 붙이기와 사용자가 고른 실패 방식은 그대로, 종료 코드로 보고서에 없는 실패 알아보기
+    - 실제 Maven(`--ignored`): 위 모듈 셋에서 다섯 테스트를 다 읽고, 두 모듈의 실패 줄을 찾고, 실패만 다시 돌리면 두 모듈의 실패만 온다. 단일 모듈 시험은 이제 테스트가 실패해도 `mvn`이 성공하는 것을 본다.
+    - 한글 경로(`메이븐 게시판`, JDK 21): Surefire는 Gradle과 달리 테스트를 찾는다(보고서의 한글 메시지도 바르다).
+    - 실제 앱(Windows, 릴리스 빌드, JDK 21, `메이븐 게시판` 폴더의 모듈 셋): [실행 > 테스트]의 `mvn test` → 세 모듈의 결과(web 포함)가 "통과 3 · 실패 2 · 종료 코드 0"으로 보였다. common의 테스트 컴파일을 깨뜨리고 다시 돌리면 batch의 결과와 함께 "종료 코드 1 · 보고서에 없는 실패가 있습니다(빌드 오류 등, 출력을 보세요)"가 빨갛게 보였다. 확인 뒤 예제 프로젝트와 설정 폴더를 지웠다.
+  - 알게 된 것: 보고서는 파일 시각이 실행 시작보다 2초 앞까지 이번 것으로 친다(거친 파일 시스템). 실패만 다시 돌리면 걸러 낸 테스트가 없는 모듈은 보고서를 새로 쓰지 않으므로, 2초 안에 다시 돌리면 첫 실행의 보고서가 섞인다(같은 결과라 테스트 창에는 해가 없다). 시험은 3초 쉬고 다시 돌린다.
+  - 확인하지 못한 것: `mvn verify`에서 통합 테스트(Failsafe)도 실패로 멈추지 않는 것은 보지 않았다(같은 속성을 읽는다). pom이 surefire 설정에 `testFailureIgnore`를 false로 박아 두면 이 속성이 먹지 않아 `-fae`만 남는다.
 - [x] JDK 8의 JDBC 사이드카 컴파일(2026-11-10) — 작음
   - 까닭: 위 "Maven 다중 모듈 테스트"의 전체 시험을 로컬 기본 Java(JDK 8)로 돌리다 `ferrite-db`의 JDBC 시험이 "JDBC 사이드카를 컴파일하지 못했습니다: javac: directory not found: …\classes"로 실패했다. JDK 8만 있는 PC(egov 사용자에게 흔하다)에서는 Oracle·Tibero·CUBRID 연결이 모두 막힌다.
   - 원인: 사이드카를 컴파일할 때 `-d` 출력 폴더를 만들지 않고 javac에 넘겼다. javac 9부터는 그 폴더를 스스로 만들지만 javac 8은 실패한다. `--release 8`을 모르는 javac 8을 위한 대체 실행(옵션 없이)도 같은 까닭으로 실패했다. CI와 그동안의 확인은 JDK 17·21로 돌아 드러나지 않았다.

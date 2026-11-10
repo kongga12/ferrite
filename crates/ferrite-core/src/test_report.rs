@@ -272,24 +272,49 @@ pub fn parse_go_json(output: &str) -> Vec<Case> {
 /// 보고서를 남기게 고친 명령. pytest·CTest는 `dir`에 JUnit XML을 쓰게 하고, Go는 `-json`을 붙인다.
 /// Maven·Gradle은 원래 보고서를 남긴다. Gradle은 첫 실패에서 남은 작업을 멈추므로 `--continue`를 붙여
 /// 한 하위 프로젝트의 테스트가 실패해도 다른 하위 프로젝트의 테스트를 돌린다(실패만 다시 돌릴 때 걸러 낸
-/// 테스트가 없는 하위 프로젝트도 "No tests found"로 실패한다).
+/// 테스트가 없는 하위 프로젝트도 "No tests found"로 실패한다). Maven도 첫 모듈의 실패에서 멈춘다.
+/// `-fae`만으로는 실패한 모듈에 기대는 모듈을 건너뛰므로, 테스트 실패로는 모듈을 실패시키지 않게 하고
+/// (`maven.test.failure.ignore`, 결과는 보고서로 가린다) 빌드 오류에도 상관없는 모듈은 돌게 `-fae`를 붙인다.
 pub fn with_report(tool: Tool, command: &str, dir: &Path) -> String {
     let path = |name: &str| dir.join(name).to_string_lossy().into_owned();
+    let has = |flags: &[&str]| command.split_whitespace().any(|w| flags.contains(&w));
     match tool {
+        Tool::Maven => {
+            let mut line = command.to_owned();
+            if !has(&[
+                "-fae",
+                "--fail-at-end",
+                "-ff",
+                "--fail-fast",
+                "-fn",
+                "--fail-never",
+            ]) {
+                line.push_str(" -fae");
+            }
+            if !command.contains("maven.test.failure.ignore") {
+                line.push_str(" -Dmaven.test.failure.ignore=true");
+            }
+            line
+        }
         Tool::Pytest if !command.contains("--junitxml") => {
             format!("{command} \"--junitxml={}\"", path("pytest.xml"))
         }
         Tool::Ctest if !command.contains("--output-junit") => {
             format!("{command} --output-junit \"{}\"", path("ctest.xml"))
         }
-        Tool::Go if !command.split_whitespace().any(|w| w == "-json") => {
-            command.replacen("test", "test -json", 1)
-        }
-        Tool::Gradle if !command.split_whitespace().any(|w| w == "--continue") => {
+        Tool::Go if !has(&["-json"]) => command.replacen("test", "test -json", 1),
+        Tool::Gradle if !has(&["--continue"]) => {
             format!("{command} --continue")
         }
         _ => command.to_owned(),
     }
+}
+
+/// 종료 코드로 보아 보고서에 없는 실패(빌드 오류 등)가 있는지. Maven은 테스트 실패로는 빌드를 멈추지 않게
+/// 돌리므로(`with_report`) 0이 아니면 빌드 오류다. 다른 도구는 실패한 테스트가 없는데 0이 아닐 때다.
+/// `-fae`·`--continue`로 다른 모듈의 결과가 보여도 컴파일이 깨진 모듈은 결과에 없다.
+pub fn unreported_failure(tool: Tool, code: Option<i32>, failed: usize) -> bool {
+    code.is_some_and(|c| c != 0) && (tool == Tool::Maven || failed == 0)
 }
 
 /// Windows의 Gradle(JDK 18 이상)이 경로에 든 한글 등 ASCII가 아닌 글자 때문에 테스트 클래스를 찾지 못한
