@@ -159,6 +159,8 @@ fn compile(javac: &Path, work: &Path, dir: &Path) -> Result<(), String> {
     let source = work.join(format!("{MAIN}.java"));
     std::fs::write(&source, SOURCE).map_err(io)?;
     let out = work.join("classes");
+    // javac 9부터는 `-d` 폴더를 스스로 만들지만 javac 8은 "directory not found"로 실패한다.
+    std::fs::create_dir_all(&out).map_err(io)?;
     let run = |release: &[&str]| -> Result<(), String> {
         let mut command = Command::new(javac);
         command
@@ -615,6 +617,30 @@ pub const DOWNLOADS: [Download; 3] = [
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn javac_8로도_사이드카를_컴파일한다() {
+        // GitHub 러너는 JDK 8을 `JAVA_HOME_8_X64`에 둔다. 로컬은 그 변수를 주면 돈다.
+        let Some(home) = std::env::var_os("JAVA_HOME_8_X64") else {
+            assert!(
+                std::env::var_os("CI").is_none() || cfg!(target_os = "macos"),
+                "CI의 Linux·Windows 러너에는 JAVA_HOME_8_X64가 있어야 합니다"
+            );
+            eprintln!("JAVA_HOME_8_X64가 없어 건너뜁니다");
+            return;
+        };
+        let javac = PathBuf::from(home)
+            .join("bin")
+            .join(format!("javac{}", std::env::consts::EXE_SUFFIX));
+        let root = std::env::temp_dir().join(format!("ferrite-jdbc-javac8-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = root.join("classes");
+        let result = compile(&javac, &root.join("build"), &dir);
+        let compiled = dir.join(format!("{MAIN}.class")).is_file();
+        let _ = std::fs::remove_dir_all(&root);
+        result.unwrap();
+        assert!(compiled);
+    }
 
     #[test]
     fn 칸과_파라미터를_json으로_바꾼다() {
