@@ -232,7 +232,19 @@ fn go_test_json을_읽고_빌드_실패는_패키지로_보인다() {
 #[test]
 fn 보고서_옵션과_실패만_다시_돌리는_명령을_만든다() {
     let dir = Path::new("/tmp/r");
-    assert_eq!(with_report(Tool::Maven, "mvn test", dir), "mvn test");
+    assert_eq!(
+        with_report(Tool::Maven, "mvn test", dir),
+        "mvn test -fae -Dmaven.test.failure.ignore=true"
+    );
+    assert_eq!(
+        with_report(
+            Tool::Maven,
+            "mvn -ff test -Dmaven.test.failure.ignore=false",
+            dir
+        ),
+        "mvn -ff test -Dmaven.test.failure.ignore=false",
+        "사용자가 고른 실패 방식은 그대로"
+    );
     assert_eq!(
         with_report(Tool::Gradle, "gradle test", dir),
         "gradle test --continue"
@@ -448,6 +460,20 @@ fn 한글_경로에서_gradle이_테스트_클래스를_찾지_못한_것을_알
     // 테스트가 실제로 실패한 것은 아니다.
     let ordinary = parse_junit(GRADLE).unwrap();
     assert!(!gradle_path_problem(Tool::Gradle, korean, &ordinary));
+}
+
+#[test]
+fn 종료_코드로_보고서에_없는_실패를_알아본다() {
+    // Maven은 테스트 실패로 멈추지 않게 돌리므로 0이 아니면 빌드 오류다(실패한 테스트가 있어도).
+    assert!(unreported_failure(Tool::Maven, Some(1), 1));
+    assert!(!unreported_failure(Tool::Maven, Some(0), 1));
+    // 다른 도구는 테스트가 실패해도 0이 아니다.
+    assert!(!unreported_failure(Tool::Gradle, Some(1), 1));
+    assert!(unreported_failure(Tool::Gradle, Some(1), 0));
+    assert!(
+        !unreported_failure(Tool::Pytest, None, 0),
+        "끊긴 것은 따로 알린다"
+    );
 }
 
 #[test]

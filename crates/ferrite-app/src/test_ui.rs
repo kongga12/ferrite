@@ -295,6 +295,13 @@ impl TestPanel {
             count(Outcome::Skipped),
         );
         let seconds = running.started.1.elapsed().as_secs_f64();
+        let unreported =
+            !running.stopped && test_report::unreported_failure(running.tool, code, failed);
+        let more = if unreported {
+            " · 보고서에 없는 실패가 있습니다(빌드 오류 등, 출력을 보세요)"
+        } else {
+            ""
+        };
         let code = code.map_or_else(|| "끊김".to_owned(), |c| c.to_string());
         let stopped = if running.stopped { "멈춤 · " } else { "" };
         // egov 템플릿은 pom이 테스트를 건너뛰게 해 보고서가 없다. 까닭을 알리고 켜기를 권한다.
@@ -312,9 +319,9 @@ impl TestPanel {
         self.status = Some(if found_any {
             (
                 format!(
-                    "{stopped}통과 {passed} · 실패 {failed} · 건너뜀 {skipped} · {seconds:.1}초 · 종료 코드 {code}"
+                    "{stopped}통과 {passed} · 실패 {failed} · 건너뜀 {skipped} · {seconds:.1}초 · 종료 코드 {code}{more}"
                 ),
-                failed > 0,
+                failed > 0 || unreported,
             )
         } else if self.skipping.is_some() {
             (
