@@ -457,9 +457,12 @@ pub struct Frame {
 }
 
 static JAVA_FRAME: LazyLock<Regex> = LazyLock::new(|| {
-    // 모듈·로더 앞붙이(`java.base/`, Gradle의 `app//`)는 건너뛴다.
-    Regex::new(r"^\s*at\s+(?:[\w.$@-]*/+)?([\w$.]+)\.[\w$<>]+\(([^:()]+\.(?:java|kt|groovy|scala)):(\d+)\)")
-        .unwrap()
+    // 모듈·로더 앞붙이(`java.base/`, Gradle의 `app//`)는 건너뛴다. Kotlin의 백틱 이름(`adds numbers`)은
+    // 빈칸이 들고, 그 안의 람다는 클래스 이름(`CalcTest$adds numbers$1`)에도 든다.
+    Regex::new(
+        r"^\s*at\s+(?:[\w.$@-]*/+)?([^\s()/][^()/]*)\.[^.()/]+\(([^:()]+\.(?:java|kt|groovy|scala)):(\d+)\)",
+    )
+    .unwrap()
 });
 static PYTHON_FRAME: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"^\s*(?:File "([^"]+\.py)", line (\d+)|([^\s:"]+\.py):(\d+):)"#).unwrap()
@@ -520,28 +523,31 @@ pub fn test_frame(case: &Case, frames: &[Frame]) -> Option<usize> {
     (!frames.is_empty()).then_some(0)
 }
 
-/// 프레임의 파일을 프로젝트에서 찾는다. Java는 패키지 경로(`com/example/CalcTest.java`)로, 그 밖은
+/// 프레임의 파일을 프로젝트에서 찾는다. JVM 프레임은 패키지 경로(`com/example/CalcTest.java`)로, 그 밖은
 /// `dir`(테스트를 돌린 폴더) 기준 경로, 없으면 경로 끝이 같은 파일.
 pub fn resolve(root: &Path, dir: &Path, frame: &Frame) -> Option<PathBuf> {
-    let relative = match &frame.class {
-        Some(class) => {
-            let package: Vec<&str> = class.split('.').collect();
-            let package = &package[..package.len().saturating_sub(1)];
-            let mut path = package.join("/");
-            if !path.is_empty() {
-                path.push('/');
-            }
-            path + &frame.file
-        }
-        None => {
-            let direct = dir.join(&frame.file);
-            if direct.is_file() {
-                return Some(direct);
-            }
-            frame.file.replace('\\', "/")
-        }
-    };
-    crate::files::find_suffix(root, &relative)
+    if let Some(class) = &frame.class {
+        let mut package: Vec<&str> = class.split('.').collect();
+        package.pop();
+        // Java는 폴더가 패키지를 따른다. Kotlin·Scala·Groovy는 달라도 되고, Kotlin 관례는 공통 루트
+        // 패키지를 폴더에서 빼는 것이라(`com.example.board` → `src/test/kotlin/CalcTest.kt`) 패키지 앞을
+        // 줄여 가며 찾는다.
+        let skips = if frame.file.ends_with(".java") {
+            0
+        } else {
+            package.len()
+        };
+        return (0..=skips).find_map(|skip| {
+            let mut parts = package[skip..].to_vec();
+            parts.push(&frame.file);
+            crate::files::find_suffix(root, &parts.join("/"))
+        });
+    }
+    let direct = dir.join(&frame.file);
+    if direct.is_file() {
+        return Some(direct);
+    }
+    crate::files::find_suffix(root, &frame.file.replace('\\', "/"))
 }
 
 #[cfg(test)]

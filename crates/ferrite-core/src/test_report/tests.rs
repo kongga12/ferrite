@@ -336,6 +336,73 @@ fn 이번_실행의_보고서를_찾고_스택의_파일을_프로젝트에서_�
 }
 
 #[test]
+fn kotlin_scala_스택의_테스트_줄을_찾는다() {
+    let failed = |suite: &str, detail: &str| Case {
+        suite: suite.to_owned(),
+        name: String::new(),
+        outcome: Outcome::Failed,
+        seconds: None,
+        message: None,
+        detail: detail.to_owned(),
+        file: None,
+        line: None,
+    };
+    // Kotlin 백틱 이름은 빈칸이 들고, 그 안의 람다는 클래스 이름에도 든다.
+    let kotlin = failed(
+        "com.example.board.CalcTest",
+        "org.opentest4j.AssertionFailedError: 더하기\n\tat app//org.junit.jupiter.api.Assertions.assertEquals(Assertions.java:563)\n\tat app//com.example.board.CalcTest$adds wrong numbers$1.invoke(CalcTest.kt:15)\n\tat app//com.example.board.CalcTest.adds wrong numbers(CalcTest.kt:14)\n",
+    );
+    let found = frames(&kotlin);
+    assert_eq!(found.len(), 3);
+    assert_eq!(
+        found[1].class.as_deref(),
+        Some("com.example.board.CalcTest"),
+        "람다는 바깥 클래스로"
+    );
+    assert_eq!(test_frame(&kotlin, &found), Some(1));
+    assert_eq!((found[2].file.as_str(), found[2].line), ("CalcTest.kt", 14));
+    // Scala 람다는 같은 클래스의 `$anonfun$` 메서드다.
+    let scala = failed(
+        "com.example.board.CalcSuite",
+        "org.opentest4j.AssertionFailedError: 더하기\n\tat app//com.example.board.CalcSuite.$anonfun$addsWrong$1(CalcSuite.scala:12)\n\tat app//scala.collection.immutable.List.foreach(List.scala:334)\n",
+    );
+    let found = frames(&scala);
+    assert_eq!(
+        found[test_frame(&scala, &found).unwrap()].line,
+        12,
+        "라이브러리가 아니라 테스트 클래스의 줄"
+    );
+
+    // Kotlin 관례대로 공통 루트 패키지를 폴더에서 뺀 파일도 찾는다. Java는 패키지 경로로만 찾는다.
+    let root = std::env::temp_dir().join(format!("ferrite-test-report-kt-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let kotlin_dir = root.join("kt/src/test/kotlin");
+    std::fs::create_dir_all(&kotlin_dir).unwrap();
+    std::fs::write(kotlin_dir.join("CalcTest.kt"), "").unwrap();
+    std::fs::write(kotlin_dir.join("Assert.java"), "").unwrap();
+    let frame = |class: &str, file: &str| Frame {
+        text: String::new(),
+        file: file.to_owned(),
+        line: 1,
+        class: Some(class.to_owned()),
+    };
+    assert_eq!(
+        resolve(
+            &root,
+            &root,
+            &frame("com.example.board.CalcTest", "CalcTest.kt")
+        ),
+        Some(kotlin_dir.join("CalcTest.kt"))
+    );
+    assert_eq!(
+        resolve(&root, &root, &frame("org.junit.Assert", "Assert.java")),
+        None,
+        "패키지가 다른 같은 이름의 Java 파일"
+    );
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
 fn egov_pom의_skip_tests를_찾아_지운다() {
     // egov 웹 템플릿(v5.0.7)의 surefire 설정 꼴. 관리 블록의 다른 플러그인은 건드리지 않는다.
     let pom = "<project>\r\n  <build>\r\n    <plugins>\r\n      <plugin>\r\n        <artifactId>maven-failsafe-plugin</artifactId>\r\n        <configuration><skipTests>true</skipTests></configuration>\r\n      </plugin>\r\n      <plugin>\r\n        <groupId>org.apache.maven.plugins</groupId>\r\n        <artifactId>maven-surefire-plugin</artifactId>\r\n        <configuration>\r\n          <skipTests>true</skipTests>\r\n          <reportFormat>xml</reportFormat>\r\n        </configuration>\r\n      </plugin>\r\n    </plugins>\r\n  </build>\r\n</project>\r\n";

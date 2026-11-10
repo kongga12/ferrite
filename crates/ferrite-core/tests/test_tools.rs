@@ -181,7 +181,7 @@ fn maven_surefire_보고서와_실패만_다시() {
 }
 
 /// 시험용 Gradle 프로젝트 폴더. `gradle init`이 만드는 꼴로 루트에는 설정만 두고, 하위 프로젝트마다
-/// Kotlin DSL 빌드 파일을 둔다. 데몬은 띄우지 않는다(로컬에서 시험 뒤에 남지 않게).
+/// Kotlin DSL 빌드 파일을 둔다. Gradle·Kotlin 컴파일러 데몬은 띄우지 않는다(로컬에서 시험 뒤에 남지 않게).
 fn gradle_project(name: &str, projects: &[(&str, &str)]) -> PathBuf {
     let root = temp_dir(name);
     let names: Vec<String> = projects.iter().map(|(p, _)| format!("\"{p}\"")).collect();
@@ -193,7 +193,11 @@ fn gradle_project(name: &str, projects: &[(&str, &str)]) -> PathBuf {
         ),
     )
     .unwrap();
-    std::fs::write(root.join("gradle.properties"), "org.gradle.daemon=false\n").unwrap();
+    std::fs::write(
+        root.join("gradle.properties"),
+        "org.gradle.daemon=false\nkotlin.compiler.execution.strategy=in-process\n",
+    )
+    .unwrap();
     for (project, build) in projects {
         std::fs::create_dir_all(root.join(project)).unwrap();
         std::fs::write(root.join(project).join("build.gradle.kts"), build).unwrap();
@@ -262,6 +266,76 @@ fn gradle_test_보고서와_실패만_다시() {
         [
             ("addsWrong()".to_owned(), Outcome::Failed),
             ("throwsError()".to_owned(), Outcome::Failed),
+        ],
+        "실패한 것만 다시"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+#[ignore = "Gradle로 Kotlin·Scala의 JUnit 5 테스트를 돌린다(컴파일러와 의존성을 받는다). Java 17 이상과 gradle이 필요하다"]
+fn gradle_kotlin_scala_테스트의_줄과_실패만_다시() {
+    if !require("gradle --version") {
+        return;
+    }
+    let common = "\n\nrepositories {\n    mavenCentral()\n}\n\ndependencies {\n    testImplementation(\"org.junit.jupiter:junit-jupiter:5.11.4\")\n    testRuntimeOnly(\"org.junit.platform:junit-platform-launcher\")\n}\n\ntasks.test {\n    useJUnitPlatform()\n}\n";
+    let kotlin = format!("plugins {{\n    kotlin(\"jvm\") version \"2.3.0\"\n}}{common}");
+    let scala = format!(
+        "plugins {{\n    scala\n}}{common}\ndependencies {{\n    implementation(\"org.scala-lang:scala-library:2.13.16\")\n}}\n"
+    );
+    let root = gradle_project("gradle-jvm", &[("kt", &kotlin), ("sc", &scala)]);
+    // Kotlin 관례대로 공통 루트 패키지(`com.example.board`)를 폴더에서 뺐다. 이름은 백틱으로 빈칸을 넣었다.
+    let kt = root.join("kt/src/test/kotlin");
+    std::fs::create_dir_all(&kt).unwrap();
+    std::fs::write(
+        kt.join("CalcTest.kt"),
+        "package com.example.board\n\nimport org.junit.jupiter.api.Assertions.assertEquals\nimport org.junit.jupiter.api.Test\n\nclass CalcTest {\n    @Test\n    fun `adds numbers`() {\n        assertEquals(3, 1 + 2)\n    }\n\n    @Test\n    fun `adds wrong numbers`() {\n        assertEquals(4, 1 + 2, \"더하기\")\n    }\n}\n",
+    )
+    .unwrap();
+    // Scala는 람다(`$anonfun$`) 안에서 실패한다.
+    let sc = root.join("sc/src/test/scala/com/example/board");
+    std::fs::create_dir_all(&sc).unwrap();
+    std::fs::write(
+        sc.join("CalcSuite.scala"),
+        "package com.example.board\n\nimport org.junit.jupiter.api.Assertions.assertEquals\nimport org.junit.jupiter.api.Test\n\nclass CalcSuite {\n  @Test\n  def adds(): Unit = assertEquals(3, 1 + 2)\n\n  @Test\n  def addsWrong(): Unit =\n    List(1).foreach(n => assertEquals(4, n + 2, \"더하기\"))\n}\n",
+    )
+    .unwrap();
+    let command = "gradle test";
+    let since = SystemTime::now();
+    let (ok, _) = run(
+        &root,
+        &test_report::with_report(Tool::Gradle, command, &root),
+    );
+    assert!(!ok, "실패한 테스트가 있으면 gradle이 실패한다");
+    let cases = junit(Tool::Gradle, &root, &root, since);
+    for case in failed(&cases) {
+        eprintln!("[{} {}]\n{}", case.suite, case.name, case.detail);
+    }
+    assert_eq!(
+        outcomes(&cases),
+        [
+            ("adds numbers()".to_owned(), Outcome::Passed),
+            ("adds wrong numbers()".to_owned(), Outcome::Failed),
+            ("adds()".to_owned(), Outcome::Passed),
+            ("addsWrong()".to_owned(), Outcome::Failed),
+        ]
+    );
+    let line = |name: &str| test_line(&root, &root, cases.iter().find(|c| c.name == name).unwrap());
+    assert_eq!(line("adds wrong numbers()"), (kt.join("CalcTest.kt"), 14));
+    assert_eq!(line("addsWrong()"), (sc.join("CalcSuite.scala"), 12));
+
+    // 두 하위 프로젝트 모두 실패가 있어야 한다. `--tests`는 모든 하위 프로젝트의 test 작업에 걸려, 하나도
+    // 맞지 않는 작업은 "No tests found"로 실패한다.
+    let since = SystemTime::now();
+    let rerun = test_report::rerun(Tool::Gradle, command, &failed(&cases)).unwrap();
+    let (ok, _) = run(&root, &rerun);
+    assert!(!ok);
+    let again = junit(Tool::Gradle, &root, &root, since);
+    assert_eq!(
+        outcomes(&again),
+        [
+            ("adds wrong numbers()".to_owned(), Outcome::Failed),
+            ("addsWrong()".to_owned(), Outcome::Failed),
         ],
         "실패한 것만 다시"
     );
