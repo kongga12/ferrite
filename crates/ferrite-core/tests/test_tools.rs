@@ -847,17 +847,16 @@ fn egov_룰셋의_44개_규칙이_모두_잡힌다() {
         .iter()
         .find(|f| f.rule == "EmptyCatchBlock")
         .unwrap();
+    // PMD는 실제 경로로 적는다(macOS `/private/var`, Windows 긴 사용자 폴더 이름). 끝부분만 견준다.
+    let path = empty_catch.path.as_deref().expect("프로젝트의 파일");
+    assert!(
+        path.ends_with("src/main/java/com/example/board/Board.java"),
+        "{}",
+        path.display()
+    );
     assert_eq!(
-        (
-            empty_catch.path.as_deref(),
-            empty_catch.line,
-            empty_catch.message.as_str()
-        ),
-        (
-            Some(java.join("Board.java").as_path()),
-            14,
-            "내용이 없는 Catch Block이 존재, 오류 상황 대응 부재"
-        )
+        (empty_catch.line, empty_catch.message.as_str()),
+        (14, "내용이 없는 Catch Block이 존재, 오류 상황 대응 부재")
     );
     let _ = std::fs::remove_dir_all(root.parent().unwrap());
 }
