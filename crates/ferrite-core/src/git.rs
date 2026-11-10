@@ -4,7 +4,7 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use similar::{DiffOp, TextDiff};
 
@@ -12,8 +12,12 @@ use crate::text_file;
 
 /// 거터 변경 표시를 계산할 최대 크기. 넘으면 표시하지 않는다(큰 파일에서 입력이 느려지지 않게).
 pub const MAX_DIFF_BYTES: usize = 4 * 1024 * 1024;
-/// 줄 비교가 이보다 오래 걸리면 근사 결과로 끝낸다.
+/// 큰 입력의 줄 비교가 이보다 오래 걸리면 근사 결과로 끝낸다.
 const DIFF_TIMEOUT: Duration = Duration::from_millis(50);
+/// 두 글의 줄 수 합이 이보다 많을 때만 [`DIFF_TIMEOUT`]을 건다. similar의 Myers는 탐색량 상한(Git식
+/// 휴리스틱)이 있어 이 크기까지는 최악 입력도 릴리스 빌드에서 15ms 안팎에 끝난다. 그 아래에서 벽시계로
+/// 끊으면 바쁜 기계(CI 러너)에서 몇 줄짜리 비교도 파일 전체를 바꾼 것으로 나온다.
+const DIFF_TIMEOUT_MIN_LINES: usize = 10_000;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Repo {
@@ -343,12 +347,20 @@ fn code(c: u8) -> Option<Change> {
     }
 }
 
+/// 줄 비교. 작은 입력은 시계와 상관없이 늘 같은 결과를 내고, 큰 입력만 `deadline`에서 끊어 근사로
+/// 끝낸다.
+fn line_diff<'a>(old: &'a str, new: &'a str, deadline: Instant) -> TextDiff<'a, 'a, str> {
+    let mut config = TextDiff::configure();
+    if old.lines().count() + new.lines().count() > DIFF_TIMEOUT_MIN_LINES {
+        config.deadline(deadline);
+    }
+    config.diff_lines(old, new)
+}
+
 /// 두 글의 줄 diff(앞뒤 2줄을 붙인 덩어리들). (`' '` 같음·`'-'` 지움·`'+'` 더함, 줄). 덩어리 사이는
 /// (`'~'`, 빈 글). 에이전트가 제안한 파일 쓰기를 보일 때 쓴다.
 pub fn diff_lines(old: &str, new: &str) -> Vec<(char, String)> {
-    let diff = TextDiff::configure()
-        .timeout(DIFF_TIMEOUT)
-        .diff_lines(old, new);
+    let diff = line_diff(old, new, Instant::now() + DIFF_TIMEOUT);
     let mut lines = Vec::new();
     for (i, group) in diff.grouped_ops(2).iter().enumerate() {
         if i > 0 {
@@ -385,9 +397,7 @@ pub fn line_changes(base: &str, current: &str) -> Vec<(usize, LineChange)> {
         }
     };
     let (base, current) = (terminated(base), terminated(current));
-    let diff = TextDiff::configure()
-        .timeout(DIFF_TIMEOUT)
-        .diff_lines(&base, &current);
+    let diff = line_diff(&base, &current, Instant::now() + DIFF_TIMEOUT);
     let lines = current.lines().count();
     let mut changes = Vec::new();
     for op in diff.ops() {
@@ -430,6 +440,28 @@ mod diff_tests {
         assert_eq!(lines[2], ('+', "B".to_owned()));
         assert_eq!(lines.last(), Some(&('+', "j".to_owned())));
         assert!(diff_lines("x\n", "x\n").is_empty());
+    }
+
+    #[test]
+    fn 작은_입력의_줄_비교는_기한이_지나도_결과가_같다() {
+        // 이미 지난 기한은 바쁜 기계에서 비교 도중 제한 시간을 넘긴 것과 같다.
+        let past = Instant::now() - Duration::from_secs(1);
+        let exact =
+            |old: &str, new: &str| TextDiff::configure().diff_lines(old, new).ops().to_vec();
+        let (old, new) = (
+            "a\nb\nc\nd\ne\nf\ng\nh\ni\n",
+            "a\nB\nc\nd\ne\nf\ng\nh\ni\nj\n",
+        );
+        assert_eq!(line_diff(old, new, past).ops(), exact(old, new));
+
+        // 큰 입력은 기한을 지켜 근사로 끝낸다(큰 파일에서 멈추지 않게).
+        let big = |m: usize| -> String {
+            (0..DIFF_TIMEOUT_MIN_LINES)
+                .map(|i| format!("{}\n", i % m))
+                .collect()
+        };
+        let (old, new) = (big(7), big(5));
+        assert_ne!(line_diff(&old, &new, past).ops(), exact(&old, &new));
     }
 }
 
