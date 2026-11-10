@@ -1746,7 +1746,7 @@
   - 검증
     - 단위: 진행 따라가기(시작·보고·끝, 숫자 토큰, 나중에 시작한 일, 바뀐 것만 바꾸기, 퍼센트 상한, 시작하지 않은 토큰과 틀린 꼴), 글자 경계에서 자르기
     - 실제 rust-analyzer 창 시험 둘과 앱·LSP 시험 전체가 통과했다(rust-analyzer가 토큰을 만들라는 요청을 보내도 멈추지 않는다).
-    - jdt.ls 실제 시험(`servers.yml`, 3개 OS): Maven 프로젝트를 여는 동안 jdt.ls가 작업 진행(begin)을 보내는지 본다.
+    - jdt.ls 실제 시험(`servers.yml`, 3개 OS): Maven 프로젝트를 여는 동안 jdt.ls가 작업 진행(begin)을 보내는지 본다. 실행 42738241855에서 3개 OS 모두 통과했다. 온 진행은 "Initialize Workspace", "Synchronizing projects", "LookupJDKToolchainsJob", "Refreshing workspace", "Building", "Searching...", "Validate documents", "Publish Diagnostics"였다(Windows에서는 앞의 둘 중 "Initialize Workspace"가 빠졌다).
     - 실제 앱(Windows, 릴리스 빌드): Rust 파일을 열고 0.9초 뒤 상태바 "rust-analyzer: Building compile-time-deps…", 2.2초 뒤 "rust-analyzer: Indexing 5/21 (core) 23%…"를 화면으로 확인했다. 확인 뒤 예제와 설정 폴더를 지웠다.
   - 확인하지 못한 것: 실제 앱에서 jdt.ls의 진행(받는 데 약 51MB가 필요해 CI 시험으로 대신했다). gopls·TypeScript 등 다른 서버의 진행.
 
