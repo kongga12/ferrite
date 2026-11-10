@@ -233,6 +233,14 @@ fn go_test_json을_읽고_빌드_실패는_패키지로_보인다() {
 fn 보고서_옵션과_실패만_다시_돌리는_명령을_만든다() {
     let dir = Path::new("/tmp/r");
     assert_eq!(with_report(Tool::Maven, "mvn test", dir), "mvn test");
+    assert_eq!(
+        with_report(Tool::Gradle, "gradle test", dir),
+        "gradle test --continue"
+    );
+    assert_eq!(
+        with_report(Tool::Gradle, "gradle test --continue", dir),
+        "gradle test --continue"
+    );
     let pytest = with_report(Tool::Pytest, "python -m pytest", dir);
     assert!(
         pytest.starts_with("python -m pytest \"--junitxml=") && pytest.ends_with("pytest.xml\"")

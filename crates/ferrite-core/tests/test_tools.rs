@@ -324,21 +324,32 @@ fn gradle_kotlin_scala_테스트의_줄과_실패만_다시() {
     assert_eq!(line("adds wrong numbers()"), (kt.join("CalcTest.kt"), 14));
     assert_eq!(line("addsWrong()"), (sc.join("CalcSuite.scala"), 12));
 
-    // 두 하위 프로젝트 모두 실패가 있어야 한다. `--tests`는 모든 하위 프로젝트의 test 작업에 걸려, 하나도
-    // 맞지 않는 작업은 "No tests found"로 실패한다.
-    let since = SystemTime::now();
-    let rerun = test_report::rerun(Tool::Gradle, command, &failed(&cases)).unwrap();
-    let (ok, _) = run(&root, &rerun);
-    assert!(!ok);
-    let again = junit(Tool::Gradle, &root, &root, since);
+    // 실패만 다시(앱처럼 보고서 옵션을 붙인다). 빈칸 든 이름도 `--tests`로 걸러진다.
+    let again = |cases: &[&Case]| {
+        let since = SystemTime::now();
+        let rerun = test_report::rerun(Tool::Gradle, command, cases).unwrap();
+        let (ok, _) = run(
+            &root,
+            &test_report::with_report(Tool::Gradle, &rerun, &root),
+        );
+        assert!(!ok);
+        outcomes(&junit(Tool::Gradle, &root, &root, since))
+    };
     assert_eq!(
-        outcomes(&again),
+        again(&failed(&cases)),
         [
             ("adds wrong numbers()".to_owned(), Outcome::Failed),
             ("addsWrong()".to_owned(), Outcome::Failed),
         ],
         "실패한 것만 다시"
     );
+    // 한 하위 프로젝트에만 실패가 있으면 `--tests`에 맞는 것이 없는 다른 작업(먼저 도는 `:kt:test`)은
+    // "No tests found"로 실패하지만, `--continue`라 `:sc:test`는 돈다.
+    let scala: Vec<&Case> = failed(&cases)
+        .into_iter()
+        .filter(|c| c.name == "addsWrong()")
+        .collect();
+    assert_eq!(again(&scala), [("addsWrong()".to_owned(), Outcome::Failed)]);
     let _ = std::fs::remove_dir_all(&root);
 }
 

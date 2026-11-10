@@ -270,7 +270,9 @@ pub fn parse_go_json(output: &str) -> Vec<Case> {
 }
 
 /// 보고서를 남기게 고친 명령. pytest·CTest는 `dir`에 JUnit XML을 쓰게 하고, Go는 `-json`을 붙인다.
-/// Maven·Gradle은 원래 보고서를 남긴다.
+/// Maven·Gradle은 원래 보고서를 남긴다. Gradle은 첫 실패에서 남은 작업을 멈추므로 `--continue`를 붙여
+/// 한 하위 프로젝트의 테스트가 실패해도 다른 하위 프로젝트의 테스트를 돌린다(실패만 다시 돌릴 때 걸러 낸
+/// 테스트가 없는 하위 프로젝트도 "No tests found"로 실패한다).
 pub fn with_report(tool: Tool, command: &str, dir: &Path) -> String {
     let path = |name: &str| dir.join(name).to_string_lossy().into_owned();
     match tool {
@@ -282,6 +284,9 @@ pub fn with_report(tool: Tool, command: &str, dir: &Path) -> String {
         }
         Tool::Go if !command.split_whitespace().any(|w| w == "-json") => {
             command.replacen("test", "test -json", 1)
+        }
+        Tool::Gradle if !command.split_whitespace().any(|w| w == "--continue") => {
+            format!("{command} --continue")
         }
         _ => command.to_owned(),
     }
