@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use ferrite_lsp::catalog::{self, Server};
 use ferrite_lsp::client::{
-    LanguageServer, ServerEvent, parse_diagnostics, parse_pulled_diagnostics,
+    LanguageServer, PROGRESS, ServerEvent, parse_diagnostics, parse_pulled_diagnostics,
 };
 use ferrite_lsp::install;
 use lsp_types::{Diagnostic, DiagnosticSeverity};
@@ -153,10 +153,18 @@ fn jdtls를_받아_lombok이_만든_getter를_인식하는지_본다() {
             .collect::<Vec<_>>()
     };
     let mut latest: HashMap<String, Vec<Diagnostic>> = HashMap::new();
+    // 작업 진행을 지원한다고 알렸으므로 Maven 가져오기 등의 진행(`$/progress`)이 온다(상태바에 보인다).
+    let mut progress: Vec<String> = Vec::new();
     let deadline = Instant::now() + Duration::from_secs(300);
     loop {
         for event in lsp.poll_events() {
             match event {
+                ServerEvent::Notification { method, params } if method == PROGRESS => {
+                    if params["value"]["kind"] == "begin" {
+                        let title = params["value"]["title"].as_str().unwrap_or_default();
+                        progress.push(title.to_owned());
+                    }
+                }
                 ServerEvent::Notification { method, params }
                     if method == "textDocument/publishDiagnostics" =>
                 {
@@ -184,6 +192,8 @@ fn jdtls를_받아_lombok이_만든_getter를_인식하는지_본다() {
         );
         std::thread::sleep(Duration::from_millis(200));
     }
+    eprintln!("jdt.ls 진행: {progress:?}");
+    assert!(!progress.is_empty(), "jdt.ls가 작업 진행을 알리지 않음");
     drop(lsp);
     remove(&root);
 }

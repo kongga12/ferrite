@@ -14,8 +14,8 @@ use ferrite_core::settings::JsonSchemaSetting;
 use ferrite_core::syntax::{Lang, MAX_SYNTAX_BYTES};
 use ferrite_lsp::catalog::{self, Launch, Server as ServerSpec, Source};
 use ferrite_lsp::client::{
-    DIAGNOSTIC_REFRESH, LanguageServer, RpcError, SERVER_STATUS, ServerEvent, parse_diagnostics,
-    parse_pulled_diagnostics,
+    DIAGNOSTIC_REFRESH, LanguageServer, PROGRESS, RpcError, SERVER_STATUS, ServerEvent,
+    parse_diagnostics, parse_pulled_diagnostics,
 };
 use ferrite_lsp::edits::{FileEdit, parse_workspace_edit};
 use ferrite_lsp::install;
@@ -201,12 +201,90 @@ impl Activity {
     }
 }
 
+/// 서버가 진행을 알리는 일 하나(`$/progress`의 begin부터 end까지).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Task {
+    pub title: String,
+    pub message: Option<String>,
+    pub percentage: Option<u32>,
+}
+
+impl Task {
+    /// 상태바에 보일 짧은 글: 제목, 설명, 퍼센트.
+    pub fn label(&self) -> String {
+        let mut text = self.title.clone();
+        if let Some(message) = &self.message {
+            text.push(' ');
+            text.push_str(message);
+        }
+        if let Some(percentage) = self.percentage {
+            text.push_str(&format!(" {percentage}%"));
+        }
+        text
+    }
+}
+
+/// 서버가 진행 중이라고 알린 일들(시작한 차례대로). 토큰은 글로 맞춘다(숫자로도 온다).
+#[derive(Default)]
+struct Tasks(Vec<(String, Task)>);
+
+impl Tasks {
+    /// `$/progress` 알림 하나를 반영한다. 시작하지 않은 토큰의 보고·끝은 버린다.
+    fn apply(&mut self, params: &Value) {
+        let token = match &params["token"] {
+            Value::String(token) => token.clone(),
+            Value::Number(token) => token.to_string(),
+            _ => return,
+        };
+        let value = &params["value"];
+        let text = |key: &str| {
+            value[key]
+                .as_str()
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+                .map(str::to_owned)
+        };
+        let percentage = value["percentage"].as_u64().map(|p| p.min(100) as u32);
+        match value["kind"].as_str() {
+            Some("begin") => {
+                self.0.retain(|(t, _)| *t != token);
+                let task = Task {
+                    title: text("title").unwrap_or_default(),
+                    message: text("message"),
+                    percentage,
+                };
+                self.0.push((token, task));
+            }
+            Some("report") => {
+                if let Some((_, task)) = self.0.iter_mut().find(|(t, _)| *t == token) {
+                    // 보고에 없는 항목은 앞의 값을 둔다(LSP 규칙).
+                    if let Some(message) = text("message") {
+                        task.message = Some(message);
+                    }
+                    if percentage.is_some() {
+                        task.percentage = percentage;
+                    }
+                }
+            }
+            Some("end") => self.0.retain(|(t, _)| *t != token),
+            _ => {}
+        }
+    }
+
+    /// 가장 나중에 시작한 일.
+    fn current(&self) -> Option<&Task> {
+        self.0.last().map(|(_, task)| task)
+    }
+}
+
 struct Server {
     spec: &'static ServerSpec,
     lsp: Option<LanguageServer>,
     state: ServerState,
     /// 서버가 알린 일 상태. 알리지 않는 서버는 None.
     activity: Option<Activity>,
+    /// 서버가 진행 중이라고 알린 일들.
+    tasks: Tasks,
     started: Instant,
     /// 서버에 연 문서와 마지막으로 보낸 LSP 버전.
     opened: HashMap<PathBuf, i32>,
@@ -508,6 +586,12 @@ impl LspHub {
     pub fn activity(&self, path: &Path, lang: Lang) -> Option<&Activity> {
         let spec = catalog::for_language(language_id(lang, path))?;
         self.servers.get(spec.name)?.activity.as_ref()
+    }
+
+    /// 이 문서의 주 서버가 진행 중이라고 알린 일 중 가장 나중에 시작한 것.
+    pub fn task(&self, path: &Path, lang: Lang) -> Option<&Task> {
+        let spec = catalog::for_language(language_id(lang, path))?;
+        self.servers.get(spec.name)?.tasks.current()
     }
 
     /// 이 문서의 주 서버를 내려 다음 동기화 때 다시 띄우게 한다(상태바에서 누른 수동 재시작).
@@ -917,9 +1001,11 @@ impl LspHub {
                     ServerState::Failed(_) | ServerState::Restarting(_)
                 )
             {
-                // 프로세스는 이미 끝났다. 다시 시작하면 문서를 처음부터 다시 연다.
+                // 프로세스는 이미 끝났다. 다시 시작하면 문서를 처음부터 다시 연다. 하던 일도 끝났다.
                 server.lsp = None;
                 server.opened.clear();
+                server.tasks = Tasks::default();
+                server.activity = None;
             }
         }
         updates
@@ -966,6 +1052,12 @@ impl LspHub {
                     }
                 };
                 updates.push(HubUpdate::Message(message));
+            }
+            ServerEvent::Notification { method, params } if method == PROGRESS => {
+                if let Some(server) = self.servers.get_mut(name) {
+                    server.tasks.apply(&params);
+                    self.ctx.request_repaint();
+                }
             }
             ServerEvent::Notification { method, params } if method == SERVER_STATUS => {
                 if let Some(server) = self.servers.get_mut(name) {
@@ -1144,6 +1236,7 @@ fn start_server(
         lsp: None,
         state: ServerState::NotInstalled,
         activity: None,
+        tasks: Tasks::default(),
         started: Instant::now(),
         opened: HashMap::new(),
         pulled: HashMap::new(),
@@ -1199,6 +1292,59 @@ fn notification(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn 진행_알림으로_하는_일을_따라간다() {
+        let mut tasks = Tasks::default();
+        let progress =
+            |token: Value, value: Value| serde_json::json!({"token": token, "value": value});
+        tasks.apply(&progress(
+            "import".into(),
+            serde_json::json!({"kind": "begin", "title": "Importing Maven project(s)", "percentage": 0}),
+        ));
+        assert_eq!(
+            tasks.current().map(Task::label).as_deref(),
+            Some("Importing Maven project(s) 0%")
+        );
+        // 숫자 토큰도 받고, 나중에 시작한 일을 보인다.
+        tasks.apply(&progress(
+            7.into(),
+            serde_json::json!({"kind": "begin", "title": "Indexing"}),
+        ));
+        tasks.apply(&progress(
+            "import".into(),
+            serde_json::json!({"kind": "report", "message": " 3/10 ", "percentage": 30}),
+        ));
+        assert_eq!(
+            tasks.current().map(Task::label).as_deref(),
+            Some("Indexing")
+        );
+        tasks.apply(&progress(7.into(), serde_json::json!({"kind": "end"})));
+        assert_eq!(
+            tasks.current().map(Task::label).as_deref(),
+            Some("Importing Maven project(s) 3/10 30%"),
+            "보고는 바뀐 것만 바꾼다"
+        );
+        tasks.apply(&progress(
+            "import".into(),
+            serde_json::json!({"kind": "report", "percentage": 150}),
+        ));
+        assert_eq!(tasks.current().and_then(|t| t.percentage), Some(100));
+        // 시작하지 않은 토큰과 틀린 꼴은 버린다.
+        tasks.apply(&progress(
+            "none".into(),
+            serde_json::json!({"kind": "report", "message": "x"}),
+        ));
+        tasks.apply(&serde_json::json!({"value": {"kind": "begin", "title": "x"}}));
+        tasks.apply(&progress(
+            "import".into(),
+            serde_json::json!({"kind": "end"}),
+        ));
+        assert_eq!(tasks.current(), None);
+        // 상태바는 긴 글을 글자 경계에서 자른다.
+        assert_eq!(crate::lsp_ui::shorten("가져오는 중 abc", 3), "가져오");
+        assert_eq!(crate::lsp_ui::shorten("짧다", 40), "짧다");
+    }
 
     #[test]
     fn rust_analyzer의_상태_알림을_읽는다() {

@@ -18,7 +18,9 @@ use crate::file_tree::{FileTree, TreeAction};
 use crate::find_bar::{FindAction, FindBar};
 use crate::keymap::{Command, Keymap};
 use crate::lsp_hub::{DocSync, HubUpdate, LspHub, ServerState};
-use crate::lsp_ui::{ActionMenu, CompletionPopup, Pending, ReferenceList, word_at, word_start};
+use crate::lsp_ui::{
+    ActionMenu, CompletionPopup, Pending, ReferenceList, shorten, word_at, word_start,
+};
 use crate::servers::{ServerAction, ServerManager, install_hint};
 use crate::watcher::FsWatcher;
 use ferrite_lsp::client::RpcError;
@@ -3309,18 +3311,28 @@ impl FerriteApp {
                             ServerState::Starting => {
                                 ui.label(format!("{name}: 준비 중…"));
                             }
-                            // rust-analyzer는 작업 공간을 읽는 동안 기능 요청에 빈 결과를 준다. 그동안은
-                            // 준비됐어도 "색인 중"으로 보인다. 서버가 붙인 설명(읽지 못한 까닭 등)은 걸면 보인다.
+                            // 서버가 진행을 알리는 일(jdt.ls의 Maven 가져오기, rust-analyzer의 색인 등)이
+                            // 있으면 그것을 보인다. rust-analyzer는 작업 공간을 읽는 동안 기능 요청에 빈
+                            // 결과를 주므로, 진행 알림이 없어도 할 일이 남았으면 "색인 중"이다. 긴 글은
+                            // 줄이고 전체와 서버가 붙인 설명은 걸면 보인다.
                             ServerState::Ready => {
                                 let activity = self.hub.activity(&doc.path, lang);
-                                let busy = activity.is_some_and(|a| !a.quiescent);
-                                let label = ui.label(if busy {
-                                    format!("{name}: 색인 중…")
-                                } else {
-                                    format!("{name}: 준비됨")
-                                });
-                                if let Some(message) = activity.and_then(|a| a.message.as_deref()) {
-                                    label.on_hover_text(message);
+                                let task = self.hub.task(&doc.path, lang).map(|t| t.label());
+                                let text = match &task {
+                                    Some(task) => format!("{name}: {}…", shorten(task, 40)),
+                                    None if activity.is_some_and(|a| !a.quiescent) => {
+                                        format!("{name}: 색인 중…")
+                                    }
+                                    None => format!("{name}: 준비됨"),
+                                };
+                                let hover: Vec<&str> = task
+                                    .as_deref()
+                                    .into_iter()
+                                    .chain(activity.and_then(|a| a.message.as_deref()))
+                                    .collect();
+                                let label = ui.label(text);
+                                if !hover.is_empty() {
+                                    label.on_hover_text(hover.join("\n"));
                                 }
                             }
                             ServerState::NotInstalled => {
