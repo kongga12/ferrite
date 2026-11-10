@@ -7791,6 +7791,50 @@ mod tests {
     }
 
     #[test]
+    fn 한글_경로에서_gradle이_테스트_클래스를_찾지_못하면_까닭과_해법을_알린다() {
+        let dir =
+            std::env::temp_dir().join(format!("ferrite-tests-자바 게시판-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("settings.gradle.kts"), "").unwrap();
+        // Windows·JDK 21·Gradle 9.2.0이 실제로 남긴 보고서의 꼴.
+        let report = r#"<testsuite name="Gradle Test Executor 1">
+  <testcase name="failed to execute tests" classname="Gradle Test Executor 1" time="0.105">
+    <failure message="org.gradle.api.internal.tasks.testing.TestSuiteExecutionException: Could not execute test class 'com.example.board.CalcTest'."><![CDATA[org.gradle.api.internal.tasks.testing.TestSuiteExecutionException: Could not execute test class 'com.example.board.CalcTest'.
+Caused by: java.lang.ClassNotFoundException: com.example.board.CalcTest
+]]></failure>
+  </testcase>
+</testsuite>"#;
+        let cases = ferrite_core::test_report::parse_junit(report).unwrap();
+        let mut harness = harness_builder()
+            .with_size(egui::vec2(1200.0, 1000.0))
+            .build_eframe(|cc| FerriteApp::new(cc, Some(dir.clone())));
+        harness.run_ok();
+        let config = ferrite_core::run::RunConfig {
+            name: "gradle test".into(),
+            command: "gradle test".into(),
+            cwd: None,
+            env: Default::default(),
+        };
+        {
+            let app = harness.state_mut();
+            app.tests.show_results(config, dir.clone(), cases);
+            dock::show(&mut app.layout, Pane::Tests);
+        }
+        harness.run_ok();
+        harness.get_by_label("Gradle Test Executor 1 (실패 1/1)");
+        assert_eq!(
+            harness
+                .query_by_label(crate::test_ui::GRADLE_PATH_PROBLEM)
+                .is_some(),
+            cfg!(windows),
+            "Windows에서만 생기는 일이다"
+        );
+        drop(harness);
+        remove_project(&dir);
+    }
+
+    #[test]
     fn 정적_분석_sarif를_불러와_파일별로_보이고_줄로_가며_바뀌면_다시_읽는다() {
         let dir = std::env::temp_dir().join(format!("ferrite-sarif-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);

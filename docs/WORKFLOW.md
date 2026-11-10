@@ -1766,7 +1766,24 @@
     - 실제 도구(`test_tools`, CI 3개 OS 전체 작업, 로컬 Windows 통과): Kotlin·Scala 하위 프로젝트를 루트에서 돌려 통과 2·실패 2, 실패 줄 `kt/src/test/kotlin/CalcTest.kt` 14줄과 `sc/src/test/scala/com/example/board/CalcSuite.scala` 12줄, 실패만 다시(둘 다), Scala 실패만 다시(`:kt:test`는 "No tests found"로 실패하지만 `:sc:test`가 돈다)
     - 실제 앱(Windows, 릴리스 빌드, Gradle 9.2.0, `kotlin board` 폴더): [실행 > 테스트]의 `gradle test` → "통과 2 · 실패 2" 트리(두 하위 프로젝트), `adds wrong numbers()`를 두 번 눌러 `kt/src/test/kotlin/CalcTest.kt` 14줄, `addsWrong()`로 `CalcSuite.scala` 12줄, [실패만 다시]의 출력 첫 줄이 `gradle test --tests "com.example.board.CalcTest.adds wrong numbers" --tests "com.example.board.CalcSuite.addsWrong" --continue`인 것을 화면으로 확인했다. 확인 뒤 예제 프로젝트와 설정 폴더를 지웠다. Kotlin·Scala 컴파일러와 의존성은 Gradle 캐시(`~/.gradle`, 약 220MB 늘어남)에 남는다.
   - 찾은 것(Ferrite 밖): Windows에서 프로젝트 경로에 한글이 있으면(`코틀린 게시판`, `코틀린게시판`) Gradle 테스트 실행기가 테스트 클래스를 찾지 못한다(`ClassNotFoundException`, 결과는 "Gradle Test Executor N"의 "failed to execute tests"). 명령 줄에서도 같고, 빈칸만 든 ASCII 경로(`kotlin board`)는 된다. 컴파일은 되고 테스트 JVM에서만 실패한다. 같은 증상을 한글 폴더 밖으로 옮겨 푼 사용자 글이 있다.
-  - 남은 것: Maven 다중 모듈도 기본으로 첫 실패에서 멈춘다(`-fae`가 없으면 뒤 모듈의 테스트가 돌지 않는다). 확인하지 않아 그대로 두었다. Scala의 ScalaTest·MUnit(자체 실행기)으로는 돌려 보지 않았다. 한글 경로의 Gradle 실패는 테스트 창이 까닭을 알리지 않는다.
+  - 남은 것: Maven 다중 모듈도 기본으로 첫 실패에서 멈춘다(`-fae`가 없으면 뒤 모듈의 테스트가 돌지 않는다). 확인하지 않아 그대로 두었다. Scala의 ScalaTest·MUnit(자체 실행기)으로는 돌려 보지 않았다. 한글 경로의 Gradle 실패는 테스트 창이 까닭을 알리지 않는다(뒤에 백로그 "한글 경로의 Gradle 테스트"(2026-11-10)에서 했다).
+- [x] 한글 경로의 Gradle 테스트(2026-11-10) — 작음
+  - 까닭: 위 "Kotlin·Scala 테스트 확인"에서 Windows의 한글 경로 프로젝트는 Gradle 테스트가 "Gradle Test Executor N"의 "failed to execute tests" 하나로만 끝났다(`ClassNotFoundException`). 한국어 사용자에게는 흔한 경로라 까닭을 찾았다.
+  - 찾기(로컬 Windows, 코드 페이지 949, Gradle 9.2.0)
+    - Java만 있는 프로젝트도 같다. 빈칸만 든 ASCII 경로는 된다.
+    - `--debug`로 보면 Gradle은 테스트 JVM을 `java.exe @…\.gradle\.tmp\gradle-worker-classpath….txt`로 띄우고, 클래스 경로를 그 인자 파일에 적는다.
+    - JDK 17로 돌리면(클라이언트와 데몬 모두) 된다. JDK 21이면 안 된다. JDK 18부터 기본 문자셋이 UTF-8이라(JEP 400) Gradle이 인자 파일을 UTF-8로 쓰는데, Windows의 java는 그 파일을 시스템 코드 페이지로 읽는다. 그래서 한글이 든 클래스 경로가 깨져 테스트 클래스가 없다.
+  - 고치지 못한 까닭(Ferrite가 몰래 비켜 가지 않는다)
+    - 테스트 JVM에 `-Dsun.jnu.encoding=UTF-8`: 안 된다(인자 파일은 JVM이 뜨기 전에 읽는다).
+    - 데몬 JDK만 17(`-Dorg.gradle.java.home`): 안 된다. 클라이언트가 자기 `file.encoding=UTF-8`을 데몬에 넘긴다.
+    - `GRADLE_OPTS=-Dfile.encoding=COMPAT`: 테스트는 돌지만 javac가 UTF-8 소스를 949로 읽어 한글에서 `unmappable character` 오류를 낸다. 빌드 동작을 바꾸므로 넣지 않았다.
+    - ASCII 경로의 디렉터리 정션으로 돌리기: Gradle이 보는 경로가 터미널과 달라져 증분 빌드가 매번 다시 돌고, 정션을 잘못 지우면 원본이 지워질 수 있어 넣지 않았다.
+  - 고침: 테스트 창이 이 실패(Windows, Gradle, 돌린 폴더 경로에 ASCII가 아닌 글자, "Could not execute test class"와 `ClassNotFoundException`)를 알아보고 결과 위에 까닭과 해법을 보인다. 해법은 영문 경로로 옮기기, 옮길 수 없으면 JDK 17로 돌리고 빌드 파일에 소스 문자셋 UTF-8을 적기다(JDK 17과 `options.encoding = "UTF-8"`로 한글 문자열 비교 테스트가 통과하는 것을 확인했다).
+  - 검증
+    - 단위: 실제 실패 보고서(줄인 스택)로 알아보기, ASCII 경로·Maven·보통 실패는 아님, Windows가 아니면 아님
+    - 창 시험(kittest): 한글 경로 프로젝트에서 이 결과를 보이면 안내가 보인다(Windows에서만)
+    - 실제 앱(Windows, 릴리스 빌드, JDK 21, `자바 게시판` 폴더): [실행 > 테스트]의 `gradle test` → "통과 0 · 실패 1" 아래에 안내가 주황색으로 줄 바꿔 보이는 것을 화면으로 확인했다. 확인 뒤 예제 프로젝트와 설정 폴더를 지웠다.
+  - 확인하지 못한 것: Windows의 "Beta: 세계 언어 지원을 위해 Unicode UTF-8 사용"을 켜면 될 것으로 보지만 시스템 설정이라 바꾸지 않았다. Windows 사용자 이름이 한글이라 Gradle 홈(`~/.gradle`)이 한글 경로인 경우(모든 Gradle 테스트가 깨질 것으로 본다)는 이 안내의 조건(돌린 폴더 경로)에 걸리지 않는다. Maven(Surefire)은 같은 문제가 없는지 보지 않았다.
 
 - 살폈지만 넣지 않은 것: 임베디드(MCU 플래시·시리얼 모니터·장비 설정 파일), 프레임워크별 지원(React·Vue·Angular 등, JS·TS 언어 서버로 기본은 된다), 린터 개별 연동(언어 서버나 저장 시 작업으로 된다), 원격 개발·컨테이너·SFTP 배포, 로컬 AI 완성 모델, 계정 기반 설정 동기화. egov 개발과 거리가 멀거나 크기에 비해 쓰임이 적다.
 

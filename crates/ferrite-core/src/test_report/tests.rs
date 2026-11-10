@@ -410,6 +410,46 @@ fn kotlin_scala_스택의_테스트_줄을_찾는다() {
     std::fs::remove_dir_all(&root).unwrap();
 }
 
+/// Windows·JDK 21에서 한글 경로의 프로젝트를 `gradle test`로 돌린 실제 보고서(Gradle 9.2.0)에서 스택을 줄였다.
+const GRADLE_CLASS_NOT_FOUND: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="Gradle Test Executor 1" tests="1" skipped="0" failures="1" errors="0" timestamp="2026-11-10T06:01:02.941Z" hostname="pc" time="0.105">
+  <properties/>
+  <testcase name="failed to execute tests" classname="Gradle Test Executor 1" time="0.105">
+    <failure message="org.gradle.api.internal.tasks.testing.TestSuiteExecutionException: Could not execute test class 'com.example.board.CalcTest'." type="org.gradle.api.internal.tasks.testing.TestSuiteExecutionException">org.gradle.api.internal.tasks.testing.TestSuiteExecutionException: Could not execute test class 'com.example.board.CalcTest'.
+	at org.gradle.api.internal.tasks.testing.SuiteTestClassProcessor.processTestClass(SuiteTestClassProcessor.java:56)
+	at app//worker.org.gradle.process.internal.worker.GradleWorkerMain.main(GradleWorkerMain.java:74)
+Caused by: org.gradle.internal.UncheckedException: java.lang.ClassNotFoundException: com.example.board.CalcTest
+	at org.gradle.api.internal.tasks.testing.junitplatform.JUnitPlatformTestClassProcessor.loadClass(JUnitPlatformTestClassProcessor.java:186)
+	... 17 more
+Caused by: java.lang.ClassNotFoundException: com.example.board.CalcTest
+	at java.base/jdk.internal.loader.BuiltinClassLoader.loadClass(BuiltinClassLoader.java:641)
+	... 22 more
+</failure>
+  </testcase>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>"#;
+
+#[test]
+fn 한글_경로에서_gradle이_테스트_클래스를_찾지_못한_것을_알아본다() {
+    let cases = parse_junit(GRADLE_CLASS_NOT_FOUND).unwrap();
+    let korean = Path::new(r"C:\Users\me\자바 게시판");
+    assert_eq!(
+        gradle_path_problem(Tool::Gradle, korean, &cases),
+        cfg!(windows),
+        "Windows에서만 생긴다"
+    );
+    assert!(!gradle_path_problem(
+        Tool::Gradle,
+        Path::new(r"C:\work\board"),
+        &cases
+    ));
+    assert!(!gradle_path_problem(Tool::Maven, korean, &cases));
+    // 테스트가 실제로 실패한 것은 아니다.
+    let ordinary = parse_junit(GRADLE).unwrap();
+    assert!(!gradle_path_problem(Tool::Gradle, korean, &ordinary));
+}
+
 #[test]
 fn egov_pom의_skip_tests를_찾아_지운다() {
     // egov 웹 템플릿(v5.0.7)의 surefire 설정 꼴. 관리 블록의 다른 플러그인은 건드리지 않는다.
