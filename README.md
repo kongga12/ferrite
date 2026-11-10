@@ -60,6 +60,7 @@ Rust로 작성한 크로스플랫폼(Windows / macOS / Linux) 경량 IDE.
     - JPA: `@Query` JPQL 안의 엔티티·필드 완성, IDENTITY를 지원하지 않는 Oracle 방언에서 `@GeneratedValue(IDENTITY)` 경고. 요청 값(`param`·`header`·`cookie`, `request.getParameter`)은 경고, 그 밖의 값은 정보다. `<c:out>`·`fn:escapeXml`로 감싸면 사라진다.
   - 언어 서버 매니저(`도구 > 언어 서버`): 버전·SHA-256을 고정한 배포본을 내려받아 설치·업데이트·삭제한다.
   - 서버가 없으면 상태바의 "설치" 버튼으로 바로 설치할 수 있다.
+  - rust-analyzer가 작업 공간을 읽는 동안(자동완성·코드 액션 등이 빈 결과를 줄 수 있다)은 상태바에 "색인 중…"으로 보인다.
   - 인터넷이 막힌 PC는 다른 PC에서 받은 파일로 설치한다("파일에서…").
   - 진단: 물결 밑줄, 말풍선, 문제 목록(상태바의 "오류 N · 경고 M" 클릭)
   - 자동완성 팝업, 호버 정보
