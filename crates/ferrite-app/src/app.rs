@@ -3309,8 +3309,19 @@ impl FerriteApp {
                             ServerState::Starting => {
                                 ui.label(format!("{name}: 준비 중…"));
                             }
+                            // rust-analyzer는 작업 공간을 읽는 동안 기능 요청에 빈 결과를 준다. 그동안은
+                            // 준비됐어도 "색인 중"으로 보인다. 서버가 붙인 설명(읽지 못한 까닭 등)은 걸면 보인다.
                             ServerState::Ready => {
-                                ui.label(format!("{name}: 준비됨"));
+                                let activity = self.hub.activity(&doc.path, lang);
+                                let busy = activity.is_some_and(|a| !a.quiescent);
+                                let label = ui.label(if busy {
+                                    format!("{name}: 색인 중…")
+                                } else {
+                                    format!("{name}: 준비됨")
+                                });
+                                if let Some(message) = activity.and_then(|a| a.message.as_deref()) {
+                                    label.on_hover_text(message);
+                                }
                             }
                             ServerState::NotInstalled => {
                                 if let Some(progress) = self.servers.progress_text(name) {
@@ -4683,6 +4694,11 @@ mod tests {
             }),
             "서버 준비 시간 초과"
         );
+        assert!(
+            wait_quiescent(&mut harness),
+            "rust-analyzer가 작업 공간을 다 읽지 않음: {}",
+            ra_state(harness.state())
+        );
         // 이 테스트의 문서는 모두 ASCII라 바이트 위치 = 문자 위치
         let caret = |h: &mut Harness<'_, FerriteApp>, pos: usize| {
             h.state_mut().docs[0]
@@ -4758,6 +4774,26 @@ mod tests {
         remove_project(&dir);
     }
 
+    /// rust-analyzer가 작업 공간을 다 읽어 할 일이 없다고 알릴(`experimental/serverStatus`의 quiescent)
+    /// 때까지 프레임을 돌린다(최대 2분). 읽는 동안에는 기능 요청에 빈 결과를 준다. 처음 `cargo metadata`가
+    /// 만든 `Cargo.lock`을 알리면 작업 공간을 다시 읽으므로, 준비된 뒤에도 잠시 그럴 수 있다.
+    fn wait_quiescent(harness: &mut Harness<'_, FerriteApp>) -> bool {
+        run_until_slow(harness, |app| {
+            app.hub
+                .activity(&app.docs[0].path, Lang::Rust)
+                .is_some_and(|a| a.quiescent)
+        })
+    }
+
+    /// 실패 메시지에 붙일 rust-analyzer의 상태와 앱의 상태 줄.
+    fn ra_state(app: &FerriteApp) -> String {
+        format!(
+            "{:?} / 상태 줄: {}",
+            app.hub.activity(&app.docs[0].path, Lang::Rust),
+            app.status
+        )
+    }
+
     /// `act`를 하고 몇 프레임 돌려 `done`이 될 때까지 되풀이한다(최대 약 60초).
     /// 서버가 준비 중이면 빈 결과나 일시적 오류를 주므로, 사용자가 다시 시도하듯 반복한다.
     fn retry_until(
@@ -4799,6 +4835,11 @@ mod tests {
             }),
             "서버 준비 시간 초과"
         );
+        assert!(
+            wait_quiescent(&mut harness),
+            "rust-analyzer가 작업 공간을 다 읽지 않음: {}",
+            ra_state(harness.state())
+        );
         let doc_text = |h: &Harness<'_, FerriteApp>| h.state().docs[0].buffer.text();
 
         // F2: 정의와 호출을 함께 바꾼다
@@ -4839,7 +4880,13 @@ mod tests {
 
         // Ctrl+.: 코드 액션 메뉴를 열고 첫 항목을 실행하면 문서가 바뀐다. 포맷 직후에는
         // rust-analyzer가 resolve에 빈 편집을 돌려줄 때가 있어(앱은 "적용할 편집이 없습니다"로
-        // 알린다, CI에서 가끔 생김) 그때는 메뉴부터 다시 연다.
+        // 알린다, CI에서 가끔 생김) 그때는 메뉴부터 다시 연다. Windows CI에서 1분 내내 "가능한 코드
+        // 액션이 없습니다"였던 적이 있어(실행 42585461249), 묻기 전에 다시 읽기가 끝나기를 기다린다.
+        assert!(
+            wait_quiescent(&mut harness),
+            "rust-analyzer가 일을 마치지 않음: {}",
+            ra_state(harness.state())
+        );
         let on_n = doc_text(&harness).find("let n").unwrap() + 4;
         let before = harness.state().docs[0].buffer.version();
         let changed = |app: &FerriteApp| app.docs[0].buffer.version() != before;
@@ -4858,7 +4905,7 @@ mod tests {
             assert!(
                 opened,
                 "코드 액션 메뉴가 열리지 않음: {}",
-                harness.state().status
+                ra_state(harness.state())
             );
             harness.state_mut().status.clear();
             harness.key_press(Key::Enter);
@@ -4873,7 +4920,7 @@ mod tests {
         assert!(
             applied,
             "코드 액션이 적용되지 않음: {}",
-            harness.state().status
+            ra_state(harness.state())
         );
         assert!(harness.state().actions.is_none());
 

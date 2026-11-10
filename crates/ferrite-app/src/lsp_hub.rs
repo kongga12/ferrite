@@ -14,7 +14,7 @@ use ferrite_core::settings::JsonSchemaSetting;
 use ferrite_core::syntax::{Lang, MAX_SYNTAX_BYTES};
 use ferrite_lsp::catalog::{self, Launch, Server as ServerSpec, Source};
 use ferrite_lsp::client::{
-    DIAGNOSTIC_REFRESH, LanguageServer, RpcError, ServerEvent, parse_diagnostics,
+    DIAGNOSTIC_REFRESH, LanguageServer, RpcError, SERVER_STATUS, ServerEvent, parse_diagnostics,
     parse_pulled_diagnostics,
 };
 use ferrite_lsp::edits::{FileEdit, parse_workspace_edit};
@@ -179,10 +179,34 @@ pub enum ServerState {
     Failed(String),
 }
 
+/// 서버가 알린 일 상태(rust-analyzer의 `experimental/serverStatus`). 알리지 않는 서버는 없다.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Activity {
+    /// 작업 공간 읽기·빌드 스크립트·색인 같은 할 일이 없다. 아니면 기능 요청에 빈 결과를 줄 수 있다.
+    pub quiescent: bool,
+    /// 서버가 붙인 설명(읽는 중인 것, 작업 공간을 읽지 못한 까닭 등).
+    pub message: Option<String>,
+}
+
+impl Activity {
+    fn parse(params: &Value) -> Activity {
+        Activity {
+            quiescent: params["quiescent"].as_bool().unwrap_or(true),
+            message: params["message"]
+                .as_str()
+                .map(str::trim)
+                .filter(|m| !m.is_empty())
+                .map(str::to_owned),
+        }
+    }
+}
+
 struct Server {
     spec: &'static ServerSpec,
     lsp: Option<LanguageServer>,
     state: ServerState,
+    /// 서버가 알린 일 상태. 알리지 않는 서버는 None.
+    activity: Option<Activity>,
     started: Instant,
     /// 서버에 연 문서와 마지막으로 보낸 LSP 버전.
     opened: HashMap<PathBuf, i32>,
@@ -478,6 +502,12 @@ impl LspHub {
     pub fn status(&self, path: &Path, lang: Lang) -> Option<(&'static ServerSpec, &ServerState)> {
         let spec = catalog::for_language(language_id(lang, path))?;
         self.servers.get(spec.name).map(|s| (s.spec, &s.state))
+    }
+
+    /// 이 문서의 주 서버가 알린 일 상태(rust-analyzer). 알리지 않는 서버는 None.
+    pub fn activity(&self, path: &Path, lang: Lang) -> Option<&Activity> {
+        let spec = catalog::for_language(language_id(lang, path))?;
+        self.servers.get(spec.name)?.activity.as_ref()
     }
 
     /// 이 문서의 주 서버를 내려 다음 동기화 때 다시 띄우게 한다(상태바에서 누른 수동 재시작).
@@ -937,6 +967,12 @@ impl LspHub {
                 };
                 updates.push(HubUpdate::Message(message));
             }
+            ServerEvent::Notification { method, params } if method == SERVER_STATUS => {
+                if let Some(server) = self.servers.get_mut(name) {
+                    server.activity = Some(Activity::parse(&params));
+                    self.ctx.request_repaint();
+                }
+            }
             ServerEvent::Notification { method, .. } if method == DIAGNOSTIC_REFRESH => {
                 // 다음 동기화 때 열린 문서마다 다시 묻는다.
                 if let Some(server) = self.servers.get_mut(name) {
@@ -1107,6 +1143,7 @@ fn start_server(
         spec,
         lsp: None,
         state: ServerState::NotInstalled,
+        activity: None,
         started: Instant::now(),
         opened: HashMap::new(),
         pulled: HashMap::new(),
@@ -1162,6 +1199,26 @@ fn notification(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rust_analyzer의_상태_알림을_읽는다() {
+        let busy = Activity::parse(&serde_json::json!({
+            "health": "ok", "quiescent": false, "message": " Fetching \n"
+        }));
+        assert_eq!(
+            busy,
+            Activity {
+                quiescent: false,
+                message: Some("Fetching".into())
+            }
+        );
+        let done = Activity::parse(&serde_json::json!({"health": "ok", "quiescent": true}));
+        assert_eq!((done.quiescent, done.message), (true, None));
+        let failed = Activity::parse(&serde_json::json!({
+            "health": "error", "quiescent": true, "message": "Failed to load workspaces"
+        }));
+        assert_eq!(failed.message.as_deref(), Some("Failed to load workspaces"));
+    }
 
     #[test]
     fn spring_설정_파일만_spring_언어_id를_쓴다() {

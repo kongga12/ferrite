@@ -388,6 +388,10 @@ impl Drop for LanguageServer {
 /// 서버가 진단을 다시 물으라고 보내는 요청. 앱에는 같은 이름의 알림으로 넘긴다.
 pub const DIAGNOSTIC_REFRESH: &str = "workspace/diagnostic/refresh";
 
+/// rust-analyzer의 상태 알림(작업 공간을 읽는 중인지, 문제가 있는지). 클라이언트가 지원한다고 알려야
+/// 보낸다.
+pub const SERVER_STATUS: &str = "experimental/serverStatus";
+
 /// `textDocument/diagnostic` 응답에서 진단 목록을 꺼낸다. 바뀌지 않았다는 답(`unchanged`)은 None.
 pub fn parse_pulled_diagnostics(result: &Value) -> Option<Vec<Diagnostic>> {
     if result.get("kind").and_then(Value::as_str) != Some("full") {
@@ -460,6 +464,9 @@ fn initialize_params(root: &Path, init_options: &Value) -> Result<Value, String>
                 "workspaceEdit": { "documentChanges": true, "resourceOperations": [] },
             },
             "window": { "workDoneProgress": false },
+            // rust-analyzer가 작업 공간을 다 읽었는지(`quiescent`) 알린다. 읽는 중에는 기능 요청에
+            // 빈 결과를 주므로 상태바에 보인다. 다른 서버는 모르는 항목이라 무시한다.
+            "experimental": { "serverStatusNotification": true },
         },
     });
     if !init_options.is_null() {
