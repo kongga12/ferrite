@@ -48,6 +48,7 @@ pub fn parse(text: &str, root: &Path, dir: &Path) -> Result<Vec<Finding>, String
     for run in runs {
         let driver = &run["tool"]["driver"];
         let tool = driver["name"].as_str().unwrap_or("SARIF").to_owned();
+        let version = driver["version"].as_str();
         let rules = driver["rules"].as_array().cloned().unwrap_or_default();
         let bases = run.get("originalUriBaseIds");
         for result in run["results"].as_array().into_iter().flatten() {
@@ -91,7 +92,7 @@ pub fn parse(text: &str, root: &Path, dir: &Path) -> Result<Vec<Finding>, String
             findings.push(Finding {
                 tool: tool.clone(),
                 message: message(&result["message"], &rule),
-                help: rule["helpUri"].as_str().map(str::to_owned),
+                help: rule["helpUri"].as_str().map(|uri| help_uri(uri, version)),
                 rule: rule_id,
                 level,
                 uri,
@@ -104,6 +105,20 @@ pub fn parse(text: &str, root: &Path, dir: &Path) -> Result<Vec<Finding>, String
         }
     }
     Ok(findings)
+}
+
+/// 규칙 설명 주소. PMD는 자기 규칙의 주소에 든 `${pmd.website.baseurl}`를 그 판의 문서 주소로 풀지만,
+/// 규칙을 옮겨 적은 룰셋(egov 표준 점검 룰셋 등)의 것은 그대로 낸다. PMD처럼 판의 문서 주소로 푼다.
+fn help_uri(uri: &str, version: Option<&str>) -> String {
+    const BASE: &str = "${pmd.website.baseurl}";
+    if !uri.contains(BASE) {
+        return uri.to_owned();
+    }
+    let docs = version.map_or_else(
+        || "https://docs.pmd-code.org/latest".to_owned(),
+        |v| format!("https://docs.pmd-code.org/pmd-doc-{v}"),
+    );
+    uri.replace(BASE, &docs)
 }
 
 /// 결과의 메시지. 규칙의 메시지 틀(`messageStrings`)이 있으면 인자를 채운 것을 쓴다(SpotBugs는 짧은

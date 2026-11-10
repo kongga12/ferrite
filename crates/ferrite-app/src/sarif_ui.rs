@@ -181,6 +181,8 @@ impl SarifPanel {
             for example in [
                 "SpotBugs: mvn compile com.github.spotbugs:spotbugs-maven-plugin:spotbugs -Dspotbugs.sarifOutput=true",
                 "PMD: mvn compile pmd:pmd -Dformat=net.sourceforge.pmd.renderers.SarifRenderer (target/pmd.sarif.json)",
+                "egov 표준 점검 룰셋: pom의 maven-pmd-plugin 설정 <rulesets>에 적습니다(명령 줄로는 못 고릅니다). \
+                 4.3 룰셋은 PMD 7에서 EmptyCatchBlock 등 5개 규칙이 걸리지 않습니다.",
                 "Semgrep: semgrep scan --sarif --output semgrep.sarif (규칙에 한글이 있으면 Windows에서는 PYTHONUTF8=1)",
                 "clang: clang --analyze --analyzer-output sarif -o clang.sarif 파일.c",
             ] {
