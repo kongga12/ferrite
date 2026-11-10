@@ -1828,7 +1828,26 @@
   - 검증
     - 단위: 실제 결과(줄인 것)로 한글 메시지·수준·풀린 설명 주소, 판이 없을 때 `latest`
     - 실제 앱(Windows, 릴리스 빌드): egov 룰셋으로 낸 `target/pmd.sarif.json`을 정적 분석 탭에서 불러오면 "PMD · 오류 5 · 경고 15 · 참고 1"과 한글 메시지, 편집기의 물결선이 보이고, 결과에 마우스를 올리면 `https://docs.pmd-code.org/pmd-doc-7.17.0/pmd_rules_java_bestpractices.html#systemprintln`이 보인다. 안내 줄도 화면으로 보았다. 확인 뒤 설정 폴더를 지웠다.
-  - 확인하지 못한 것: 영문판 룰셋, 4.2 이하 룰셋, PMD 6(maven-pmd-plugin 3.21 이하)으로 돌린 결과. 4.3 룰셋은 PMD 7의 클래스 이름을 쓰므로 PMD 6에서는 읽히지 않을 것으로 본다. 룰셋을 PMD 7에 맞게 고쳐 Ferrite가 내주는 것은 하지 않았다(공식 룰셋을 고치는 일이라 따로 정한다).
+  - 확인하지 못한 것: 영문판 룰셋, 4.2 이하 룰셋, PMD 6(maven-pmd-plugin 3.21 이하)으로 돌린 결과. 4.3 룰셋은 PMD 7의 클래스 이름을 쓰므로 PMD 6에서는 읽히지 않을 것으로 본다. 룰셋을 PMD 7에 맞게 고쳐 Ferrite가 내주는 것은 하지 않았다(공식 룰셋을 고치는 일이라 따로 정한다. 뒤에 백로그 "PMD 7용 egov 룰셋 넣기"(2026-11-10)에서 했다).
+- [x] PMD 7용 egov 룰셋 넣기(2026-11-10) — 작음
+  - 까닭: 위 "egov 표준 점검 룰셋"에서 공식 4.3 룰셋은 PMD 7에서 5개 규칙(빈 catch 문 등 SW 보안약점 둘 포함)이 아무것도 잡지 못했다. egov 프로젝트가 PMD 7로 44개 규칙을 다 쓰게 한다.
+  - 정한 것(사용자와): 룰셋 파일과 pom 설정을 함께 넣는다. 메시지는 공식 문서(egovframe-docs 코드 점검) 표의 한글 설명을 쓴다.
+  - 룰셋(`crates/ferrite-core/src/egov_pmd/egov-inspection-rules.xml`)
+    - 44개 규칙을 PMD 7 기본 규칙(`category/java/…`)으로 가리킨다. 44개 모두 PMD 7.17에 있다. `SwitchStmtsShouldHaveDefault`는 PMD 7에서 이름이 `NonExhaustiveSwitch`로 바뀌어 그것을 가리킨다.
+    - 우선순위는 공식 4.3 룰셋과 같다. 규칙의 세부 설정은 PMD 기본값이다.
+    - 공식 문서 표, 4.3 룰셋의 우선순위, PMD jar의 범주로 만들었다(문서의 `ConstantsInterface`는 `ConstantsInInterface`의 오타).
+    - 규칙 몇 개(`UnnecessaryImport`·`UselessParentheses`·`EmptyControlStatement`·`BrokenNullCheck`)는 PMD가 메시지를 직접 정해 룰셋의 메시지 대신 영어로 온다(공식 룰셋도 같다).
+  - [egov 룰셋 넣기](문제 창 > 정적 분석, 프로젝트 루트에 pom.xml이 있을 때)
+    - 루트에 `egov-inspection-rules.xml`을 쓴다. 이미 있으면 사용자가 고쳤을 수 있어 그대로 둔다.
+    - pom.xml의 maven-pmd-plugin 설정에 `<rulesets><ruleset>${basedir}/egov-inspection-rules.xml</ruleset></rulesets>`를 더한다. egov 5.0.7 웹·심플 템플릿은 판·설정 없는 maven-pmd-plugin이 이미 있어 그 플러그인에 `<configuration>`을 넣는다. 설정이 있으면 그 안에, 플러그인이 없으면 `<build><plugins>`에(판 3.28.0), build가 없으면 build째 넣는다.
+    - pom의 들여쓰기 단위(탭·빈칸)와 줄 끝(CRLF·LF)을 따른다.
+    - 이미 이 룰셋을 쓰면 고치지 않는다. 다른 룰셋(`<rulesets>`)이 있거나 여러 모듈을 묶는 pom(`<modules>`, `${basedir}`가 모듈마다 달라진다)이면 고치지 않고 직접 적을 것을 알린다.
+  - 검증
+    - 단위: egov 템플릿 꼴(탭, CRLF, 설정 없는 플러그인), 빈칸 네 칸과 여러 줄 project 속성, build 없음, 설정 있음, 한 줄 태그, 다른 룰셋·여러 모듈·깨진 pom, 룰셋 44개 규칙(PMD 기본 규칙, 한글 메시지, 우선순위)
+    - 창 시험(kittest): [egov 룰셋 넣기]가 룰셋 파일을 쓰고 pom에 적고, 다시 누르면 고치지 않는다.
+    - 실제 PMD(`--ignored`, 3개 OS CI): 규칙마다 걸리게 만든 예제(`crates/ferrite-core/tests/egov_pmd/`)를 이 룰셋으로 돌리면 44개 규칙이 모두 잡히고 다른 규칙은 없다. 빈 catch 문은 한글 메시지로 그 줄에 온다. 예제를 만들다 알게 된 것: PMD 7의 `UnusedFormalParameter`는 이름이 `unused`·`ignored`로 시작하는 매개변수를 건너뛴다.
+    - 실제 앱(Windows, 릴리스 빌드, `egov 게시판` 폴더, egov 템플릿 꼴의 탭·CRLF pom): [egov 룰셋 넣기] → 상태 줄의 알림과 트리의 `egov-inspection-rules.xml`, pom에는 탭·CRLF 그대로 `<configuration><rulesets>`가 들어갔다. 안내의 PMD 명령을 돌리고 불러오면 "PMD · 오류 11 · 경고 35 · 참고 2", 공식 룰셋으로는 빠졌던 14줄 `EmptyCatchBlock`·24줄 `AvoidCatchingGenericException`이 한글 메시지와 물결선으로 보였다. 확인 뒤 예제 프로젝트와 설정 폴더를 지웠다.
+  - 확인하지 못한 것: 판이 적히지 않은 maven-pmd-plugin(egov 템플릿 그대로)은 Maven이 저장소의 최신 판을 고르므로 PMD 6으로 도는 옛 판이 골라질 일은 없다고 보지만 돌려 보지는 않았다(로컬 확인은 판을 적은 pom으로 했다). Gradle의 PMD 플러그인에는 넣지 않는다.
 
 - 살폈지만 넣지 않은 것: 임베디드(MCU 플래시·시리얼 모니터·장비 설정 파일), 프레임워크별 지원(React·Vue·Angular 등, JS·TS 언어 서버로 기본은 된다), 린터 개별 연동(언어 서버나 저장 시 작업으로 된다), 원격 개발·컨테이너·SFTP 배포, 로컬 AI 완성 모델, 계정 기반 설정 동기화. egov 개발과 거리가 멀거나 크기에 비해 쓰임이 적다.
 
