@@ -1749,6 +1749,12 @@
     - jdt.ls 실제 시험(`servers.yml`, 3개 OS): Maven 프로젝트를 여는 동안 jdt.ls가 작업 진행(begin)을 보내는지 본다. 실행 42738241855에서 3개 OS 모두 통과했다. 온 진행은 "Initialize Workspace", "Synchronizing projects", "LookupJDKToolchainsJob", "Refreshing workspace", "Building", "Searching...", "Validate documents", "Publish Diagnostics"였다(Windows에서는 앞의 둘 중 "Initialize Workspace"가 빠졌다).
     - 실제 앱(Windows, 릴리스 빌드): Rust 파일을 열고 0.9초 뒤 상태바 "rust-analyzer: Building compile-time-deps…", 2.2초 뒤 "rust-analyzer: Indexing 5/21 (core) 23%…"를 화면으로 확인했다. 확인 뒤 예제와 설정 폴더를 지웠다.
   - 확인하지 못한 것: 실제 앱에서 jdt.ls의 진행(받는 데 약 51MB가 필요해 CI 시험으로 대신했다). gopls·TypeScript 등 다른 서버의 진행.
+- [x] 시험이 남기는 임시 폴더(2026-11-10) — 작음
+  - 까닭: 안 쓰는 시험 파일을 찾다 보니 저장소에는 없었다(고정 파일 8개 모두 쓰인다). 그런데 `%TEMP%`에 시험이 남긴 `ferrite-*` 폴더가 50개(31MB) 있었다. 오늘 시험을 돌릴 때마다 `ferrite-egov-flag-*`(빈 폴더)와 `ferrite-ra-*`(`target/flycheck0`가 남음)가 새로 생겼다.
+  - 찾기: 두 시험 모두 끝에 폴더를 지우지만, 언어 서버를 내린(`drop`) 바로 다음이다. `LanguageServer`의 `Drop`은 `shutdown`·`exit`를 보내고 끝나기를 다른 스레드에서 기다리며(유예 2초, 그 뒤 강제 종료) 곧바로 돌아온다. 그동안 서버는 그 폴더를 작업 폴더로 쥐고(rust-analyzer는 `cargo check` 결과도 쓴다) 있어, Windows에서 지우기가 실패했다. 결과를 버리므로(`let _ =`) 몰랐다.
+  - 고침(시험만): `egov_ls.rs`(`ferrite --egov-ls`)와 `rust_analyzer.rs`(세 곳)가 다 지워질 때까지 다시 시도한다(최대 15초). 그래도 못 지우면 알린다. 앱의 창 시험은 이미 `remove_project`로 다시 시도한다.
+  - 남은 것들: 예전 실험(`ferrite-typings-exp`, 31MB)과 그동안 실패한 시험이 남긴 것이다. 공용 임시 폴더를 한꺼번에 지우는 것은 권한 판단에서 막혀 사용자가 지운다.
+  - 검증: 고친 뒤 두 시험을 두 번씩 돌려 새로 남은 폴더가 없었다(고치기 전에는 한 번에 넷씩 남았다). 시험 시간은 그대로다.
 
 - 살폈지만 넣지 않은 것: 임베디드(MCU 플래시·시리얼 모니터·장비 설정 파일), 프레임워크별 지원(React·Vue·Angular 등, JS·TS 언어 서버로 기본은 된다), 린터 개별 연동(언어 서버나 저장 시 작업으로 된다), 원격 개발·컨테이너·SFTP 배포, 로컬 AI 완성 모델, 계정 기반 설정 동기화. egov 개발과 거리가 멀거나 크기에 비해 쓰임이 적다.
 
