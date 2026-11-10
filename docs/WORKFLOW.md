@@ -1185,7 +1185,7 @@
     - 단위: 실제 Surefire 3.5.4 보고서(로컬 Maven으로 오프라인 실행)와 Gradle·pytest(xunit2)·CTest·`go test -json` 형식, 도구 알아내기, 보고서 옵션·실패만 다시 명령, 이번 실행의 보고서 찾기, 줄 찾기
     - 창 시험(kittest): 결과 트리와 실패 사유, 스택의 테스트 줄을 눌러 그 파일 그 줄로
     - 실제 도구(CI 3개 OS 전체 작업): Maven(JUnit 5)·pytest·Go·CTest를 돌려 결과·테스트 줄을 확인하고 실패만 다시 돌려 실패한 것만 도는지 본다.
-  - 남은 것: Kotlin·Scala 스택은 같은 꼴이라 읽지만 확인하지 않았다. Gradle 실제 실행은 백로그 "Gradle 실제 실행"(2026-11-05)에서 했다.
+  - 남은 것: Kotlin·Scala 스택은 같은 꼴이라 읽지만 확인하지 않았다(뒤에 백로그 "Kotlin·Scala 테스트 확인"(2026-11-10)에서 했다). Gradle 실제 실행은 백로그 "Gradle 실제 실행"(2026-11-05)에서 했다.
 - [x] 9-2 SARIF 결과 가져오기 — 작음
   - 결정(사용자): 문제 창 목록과 열린 파일의 물결선 둘 다, 프로젝트의 SARIF를 찾아 고르고 바뀌면 다시 읽기, 실제 SpotBugs로 로컬·CI 확인(로컬에서 spotbugs-maven-plugin 4.10.5.0을 받음, 53개 jar 31MB)
   - 문제 창 위 [이 파일]·[정적 분석 (N)]: 정적 분석은 프로젝트의 SARIF(`*.sarif`·`*.sarif.json`, SpotBugs의 `spotbugsSarif.json`, 최근 것이 먼저)를 골라 [불러오기], 그 밖은 [다른 파일…]. [찾기]·[지우기].
@@ -1755,6 +1755,18 @@
   - 고침(시험만): `egov_ls.rs`(`ferrite --egov-ls`)와 `rust_analyzer.rs`(세 곳)가 다 지워질 때까지 다시 시도한다(최대 15초). 그래도 못 지우면 알린다. 앱의 창 시험은 이미 `remove_project`로 다시 시도한다.
   - 남은 것들: 예전 실험(`ferrite-typings-exp`, 31MB)과 그동안 실패한 시험이 남긴 것이다. 공용 임시 폴더를 한꺼번에 지우는 것은 권한 판단에서 막혀 사용자가 지운다.
   - 검증: 고친 뒤 두 시험을 두 번씩 돌려 새로 남은 폴더가 없었다(고치기 전에는 한 번에 넷씩 남았다). 시험 시간은 그대로다.
+- [x] Kotlin·Scala 테스트 확인(2026-11-10) — 작음
+  - 까닭: 9-1 테스트 러너는 Kotlin·Scala 스택을 Java와 같은 꼴로 읽지만 실제로 돌려 보지 않았다. 실제 Gradle 9.2.0(JDK 21)으로 Kotlin 2.3.0과 Scala 2.13.16의 JUnit 5 테스트를 하위 프로젝트 둘로 돌려 보고 틀린 셋을 고쳤다.
+    - Kotlin 백틱 이름(``fun `adds wrong numbers`()``)은 스택 줄에도 빈칸이 든 채 나온다(`at app//com.example.board.CalcTest.adds wrong numbers(CalcTest.kt:14)`). 스택 정규식이 메서드 이름에 빈칸을 받지 않아 실패의 줄을 찾지 못했다. 이제 메서드와 클래스 이름(그 안의 람다는 `CalcTest$adds wrong numbers$1`)에 빈칸을 받는다.
+    - Kotlin 관례는 공통 루트 패키지를 폴더에서 빼는 것이다(`com.example.board` → `src/test/kotlin/CalcTest.kt`). 패키지 경로(`com/example/board/CalcTest.kt`)로만 찾아 파일을 찾지 못했다. 이제 Kotlin·Scala·Groovy 파일은 패키지 앞을 줄여 가며 찾는다. Java는 폴더가 패키지를 따르므로 패키지 경로로만 찾는다(다른 패키지의 같은 이름 파일로 가지 않게).
+    - Gradle은 첫 실패에서 남은 작업을 멈춘다. 루트에서 `gradle test`를 돌리면 먼저 돈 `:kt:test`가 실패한 뒤 `:sc:test`가 돌지 않아 결과 일부만 보였다. 실패만 다시 돌릴 때도 `--tests`에 맞는 것이 없는 하위 프로젝트가 "No tests found"로 실패해 그 뒤가 멈췄다. 이제 Gradle 명령에 `--continue`를 붙인다(실행과 실패만 다시 모두).
+  - 확인한 것: Scala 람다 안의 실패는 `$anonfun$addsWrong$1` 프레임으로 나오고 같은 클래스라 테스트 줄(12줄)로 간다. 빈칸 든 이름도 `--tests "com.example.board.CalcTest.adds wrong numbers"`로 걸러진다. Kotlin 컴파일러 데몬은 `kotlin.compiler.execution.strategy=in-process`로 띄우지 않아 시험 뒤에 Java 프로세스가 남지 않는다.
+  - 검증
+    - 단위: 빈칸 든 Kotlin 이름과 그 람다, Scala `$anonfun$` 프레임, 공통 루트 패키지를 뺀 Kotlin 파일 찾기, 패키지가 다른 같은 이름의 Java 파일은 찾지 않음, Gradle 명령의 `--continue`
+    - 실제 도구(`test_tools`, CI 3개 OS 전체 작업, 로컬 Windows 통과): Kotlin·Scala 하위 프로젝트를 루트에서 돌려 통과 2·실패 2, 실패 줄 `kt/src/test/kotlin/CalcTest.kt` 14줄과 `sc/src/test/scala/com/example/board/CalcSuite.scala` 12줄, 실패만 다시(둘 다), Scala 실패만 다시(`:kt:test`는 "No tests found"로 실패하지만 `:sc:test`가 돈다)
+    - 실제 앱(Windows, 릴리스 빌드, Gradle 9.2.0, `kotlin board` 폴더): [실행 > 테스트]의 `gradle test` → "통과 2 · 실패 2" 트리(두 하위 프로젝트), `adds wrong numbers()`를 두 번 눌러 `kt/src/test/kotlin/CalcTest.kt` 14줄, `addsWrong()`로 `CalcSuite.scala` 12줄, [실패만 다시]의 출력 첫 줄이 `gradle test --tests "com.example.board.CalcTest.adds wrong numbers" --tests "com.example.board.CalcSuite.addsWrong" --continue`인 것을 화면으로 확인했다. 확인 뒤 예제 프로젝트와 설정 폴더를 지웠다. Kotlin·Scala 컴파일러와 의존성은 Gradle 캐시(`~/.gradle`, 약 220MB 늘어남)에 남는다.
+  - 찾은 것(Ferrite 밖): Windows에서 프로젝트 경로에 한글이 있으면(`코틀린 게시판`, `코틀린게시판`) Gradle 테스트 실행기가 테스트 클래스를 찾지 못한다(`ClassNotFoundException`, 결과는 "Gradle Test Executor N"의 "failed to execute tests"). 명령 줄에서도 같고, 빈칸만 든 ASCII 경로(`kotlin board`)는 된다. 컴파일은 되고 테스트 JVM에서만 실패한다. 같은 증상을 한글 폴더 밖으로 옮겨 푼 사용자 글이 있다.
+  - 남은 것: Maven 다중 모듈도 기본으로 첫 실패에서 멈춘다(`-fae`가 없으면 뒤 모듈의 테스트가 돌지 않는다). 확인하지 않아 그대로 두었다. Scala의 ScalaTest·MUnit(자체 실행기)으로는 돌려 보지 않았다. 한글 경로의 Gradle 실패는 테스트 창이 까닭을 알리지 않는다.
 
 - 살폈지만 넣지 않은 것: 임베디드(MCU 플래시·시리얼 모니터·장비 설정 파일), 프레임워크별 지원(React·Vue·Angular 등, JS·TS 언어 서버로 기본은 된다), 린터 개별 연동(언어 서버나 저장 시 작업으로 된다), 원격 개발·컨테이너·SFTP 배포, 로컬 AI 완성 모델, 계정 기반 설정 동기화. egov 개발과 거리가 멀거나 크기에 비해 쓰임이 적다.
 
