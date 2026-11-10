@@ -392,6 +392,10 @@ pub const DIAGNOSTIC_REFRESH: &str = "workspace/diagnostic/refresh";
 /// 보낸다.
 pub const SERVER_STATUS: &str = "experimental/serverStatus";
 
+/// 서버가 하는 일의 진행(`$/progress`, LSP 3.15 작업 진행). 클라이언트가 `window.workDoneProgress`를
+/// 알려야 보낸다(jdt.ls의 Maven 가져오기, rust-analyzer의 색인, gopls의 패키지 읽기 등).
+pub const PROGRESS: &str = "$/progress";
+
 /// `textDocument/diagnostic` 응답에서 진단 목록을 꺼낸다. 바뀌지 않았다는 답(`unchanged`)은 None.
 pub fn parse_pulled_diagnostics(result: &Value) -> Option<Vec<Diagnostic>> {
     if result.get("kind").and_then(Value::as_str) != Some("full") {
@@ -463,7 +467,8 @@ fn initialize_params(root: &Path, init_options: &Value) -> Result<Value, String>
                 "executeCommand": { "dynamicRegistration": false },
                 "workspaceEdit": { "documentChanges": true, "resourceOperations": [] },
             },
-            "window": { "workDoneProgress": false },
+            // 서버가 하는 일(가져오기·색인)의 진행을 받아 상태바에 보인다. 토큰을 만들라는 요청에는 답한다.
+            "window": { "workDoneProgress": true },
             // rust-analyzer가 작업 공간을 다 읽었는지(`quiescent`) 알린다. 읽는 중에는 기능 요청에
             // 빈 결과를 주므로 상태바에 보인다. 다른 서버는 모르는 항목이라 무시한다.
             "experimental": { "serverStatusNotification": true },

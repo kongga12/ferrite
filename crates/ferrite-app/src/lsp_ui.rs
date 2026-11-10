@@ -106,6 +106,13 @@ impl ActionMenu {
     }
 }
 
+/// 글을 `max`자까지 자른다(글자 경계에서). 상태바처럼 자리가 좁은 곳에 쓴다.
+pub fn shorten(text: &str, max: usize) -> &str {
+    text.char_indices()
+        .nth(max)
+        .map_or(text, |(i, _)| &text[..i])
+}
+
 fn is_word(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
