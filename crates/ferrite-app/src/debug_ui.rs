@@ -4,7 +4,8 @@
 //! 담아 읽기 전용으로 연다. 그 파일에 건 중단점은 원래 소스로 건다.
 //! js-debug면 그 스크립트를 만든 JSP를 내용으로 찾아, JSP에 건 중단점을 화면 스크립트의 줄로 바꿔 걸고 멈춘
 //! 자리도 JSP의 줄로 보인다. 화면에 인라인 스크립트가 여럿이면(Tiles·`<jsp:include>`·`<script>` 여럿) 블록마다
-//! 그것을 만든 JSP를 찾는다. 블록의 글은 js-debug의 CDP 프록시로 받은 화면의 원래 HTML에서 잘라 낸다.
+//! 그것을 만든 JSP를 찾는다. 블록의 글은 js-debug의 CDP 프록시로 받은 화면의 원래 HTML에서 잘라 낸다(원래
+//! HTML을 주지 않는 프레임 안 화면은 브라우저의 디버거에서 블록마다 받는다).
 //! 화면을 불러올 때 도는 코드에 건 JSP 중단점도 걸리게 화면마다 처음 맞춘 뒤 한 번 다시 부른다.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -155,8 +156,8 @@ impl Default for Pages {
 
 /// CDP 프록시로 따로(UI를 막지 않게) 한 일의 결과. 화면 열쇠와 함께 온다.
 enum PageEvent {
-    /// 화면의 원래 HTML.
-    Html(String, Result<String, String>),
+    /// 화면의 블록들(시작 줄·칸은 1부터, 글): 원래 HTML에서 잘랐거나 브라우저의 디버거에서 받았다.
+    Blocks(String, Result<Vec<(usize, usize, String)>, String>),
     /// 화면을 읽는 중에 멈춰 있어 HTML을 받지 않았다.
     Deferred(String),
     /// 화면을 다 읽었다(다시 불러도 되는지).
@@ -173,14 +174,15 @@ const HTML_WAIT: Duration = Duration::from_secs(1);
 /// 처음 맞춘 화면을 한 번 다시 부르는 일. 화면을 불러올 때 도는 코드(맨 위 코드, `$(function () { … })`)는
 /// JSP 중단점을 화면 줄로 바꿔 걸기 전에 돌아 버리므로, 화면마다 처음 맞춘 뒤 한 번 다시 불러 그 코드에서도
 /// 멈추게 한다.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 enum Reload {
     /// 화면을 다 읽기를 기다리며 다시 불러도 되는지 보는 중.
     Checking,
-    /// 맞춤이 끝나고 보낸 중단점의 답을 받으면 부른다(그래야 어댑터가 중단점을 건 뒤에 부른다).
-    Deciding,
+    /// 맞춤이 끝나고 보낸 중단점의 답을 받으면 그곳(맨 위 화면이나 그 프레임)을 부른다(그래야 어댑터가
+    /// 중단점을 건 뒤에 부른다).
+    Deciding(cdp::Target),
     /// 멈춰 있다. 사용자가 계속을 누르면 부른다.
-    AfterContinue,
+    AfterContinue(cdp::Target),
     /// 불렀거나 부르지 않기로 했다.
     Done,
 }
@@ -773,7 +775,7 @@ impl Debugger {
             .map_or_else(Vec::new, |pages| pages.events.1.try_iter().collect());
         for event in done {
             match event {
-                PageEvent::Html(key, html) => notices.extend(self.on_page_html(key, html)),
+                PageEvent::Blocks(key, blocks) => notices.extend(self.on_page_blocks(key, blocks)),
                 PageEvent::Deferred(key) => self.defer_page(key),
                 PageEvent::Loaded(key, loaded) => self.on_page_loaded(key, loaded),
                 PageEvent::Reloaded(key, result) => {
@@ -1066,8 +1068,8 @@ impl Debugger {
         }
     }
 
-    /// 화면의 블록 글을 묻는다: CDP 프록시가 있으면 원래 HTML을 따로 받고(처음이면 프록시부터 묻는다),
-    /// 없으면 화면에서 읽는다.
+    /// 화면의 블록 글을 묻는다: CDP 프록시가 있으면 따로 받고(처음이면 프록시부터 묻는다), 없으면 화면에서
+    /// 읽는다.
     fn ask_page(&mut self, key: String) {
         let Some(pages) = self.pages.as_mut() else {
             return;
@@ -1081,6 +1083,11 @@ impl Debugger {
             }
             ProxyState::Missing => return self.send(Request::PageScripts(key)),
         };
+        let starts: Vec<(usize, usize)> = pages
+            .inline
+            .get(&key)
+            .map(|inline| inline.starts.iter().copied().collect())
+            .unwrap_or_default();
         let page = shown(&key);
         self.spawn_cdp(move || {
             // 화면을 다 읽은 뒤에 받는다(HTML이 다 왔다). 읽는 중에 멈춰 있으면(다시 부른 화면의 맨 위 코드에서
@@ -1088,7 +1095,21 @@ impl Debugger {
             if cdp::wait_loaded(&proxy, HTML_WAIT) == Ok(false) {
                 return PageEvent::Deferred(key);
             }
-            PageEvent::Html(key, cdp::page_html(&proxy, &page))
+            // 원래 HTML에서 블록 자리의 글을 자른다. 프레임 안 화면처럼 HTML을 받지 못하면(자리가 맞지 않아도)
+            // 블록마다 브라우저의 디버거에서 받는다.
+            let from_html = cdp::page_html(&proxy, &page).ok().and_then(|html| {
+                page_lines::scripts_at(&html, &starts).map(|blocks| {
+                    blocks
+                        .into_iter()
+                        .map(|(line, column, text)| (line, column, text.to_owned()))
+                        .collect()
+                })
+            });
+            let blocks = match from_html {
+                Some(blocks) => Ok(blocks),
+                None => cdp::script_blocks(&proxy, &page, &starts),
+            };
+            PageEvent::Blocks(key, blocks)
         });
     }
 
@@ -1125,12 +1146,14 @@ impl Debugger {
             return;
         };
         let deferred = std::mem::take(&mut pages.deferred);
-        let reload: Vec<String> = if std::mem::take(&mut pages.continuing) {
+        let reload: Vec<(String, cdp::Target)> = if std::mem::take(&mut pages.continuing) {
             pages
                 .reloads
                 .iter()
-                .filter(|(_, r)| **r == Reload::AfterContinue)
-                .map(|(key, _)| key.clone())
+                .filter_map(|(key, reload)| match reload {
+                    Reload::AfterContinue(target) => Some((key.clone(), target.clone())),
+                    _ => None,
+                })
                 .collect()
         } else {
             Vec::new()
@@ -1138,8 +1161,8 @@ impl Debugger {
         for key in deferred {
             self.ask_page(key);
         }
-        for key in reload {
-            self.reload_page(key);
+        for (key, target) in reload {
+            self.reload_page(key, target);
         }
     }
 
@@ -1183,43 +1206,44 @@ impl Debugger {
         });
     }
 
-    /// 화면을 다 읽었다: 다시 불러도 되면 맞춘 중단점을 다시 보내 그 답을 받은 뒤 부른다. 폼을 보내 연 화면,
-    /// 프레임 안 화면은 부르지 않고 알린다.
+    /// 화면을 다 읽었다: 다시 불러도 되면 맞춘 중단점을 다시 보내 그 답을 받은 뒤 부른다(프레임 안 화면은 그
+    /// 프레임만). 폼을 보내 연 화면, 처음 주소에서 다른 화면으로 간 프레임은 부르지 않고 알린다.
     fn on_page_loaded(&mut self, key: String, loaded: Result<cdp::Loaded, String>) {
-        let why = match loaded {
-            Ok(cdp::Loaded {
-                top: true,
-                form_submit: false,
-            }) => None,
-            Ok(cdp::Loaded { top: false, .. }) => Some(
-                "맨 위 화면이 아닙니다(프레임 안 화면이거나 그사이 다른 화면으로 갔습니다)"
+        let target = match loaded {
+            Ok(cdp::Loaded::Reload(target)) => Ok(target),
+            Ok(cdp::Loaded::FormSubmit) => {
+                Err("폼을 보내 연 화면이라 다시 부르면 폼을 다시 보낼 수 있습니다".to_owned())
+            }
+            Ok(cdp::Loaded::FrameMoved) => Err(
+                "프레임이 처음 주소(src)에서 링크나 폼으로 다른 화면으로 가 있어 같은 화면을 다시 열 수 \
+                 없을 수 있습니다"
                     .to_owned(),
             ),
-            Ok(_) => {
-                Some("폼을 보내 연 화면이라 다시 부르면 폼을 다시 보낼 수 있습니다".to_owned())
-            }
-            Err(e) => Some(e),
+            Err(e) => Err(e),
         };
         let has_breakpoints = self.has_page_breakpoints(&key);
         let Some(pages) = self.pages.as_mut() else {
             return;
         };
-        if let Some(why) = why {
-            pages.reloads.insert(key.clone(), Reload::Done);
-            if has_breakpoints {
-                self.push_console(&format!(
-                    "[화면을 다시 부르지 않았습니다: {}] {why}. 화면을 불러올 때 도는 코드에 건 JSP 중단점은 \
-                     화면을 다시 불러야 걸립니다.\n",
-                    shown(&key)
-                ));
+        let target = match target {
+            Ok(target) => target,
+            Err(why) => {
+                pages.reloads.insert(key.clone(), Reload::Done);
+                if has_breakpoints {
+                    self.push_console(&format!(
+                        "[화면을 다시 부르지 않았습니다: {}] {why}. 화면을 불러올 때 도는 코드에 건 JSP 중단점은 \
+                         화면을 다시 불러야 걸립니다.\n",
+                        shown(&key)
+                    ));
+                }
+                return;
             }
-            return;
-        }
+        };
         // 블록이 더 와서 다시 맞추는 중이면 그 맞춤이 보낸 중단점의 답을 기다린다.
         if pages.asking.contains(&key) {
-            pages.reloads.insert(key, Reload::Deciding);
+            pages.reloads.insert(key, Reload::Deciding(target));
         } else if has_breakpoints {
-            pages.reloads.insert(key.clone(), Reload::Deciding);
+            pages.reloads.insert(key.clone(), Reload::Deciding(target));
             if let Some(local) = self.stored.get(&key).cloned() {
                 self.send_page(&local);
             }
@@ -1243,20 +1267,23 @@ impl Debugger {
         let Some(pages) = self.pages.as_mut() else {
             return;
         };
-        if pages.reloads.get(&key) != Some(&Reload::Deciding) || pages.asking.contains(&key) {
+        let Some(Reload::Deciding(target)) = pages.reloads.get(&key).cloned() else {
+            return;
+        };
+        if pages.asking.contains(&key) {
             return;
         }
         if !has_breakpoints {
             pages.reloads.insert(key, Reload::Done);
         } else if stopped {
-            pages.reloads.insert(key, Reload::AfterContinue);
+            pages.reloads.insert(key, Reload::AfterContinue(target));
         } else {
-            self.reload_page(key);
+            self.reload_page(key, target);
         }
     }
 
-    /// 화면을 다시 부른다(맨 위 화면, 한 번).
-    fn reload_page(&mut self, key: String) {
+    /// 화면을 다시 부른다(맨 위 화면이나 그 프레임, 한 번).
+    fn reload_page(&mut self, key: String, target: cdp::Target) {
         let Some(pages) = self.pages.as_mut() else {
             return;
         };
@@ -1266,7 +1293,7 @@ impl Debugger {
         };
         let proxy = proxy.clone();
         self.spawn_cdp(move || {
-            let result = cdp::reload(&proxy);
+            let result = cdp::reload(&proxy, &target);
             PageEvent::Reloaded(key, result)
         });
     }
@@ -1286,25 +1313,21 @@ impl Debugger {
         }
     }
 
-    /// 따로 받은 화면의 원래 HTML에서 블록마다 글을 잘라 맞춘다. 받지 못했거나 자리가 HTML에 맞지
-    /// 않으면(그사이 화면이 바뀌었다) 화면에서 글을 읽는다.
-    fn on_page_html(&mut self, key: String, html: Result<String, String>) -> Option<DebugNotice> {
-        let starts: Vec<(usize, usize)> = self
-            .pages
-            .as_ref()?
-            .inline
-            .get(&key)?
-            .starts
-            .iter()
-            .copied()
-            .collect();
-        let html = html.ok();
-        match html
-            .as_deref()
-            .and_then(|html| page_lines::scripts_at(html, &starts))
-        {
-            Some(blocks) => self.place_blocks(&key, &blocks),
-            None => {
+    /// 따로 받은 화면의 블록들로 맞춘다. 받지 못했으면(그사이 화면이 바뀌었다) 화면에서 글을 읽는다.
+    fn on_page_blocks(
+        &mut self,
+        key: String,
+        blocks: Result<Vec<(usize, usize, String)>, String>,
+    ) -> Option<DebugNotice> {
+        match blocks {
+            Ok(blocks) if !blocks.is_empty() => {
+                let blocks: Vec<(usize, usize, &str)> = blocks
+                    .iter()
+                    .map(|(line, column, text)| (*line, *column, text.as_str()))
+                    .collect();
+                self.place_blocks(&key, &blocks)
+            }
+            _ => {
                 self.send(Request::PageScripts(key));
                 None
             }
@@ -1878,6 +1901,18 @@ mod tests {
         html: &'static str,
         transition: &'static str,
     ) -> (u16, std::sync::mpsc::Receiver<String>) {
+        fake_cdp_frame(html, transition, &[], true)
+    }
+
+    /// `fake_cdp`에 자식 프레임(detail.do)을 더한 것. 실제 브라우저처럼 자식 프레임의 원래 HTML은 주지 않고,
+    /// 블록 글은 디버거로(시작 줄 → 글, `frame_blocks`) 준다. 자식 프레임이 처음 주소(src)를 보이는지는
+    /// `from_src`다.
+    fn fake_cdp_frame(
+        html: &'static str,
+        transition: &'static str,
+        frame_blocks: &'static [(u64, &'static str)],
+        from_src: bool,
+    ) -> (u16, std::sync::mpsc::Receiver<String>) {
         use std::io::{BufRead, Read, Write};
 
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1916,20 +1951,51 @@ mod tests {
                             .for_each(|(i, b)| *b ^= mask[i % 4]);
                         let request: Value = serde_json::from_slice(&payload).unwrap();
                         let method = request["method"].as_str().unwrap_or_default().to_owned();
+                        let params = &request["params"];
                         let result = match method.as_str() {
-                            "Page.getFrameTree" => json!({ "frameTree": { "frame": {
-                                "id": "top", "url": "http://127.0.0.1:8080/app/list.do" } } }),
-                            "Runtime.evaluate" => {
+                            "Page.getFrameTree" => json!({ "frameTree": {
+                                "frame": { "id": "top", "url": "http://127.0.0.1:8080/app/list.do" },
+                                "childFrames": [{ "frame": {
+                                    "id": "child", "url": "http://127.0.0.1:8080/app/detail.do" } }] } }),
+                            "Runtime.evaluate" if params["expression"] == "document.readyState" => {
                                 json!({ "result": { "type": "string", "value": "complete" } })
                             }
+                            "Runtime.evaluate" => {
+                                json!({ "result": { "type": "boolean", "value": from_src } })
+                            }
+                            "Page.createIsolatedWorld" => json!({ "executionContextId": 7 }),
                             "Page.getNavigationHistory" => json!({ "currentIndex": 0, "entries": [
                                 { "id": 1, "url": "http://127.0.0.1:8080/app/list.do",
                                   "transitionType": transition }] }),
                             "Page.reload" => json!({}),
+                            "Page.navigate" => json!({ "frameId": params["frameId"] }),
+                            "Debugger.setBreakpointByUrl" => {
+                                let line = params["lineNumber"].as_u64().unwrap_or_default() + 1;
+                                json!({ "breakpointId": format!("bp{line}"), "locations": [
+                                    { "scriptId": format!("{line}"), "lineNumber": line, "columnNumber": 0 }] })
+                            }
+                            "Debugger.getScriptSource" => {
+                                let line: u64 =
+                                    params["scriptId"].as_str().unwrap().parse().unwrap();
+                                let text = frame_blocks
+                                    .iter()
+                                    .find(|(l, _)| *l == line)
+                                    .map(|(_, t)| *t);
+                                json!({ "scriptSource": text })
+                            }
+                            "Debugger.removeBreakpoint" => json!({}),
+                            _ if params["frameId"] == "child" => json!(null),
                             _ => json!({ "content": html, "base64Encoded": false }),
                         };
                         let _ = seen.send(method);
-                        let body = json!({ "id": request["id"], "result": result }).to_string();
+                        // 자식 프레임의 원래 HTML은 실제 브라우저처럼 주지 않는다.
+                        let body = if result.is_null() {
+                            json!({ "id": request["id"], "error": { "code": -32000,
+                                "message": "Content unavailable. Resource was not cached" } })
+                        } else {
+                            json!({ "id": request["id"], "result": result })
+                        }
+                        .to_string();
                         let mut frame = vec![0x81u8];
                         if body.len() < 126 {
                             frame.push(body.len() as u8);
@@ -2514,9 +2580,9 @@ mod tests {
         let (mut debugger, root, _received, methods) =
             start_reload_page("reload-stopped", "link", (0, 6));
         pump(&mut debugger, "계속을 기다리지 않음", |d| {
-            d.pages
-                .as_ref()
-                .is_some_and(|p| p.reloads.get(RELOAD_KEY) == Some(&Reload::AfterContinue))
+            d.pages.as_ref().is_some_and(|p| {
+                matches!(p.reloads.get(RELOAD_KEY), Some(Reload::AfterContinue(_)))
+            })
         });
         assert!(debugger.is_stopped());
         let mut seen: Vec<String> = methods.try_iter().collect();
@@ -2530,6 +2596,124 @@ mod tests {
                 seen.extend(methods.try_iter());
                 seen.iter().any(|m| m == "Page.reload")
             },
+        );
+        debugger.shutdown();
+        let _ = std::fs::remove_dir_all(sources_dir());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 프레임 안 화면(detail.do) 시험: 블록 둘(화면 2·8줄)이 든 JSP의 두 블록에 중단점을 걸고, 자식 프레임이 처음
+    /// 주소를 보이는지(`from_src`)를 정해 띄운다.
+    fn start_frame_page(name: &str, from_src: bool) -> ReloadPage {
+        let root = std::env::temp_dir().join(format!("ferrite-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let jsp = root.join("src/main/webapp/WEB-INF/jsp/board/detail.jsp");
+        std::fs::create_dir_all(jsp.parent().unwrap()).unwrap();
+        std::fs::write(
+            &jsp,
+            "<script>\nfunction first() {\n  return 1;\n}\n</script>\n<p>상세</p>\n<script>\nvar second = 2;\n</script>\n",
+        )
+        .unwrap();
+        const FIRST: &str = "\nfunction first() {\n  return 1;\n}\n";
+        const SECOND: &str = "\nvar second = 2;\n";
+        static FRAME_BLOCKS: &[(u64, &str)] = &[(2, FIRST), (8, SECOND)];
+        let blocks = vec![
+            (
+                source("127.0.0.1\u{a789}8080/app/detail.do\u{a789}2:9", 6),
+                FIRST,
+            ),
+            (
+                source("127.0.0.1\u{a789}8080/app/detail.do\u{a789}8:9", 7),
+                SECOND,
+            ),
+        ];
+        // 화면에서 읽히는 글은 맨 위 화면의 것이라(evaluate는 맨 위 화면에서 돈다) 블록과 맞지 않는다.
+        let (cdp_port, methods) = fake_cdp_frame("<html></html>", "link", FRAME_BLOCKS, from_src);
+        let (address, received) = fake_js_debug(
+            blocks,
+            Some(vec!["\nvar top = 1;\n"]),
+            Some(cdp_port),
+            (0, 999),
+        );
+        let config = DebugConfig {
+            name: "프레임 화면".into(),
+            adapter: "js-debug".into(),
+            request: "launch".into(),
+            arguments: serde_json::json!({}),
+            build: None,
+        };
+        // JSP 3줄(`return 1;`)은 화면 4줄, JSP 8줄(`var second`)은 화면 9줄이다.
+        let breakpoints = BTreeMap::from([(
+            jsp,
+            vec![
+                Breakpoint {
+                    line: 3,
+                    condition: None,
+                },
+                Breakpoint {
+                    line: 8,
+                    condition: None,
+                },
+            ],
+        )]);
+        let mut debugger = Debugger::default();
+        debugger
+            .start(
+                &config,
+                &root,
+                None,
+                breakpoints,
+                Adapter::Tcp(address),
+                &egui::Context::default(),
+            )
+            .unwrap();
+        (debugger, root, received, methods)
+    }
+
+    #[test]
+    fn js_debug에서_프레임_안_화면도_블록마다_맞추고_그_프레임만_다시_연다() {
+        let (mut debugger, root, received, methods) = start_frame_page("frame-page", true);
+        let mut seen = Vec::new();
+        pump(&mut debugger, "프레임을 다시 열지 않음", |_| {
+            seen.extend(methods.try_iter());
+            seen.iter().any(|m| m == "Page.navigate")
+        });
+        // 원래 HTML을 받지 못해 블록 글을 디버거에서 받아, 두 블록의 JSP 중단점을 화면 4·9줄에 걸었다.
+        assert!(
+            seen.iter().any(|m| m == "Debugger.getScriptSource"),
+            "{seen:?}"
+        );
+        let sent: Vec<(String, Vec<i64>)> = received.try_iter().collect();
+        assert!(sent.contains(&("#7".to_owned(), vec![4, 9])), "{sent:?}");
+        // 맨 위 화면은 다시 부르지 않는다.
+        assert!(!seen.iter().any(|m| m == "Page.reload"), "{seen:?}");
+        pump(&mut debugger, "다시 연 것을 알리지 않음", |d| {
+            d.console
+                .contains("[화면을 다시 불렀습니다: 127.0.0.1:8080/app/detail.do]")
+        });
+        debugger.shutdown();
+        let _ = std::fs::remove_dir_all(sources_dir());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn js_debug에서_처음_주소에서_다른_화면으로_간_프레임은_다시_열지_않고_알린다() {
+        let (mut debugger, root, _received, methods) = start_frame_page("frame-moved", false);
+        pump(&mut debugger, "알리지 않음", |d| {
+            d.console
+                .contains("[화면을 다시 부르지 않았습니다: 127.0.0.1:8080/app/detail.do]")
+        });
+        assert!(
+            debugger.console.contains("처음 주소(src)"),
+            "{}",
+            debugger.console
+        );
+        let seen: Vec<String> = methods.try_iter().collect();
+        assert!(
+            !seen
+                .iter()
+                .any(|m| m == "Page.navigate" || m == "Page.reload"),
+            "{seen:?}"
         );
         debugger.shutdown();
         let _ = std::fs::remove_dir_all(sources_dir());
