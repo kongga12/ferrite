@@ -9,6 +9,7 @@
 //! 열어 이 세션 안에 둔다. 화면은 세션 하나만 다루고, 요청은 멈춘 자식에게 간다.
 
 pub mod adapters;
+pub mod cdp;
 pub mod java;
 pub mod page_lines;
 pub mod types;

@@ -11,7 +11,7 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use ferrite_dap::{
-    Adapter, Breakpoint, DebugEvent, DebugSession, Launch, adapters, page_lines, types,
+    Adapter, Breakpoint, DebugEvent, DebugSession, Launch, adapters, cdp, page_lines, types,
 };
 use ferrite_lsp::client::find_program;
 use ferrite_lsp::install;
@@ -571,6 +571,64 @@ setInterval(tick, <c:out value=\"${interval}\"/>);
 </script>
 ";
 
+/// 조각을 끼우는 화면: 머리의 스크립트가 jQuery `.html()`로 `<script>`가 든 상세 조각을 `#detail`에
+/// 끼운다. 조각의 스크립트는 화면 중간(문서 차례로 두 블록 사이)에 남지만 jQuery가 따로 돌려 화면 주소로
+/// 알리지 않는다.
+const FRAG_PAGE: &str = "<!doctype html>
+<html><head>
+<script src=\"/app/js/jquery.js\"></script>
+<script>
+function loadDetail() {
+  $(\"#detail\").html(\"<p>상세</p><script>\\nfunction detailReady() {\\n  return 1;\\n}\\n<\\/script>\");
+}
+</script>
+</head><body>
+<div id=\"detail\"></div>
+<script>
+var count = 0;
+function tick() {
+  count = count + 1;
+}
+loadDetail();
+setInterval(tick, 200);
+</script>
+</body></html>
+";
+
+/// jQuery `.html()`이 조각의 스크립트를 다루는 꼴만 흉내 낸 대역: 조각을 넣고, 스크립트마다 새
+/// `<script>`로 돌려 바로 떼고, 원래 스크립트에 `globalEval` 표시를 남긴다(`jQuery._data`로 읽는다).
+const JQUERY_STUB: &str = "(function () {
+  var data = new WeakMap();
+  function jq(selector) {
+    var el = document.querySelector(selector);
+    return {
+      html: function (html) {
+        el.innerHTML = html;
+        el.querySelectorAll('script').forEach(function (s) {
+          var run = document.createElement('script');
+          run.text = s.text;
+          document.head.appendChild(run).parentNode.removeChild(run);
+          data.set(s, { globalEval: true });
+        });
+        return this;
+      }
+    };
+  }
+  jq._data = function (el, name) { var d = data.get(el); return d && d[name]; };
+  window.jQuery = window.$ = jq;
+})();
+";
+
+/// 화면에 줄 jQuery: `FERRITE_TEST_JQUERY`에 실제 jQuery 파일이 있으면 그것, 없으면 대역.
+fn jquery() -> &'static str {
+    static JQUERY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    JQUERY.get_or_init(|| {
+        std::env::var_os("FERRITE_TEST_JQUERY")
+            .map(|path| std::fs::read_to_string(path).expect("FERRITE_TEST_JQUERY 파일"))
+            .unwrap_or_else(|| JQUERY_STUB.to_owned())
+    })
+}
+
 const APP_JS: &str = "function add(a, b) {
   var total = a + b;
   return total;
@@ -600,6 +658,10 @@ fn web_server() -> u16 {
                     ("text/html; charset=UTF-8", PAGE)
                 } else if line.starts_with("GET /app/tiles.do ") {
                     ("text/html; charset=UTF-8", TILES_PAGE)
+                } else if line.starts_with("GET /app/frag.do ") {
+                    ("text/html; charset=UTF-8", FRAG_PAGE)
+                } else if line.starts_with("GET /app/js/jquery.js ") {
+                    ("application/javascript", jquery())
                 } else if line.starts_with("GET /app/js/app.js ") {
                     ("application/javascript", APP_JS)
                 } else {
@@ -946,10 +1008,7 @@ fn js_debug로_여러_jsp를_합친_화면의_블록마다_jsp_줄에서_멈춘�
     let local = project.join("tiles.do.js");
     std::fs::write(&local, page_lines::assemble(&blocks)).unwrap();
     session.map_source(&local, &live);
-    let lines = [
-        map.to_page(&header, 4).expect("머리글 5줄"),
-        map.to_page(&body, 5).expect("본문 6줄"),
-    ];
+    let lines = [map.to_pages(&header, 4)[0], map.to_pages(&body, 5)[0]];
     assert_eq!(lines, [12, 20]);
     session.set_breakpoints(
         &local,
@@ -980,6 +1039,122 @@ fn js_debug로_여러_jsp를_합친_화면의_블록마다_jsp_줄에서_멈춘�
         stops.push((file.to_path_buf(), line));
     }
     assert_eq!(stops, [(body.clone(), 5), (header.clone(), 4)]);
+
+    session.stop();
+    wait(&mut session, &|e| {
+        matches!(e, DebugEvent::Terminated | DebugEvent::Closed(_))
+    });
+    drop(session);
+    for dir in [servers, project, adapters::scratch_dir()] {
+        for _ in 0..40 {
+            if !dir.exists() || std::fs::remove_dir_all(&dir).is_ok() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        }
+        assert!(!dir.exists(), "폴더가 남음: {}", dir.display());
+    }
+}
+
+#[test]
+#[ignore = "GitHub에서 vscode-js-debug(약 1.2MB)를 받는다. node와 Chrome(Windows는 Edge도 된다)이 필요하다"]
+fn js_debug로_조각을_끼운_화면도_원래_html에서_블록의_글을_잘라_낸다() {
+    let Some(kind) = browser() else {
+        require("Chrome", false);
+        return;
+    };
+    if !require("node", find_program("node").is_some()) {
+        return;
+    }
+    let (servers, project) = (temp_dir("js-frag-servers"), temp_dir("js-frag"));
+    let web_root = project.join("src/main/webapp");
+    std::fs::create_dir_all(&web_root).unwrap();
+    let port = web_server();
+    let adapter = install_adapter(&servers, "js-debug", &project);
+    let mut runtime_args = vec!["--headless=new", "--disable-gpu"];
+    if cfg!(target_os = "linux") {
+        runtime_args.extend(["--no-sandbox", "--disable-dev-shm-usage"]);
+    }
+    let trace = project.join("js-debug.log");
+    let _dump = DumpOnPanic(trace.clone());
+    let launch = Launch {
+        adapter_id: "js-debug".into(),
+        attach: false,
+        arguments: json!({
+            "type": kind,
+            "url": format!("http://127.0.0.1:{port}/app/frag.do"),
+            "webRoot": web_root,
+            "pathMapping": { "/app/": format!("{}/", web_root.display()) },
+            "runtimeArgs": runtime_args,
+            "timeout": 60000,
+            "trace": { "logFile": trace },
+        }),
+    };
+    let mut session = DebugSession::start(&adapter, launch, BTreeMap::new(), || {}).unwrap();
+    // 화면 주소로 알리는 인라인 스크립트는 화면을 읽으며 돈 두 블록뿐이다(조각의 것은 jQuery가 따로 돌린다).
+    let mut starts = Vec::new();
+    let mut events = Vec::new();
+    let started = Instant::now();
+    let mut quiet = None;
+    while quiet.is_none_or(|at: Instant| at.elapsed() < Duration::from_millis(1500)) {
+        assert!(
+            started.elapsed() < Duration::from_secs(120),
+            "시간 초과: {starts:?}"
+        );
+        for event in session.poll() {
+            if let DebugEvent::LoadedSource { source, .. } = &event
+                && let Some((page, line, column)) =
+                    source.name.as_deref().and_then(page_lines::inline_script)
+                && page.ends_with("/app/frag.do")
+            {
+                starts.push((line, column));
+            }
+            events.push(event);
+        }
+        if starts.len() >= 2 && quiet.is_none() {
+            quiet = Some(Instant::now());
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    starts.sort();
+    assert_eq!(starts, [(4, 9), (11, 9)]);
+    let page = events
+        .iter()
+        .find_map(|e| match e {
+            DebugEvent::LoadedSource { source, .. } => source
+                .name
+                .as_deref()
+                .and_then(page_lines::inline_script)
+                .map(|(page, ..)| page.replace('\u{a789}', ":")),
+            _ => None,
+        })
+        .unwrap();
+    let (mut seen, mut next) = (events, 0);
+    let mut wait = |session: &mut DebugSession, done: &dyn Fn(&DebugEvent) -> bool| {
+        wait_for(session, &mut seen, &mut next, done)
+    };
+    // 조각의 스크립트는 화면(문서 차례로 두 블록 사이)에 남아, 화면의 글로는 어느 것이 블록인지 모른다.
+    session.request(
+        "evaluate",
+        json!({ "expression": "Array.from(document.scripts).filter(s => !s.src).length", "context": "clipboard" }),
+    );
+    let count = response(wait(
+        &mut session,
+        &|e| matches!(e, DebugEvent::Response { command, .. } if command == "evaluate"),
+    ));
+    assert_eq!(count["result"], "3");
+    // CDP 프록시로 받은 원래 HTML에서 블록 자리의 글을 잘라 낸다(앱과 같다).
+    session.request("requestCDPProxy", json!({}));
+    let proxy = response(wait(
+        &mut session,
+        &|e| matches!(e, DebugEvent::Response { command, .. } if command == "requestCDPProxy"),
+    ));
+    let proxy = cdp::Proxy::from_json(&proxy).expect("프록시 주소");
+    let html = cdp::page_html(&proxy, &page).unwrap();
+    assert_eq!(html, FRAG_PAGE, "화면이 받은 그대로");
+    let blocks = page_lines::scripts_at(&html, &starts).expect("블록");
+    assert!(blocks[0].2.contains("function loadDetail()"), "{blocks:?}");
+    assert!(blocks[1].2.starts_with("\nvar count = 0;"), "{blocks:?}");
 
     session.stop();
     wait(&mut session, &|e| {
