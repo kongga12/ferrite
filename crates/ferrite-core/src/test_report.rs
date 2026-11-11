@@ -323,21 +323,67 @@ pub fn unreported_failure(tool: Tool, code: Option<i32>, failed: usize) -> bool 
     code.is_some_and(|c| c != 0) && (tool == Tool::Maven || failed == 0)
 }
 
-/// Windows의 Gradle(JDK 18 이상)이 경로에 든 한글 등 ASCII가 아닌 글자 때문에 테스트 클래스를 찾지 못한
-/// 실패인지. Gradle은 테스트 JVM의 클래스 경로를 인자 파일(`@…gradle-worker-classpath…txt`)로 넘기는데,
-/// JDK 18부터 기본 문자셋이 UTF-8이라(JEP 400) 그 파일을 UTF-8로 쓰고 Windows의 java는 시스템 코드
-/// 페이지(한국어 949)로 읽는다. 그러면 테스트마다가 아니라 "Gradle Test Executor N"의 실패 하나로 온다.
-pub fn gradle_path_problem(tool: Tool, dir: &Path, cases: &[Case]) -> bool {
-    cfg!(windows)
-        && tool == Tool::Gradle
-        && !dir.to_string_lossy().is_ascii()
-        && cases.iter().any(|c| {
+/// Windows의 Gradle(JDK 18 이상)이 경로에 든 한글 등 ASCII가 아닌 글자 때문에 테스트를 돌리지 못한 곳.
+/// Gradle은 테스트 JVM의 클래스 경로를 인자 파일(`@…gradle-worker-classpath…txt`)로 넘기는데, JDK 18부터
+/// 기본 문자셋이 UTF-8이라(JEP 400) 그 파일을 UTF-8로 쓰고 Windows의 java는 시스템 코드 페이지(한국어
+/// 949)로 읽는다. 그러면 테스트마다가 아니라 "Gradle Test …"의 실패 하나로 온다.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GradlePathProblem {
+    /// 프로젝트 경로: 테스트 클래스를 찾지 못했다("Could not execute test class"와 `ClassNotFoundException`).
+    Project,
+    /// Gradle 홈(`GRADLE_USER_HOME`, 기본은 사용자 폴더의 `.gradle`): 테스트 JVM이 뜨지 못했다("Gradle Test
+    /// Executor"가 0이 아닌 코드로 끝났다). 그 글자를 시스템 코드 페이지가 나타내면(한국어 Windows) 인자 파일을
+    /// 열되 받아 둔 Gradle의 클래스(`GradleWorkerMain`)를 찾지 못하고, 나타내지 못하면(영문 Windows) 홈 아래의
+    /// 인자 파일(`gradle-worker-classpath…`)부터 열지 못한다. 까닭은 출력에만 나온다. Windows 사용자 이름이
+    /// 한글이면 기본 홈이 그렇다.
+    Home(PathBuf),
+}
+
+/// 테스트가 경로의 한글 때문에 돌지 못했는지(`GradlePathProblem`). `dir`은 돌린 폴더, `home`은 Gradle 홈,
+/// `output`은 Gradle의 출력(테스트 JVM이 뜨지 못한 까닭은 보고서가 아니라 출력에만 나온다).
+pub fn gradle_path_problem(
+    tool: Tool,
+    dir: &Path,
+    home: &Path,
+    cases: &[Case],
+    output: &str,
+) -> Option<GradlePathProblem> {
+    if !cfg!(windows) || tool != Tool::Gradle {
+        return None;
+    }
+    let ascii = |path: &Path| path.to_string_lossy().is_ascii();
+    let failed = |message: &str| {
+        cases.iter().any(|c| {
             c.outcome == Outcome::Failed
-                && c.message
-                    .as_deref()
-                    .is_some_and(|m| m.contains("Could not execute test class"))
-                && c.detail.contains("ClassNotFoundException")
+                && c.message.as_deref().is_some_and(|m| m.contains(message))
         })
+    };
+    let worker_failed =
+        output.contains("GradleWorkerMain") || output.contains("gradle-worker-classpath");
+    if !ascii(home) && failed("Gradle Test Executor") && worker_failed {
+        return Some(GradlePathProblem::Home(home.to_path_buf()));
+    }
+    let class_missing = cases.iter().any(|c| {
+        c.outcome == Outcome::Failed
+            && c.message
+                .as_deref()
+                .is_some_and(|m| m.contains("Could not execute test class"))
+            && c.detail.contains("ClassNotFoundException")
+    });
+    (!ascii(dir) && class_missing).then_some(GradlePathProblem::Project)
+}
+
+/// Gradle 홈: 테스트를 돌린 환경(`env`, 실행 구성의 환경 변수)의 `GRADLE_USER_HOME`, 없으면 이 프로세스의 것,
+/// 그것도 없으면 사용자 폴더의 `.gradle`(Gradle의 기본).
+pub fn gradle_user_home(env: &std::collections::BTreeMap<String, String>) -> Option<PathBuf> {
+    if let Some(home) = env.get("GRADLE_USER_HOME") {
+        return Some(PathBuf::from(home));
+    }
+    if let Some(home) = std::env::var_os("GRADLE_USER_HOME") {
+        return Some(PathBuf::from(home));
+    }
+    let user = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    std::env::var_os(user).map(|home| PathBuf::from(home).join(".gradle"))
 }
 
 /// pom.xml의 maven-surefire-plugin 설정에 박힌 `<skipTests>true</skipTests>`의 바이트 범위. egov 템플릿의

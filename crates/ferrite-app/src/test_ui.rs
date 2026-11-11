@@ -11,7 +11,7 @@ use std::time::{Instant, SystemTime};
 
 use eframe::egui;
 use ferrite_core::run::RunConfig;
-use ferrite_core::test_report::{self, Case, Frame, Outcome, Tool};
+use ferrite_core::test_report::{self, Case, Frame, GradlePathProblem, Outcome, Tool};
 use serde_json::Value;
 
 /// 출력 창에 남길 최대 글자 수(넘으면 앞에서 버린다).
@@ -84,8 +84,27 @@ pub struct TestPanel {
     status: Option<(String, bool)>,
     /// 테스트를 건너뛰게 하는 pom.xml(egov 템플릿의 `skipTests=true`). [pom.xml에서 테스트 켜기]를 보인다.
     skipping: Option<PathBuf>,
-    /// Gradle이 경로의 한글 때문에 테스트 클래스를 찾지 못했다(Windows). 까닭과 해법을 보인다.
-    path_problem: bool,
+    /// Gradle이 경로(프로젝트, Gradle 홈)의 한글 때문에 테스트를 돌리지 못했다(Windows). 까닭과 해법을 보인다.
+    path_problem: Option<GradlePathProblem>,
+}
+
+/// Gradle 홈이 한글 경로일 때의 안내(`{home}`에 그 경로가 든다).
+pub(crate) const GRADLE_HOME_PROBLEM: &str = "Gradle이 테스트를 띄우지 못했습니다. Windows에서 JDK 18 이상으로 \
+Gradle을 돌리면 Gradle 홈({home})에 한글 등 영문이 아닌 글자가 있을 때 이렇게 됩니다(Windows 사용자 이름이 한글이면 \
+기본 홈이 그렇습니다). Gradle은 테스트 JVM의 클래스 경로를 파일에 UTF-8로 적어 넘기는데, Windows의 java는 그 파일을 \
+시스템 코드 페이지로 읽어 Gradle 홈에 받아 둔 클래스를 찾지 못합니다. 환경 변수 GRADLE_USER_HOME을 영문 경로(예: \
+C:\\gradle)로 정하고 Ferrite를 다시 여세요(받은 의존성은 그 폴더에 다시 받습니다). 이 프로젝트만 바꾸려면 \
+.ferrite/run.toml의 실행 구성에 env = { GRADLE_USER_HOME = \"C:/gradle\" }를 적으세요. 옮길 수 없으면 Gradle을 \
+JDK 17로 돌려도 되지만(JAVA_HOME), 그때는 빌드 파일에 소스 문자셋을 UTF-8로 적어야 한글이 깨지지 않습니다.";
+
+/// 경로의 한글 때문에 Gradle 테스트가 돌지 못했을 때 보일 안내.
+pub(crate) fn path_problem_text(problem: &GradlePathProblem) -> String {
+    match problem {
+        GradlePathProblem::Project => GRADLE_PATH_PROBLEM.to_owned(),
+        GradlePathProblem::Home(home) => {
+            GRADLE_HOME_PROBLEM.replace("{home}", &home.display().to_string())
+        }
+    }
 }
 
 pub(crate) const GRADLE_PATH_PROBLEM: &str = "Gradle이 테스트 클래스를 찾지 못했습니다. Windows에서 JDK 18 이상으로 \
@@ -174,7 +193,7 @@ impl TestPanel {
             wake.request_repaint();
         });
         self.skipping = None;
-        self.path_problem = false;
+        self.path_problem = None;
         self.output = format!("> {line}\n");
         self.view = View::Output;
         self.status = Some((format!("실행 중: {}", config.name), false));
@@ -282,8 +301,9 @@ impl TestPanel {
             self.cases = found;
             self.selected = self.cases.iter().position(|c| c.outcome == Outcome::Failed);
         }
-        self.path_problem = self.last.as_ref().is_some_and(|(_, tool, dir)| {
-            test_report::gradle_path_problem(*tool, dir, &self.cases)
+        self.path_problem = self.last.as_ref().and_then(|(config, tool, dir)| {
+            let home = test_report::gradle_user_home(&config.env).unwrap_or_default();
+            test_report::gradle_path_problem(*tool, dir, &home, &self.cases, &self.output)
         });
         let count = |o| self.cases.iter().filter(|c| c.outcome == o).count();
         let (passed, failed, skipped) = (
@@ -431,8 +451,8 @@ impl TestPanel {
             };
             ui.colored_label(color, text);
         }
-        if self.path_problem {
-            ui.colored_label(ui.visuals().warn_fg_color, GRADLE_PATH_PROBLEM);
+        if let Some(problem) = &self.path_problem {
+            ui.colored_label(ui.visuals().warn_fg_color, path_problem_text(problem));
         }
         if let Some(pom) = self.skipping.clone()
             && ui
@@ -624,10 +644,18 @@ impl TestPanel {
 
     /// 시험용: 이 결과를 받은 것처럼 보인다.
     #[cfg(test)]
-    pub fn show_results(&mut self, config: RunConfig, dir: PathBuf, cases: Vec<Case>) {
+    pub fn show_results(
+        &mut self,
+        config: RunConfig,
+        dir: PathBuf,
+        cases: Vec<Case>,
+        output: &str,
+    ) {
         let tool = Tool::of(&config.command).expect("테스트 명령");
         self.selected = cases.iter().position(|c| c.outcome == Outcome::Failed);
-        self.path_problem = test_report::gradle_path_problem(tool, &dir, &cases);
+        let home = test_report::gradle_user_home(&config.env).unwrap_or_default();
+        self.path_problem = test_report::gradle_path_problem(tool, &dir, &home, &cases, output);
+        self.output = output.to_owned();
         self.cases = cases;
         self.last = Some((config, tool, dir));
     }
