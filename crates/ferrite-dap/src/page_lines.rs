@@ -47,6 +47,110 @@ impl PageLines {
     }
 }
 
+/// 화면 스크립트 블록 여럿(레이아웃·`<jsp:include>`·Tiles로 합친 화면, JSP 하나의 `<script>` 여럿)의
+/// JSP와 줄. 블록마다 그것을 만든 JSP를 따로 찾는다.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PageMap {
+    /// (화면 시작 줄, 끝 줄(그 줄까지), 줄 대응), 0부터.
+    blocks: Vec<(usize, usize, PageLines)>,
+}
+
+impl PageMap {
+    /// 화면 전체를 한 JSP에 맞춘 것.
+    pub fn single(lines: PageLines) -> Self {
+        Self {
+            blocks: vec![(0, usize::MAX, lines)],
+        }
+    }
+
+    /// 스크립트 블록들((시작 줄, 칸)은 1부터, 글)마다 JSP를 찾는다. 찾지 못한 블록은 뺀다. 하나도 못
+    /// 찾으면 None.
+    pub fn find(
+        blocks: &[(usize, usize, &str)],
+        files: &[(PathBuf, String)],
+        hint: &str,
+    ) -> Option<Self> {
+        let blocks: Vec<(usize, usize, PageLines)> = blocks
+            .iter()
+            .filter_map(|&(line, _, text)| {
+                let start = line.saturating_sub(1);
+                let script = format!("{}{text}", "\n".repeat(start));
+                let found = find(&script, files, hint)?;
+                Some((start, start + text.lines().count().max(1) - 1, found))
+            })
+            .collect();
+        (!blocks.is_empty()).then_some(Self { blocks })
+    }
+
+    /// 화면 줄(0부터)이 든 블록의 JSP와 그 줄. 어느 블록에도 들지 않으면 None.
+    pub fn to_file(&self, page: usize) -> Option<(&Path, usize)> {
+        self.blocks
+            .iter()
+            .find(|(start, end, _)| (*start..=*end).contains(&page))
+            .map(|(_, _, lines)| (lines.file.as_path(), lines.to_file(page)))
+    }
+
+    /// 이 JSP 줄(0부터)의 화면 줄. 그 줄을 화면에 그대로 낸 블록에서.
+    pub fn to_page(&self, file: &Path, line: usize) -> Option<usize> {
+        self.blocks
+            .iter()
+            .filter(|(_, _, lines)| lines.file == file)
+            .find_map(|(_, _, lines)| lines.to_page(line))
+    }
+
+    /// 맞춘 JSP들(화면에 나온 차례, 겹치지 않게).
+    pub fn files(&self) -> Vec<&Path> {
+        let mut files: Vec<&Path> = Vec::new();
+        for (_, _, lines) in &self.blocks {
+            if !files.contains(&lines.file.as_path()) {
+                files.push(&lines.file);
+            }
+        }
+        files
+    }
+}
+
+/// 화면의 인라인 스크립트 글들(문서 차례)을 JSON 배열로 내는 식. 브라우저가 돌리는 스크립트만 센다
+/// (`<script type="text/template">` 같은 템플릿은 js-debug가 알리지 않는다). js-debug의 `evaluate`에
+/// `clipboard` 문맥으로 물으면 따옴표를 붙인 JSON 문자열로 답한다(`page_scripts`로 푼다).
+pub const PAGE_SCRIPTS: &str = "JSON.stringify(Array.from(document.scripts).filter(s => !s.src && (!s.type || /(java|ecma)script|module/i.test(s.type))).map(s => s.text))";
+
+/// `PAGE_SCRIPTS`의 답(`evaluate`의 `result`)을 글 목록으로 푼다.
+pub fn page_scripts(result: &str) -> Option<Vec<String>> {
+    let json: String = serde_json::from_str(result).ok()?;
+    serde_json::from_str(&json).ok()
+}
+
+/// js-debug가 인라인 스크립트의 이름 끝에 붙이는 `꞉줄:칸`(1부터, `꞉`는 U+A789)을 뗀다: (화면, 줄, 칸).
+/// js-debug는 같은 화면 주소의 스크립트를 하나만 남기므로(새것이 오면 앞의 것을 지운다) 화면으로 묶는다.
+pub fn inline_script(name: &str) -> Option<(&str, usize, usize)> {
+    let (page, at) = name.rsplit_once('\u{a789}')?;
+    let (line, column) = at.split_once(':')?;
+    let line = line.parse().ok().filter(|&l| l > 0)?;
+    Some((page, line, column.parse().ok()?))
+}
+
+/// 인라인 스크립트들((시작 줄, 칸)은 1부터, 글)을 화면 줄에 놓은 글. 스크립트 밖은 빈 줄이다(js-debug가
+/// 스크립트 하나를 주는 꼴과 같다).
+pub fn assemble(blocks: &[(usize, usize, &str)]) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    for &(line, column, text) in blocks {
+        for (k, part) in text.split('\n').enumerate() {
+            let at = line.saturating_sub(1) + k;
+            if lines.len() <= at {
+                lines.resize(at + 1, String::new());
+            }
+            let part = part.strip_suffix('\r').unwrap_or(part);
+            lines[at] = if k == 0 {
+                format!("{}{part}", " ".repeat(column.saturating_sub(1)))
+            } else {
+                part.to_owned()
+            };
+        }
+    }
+    lines.join("\n")
+}
+
 /// 프로젝트의 JSP 파일들.
 pub fn candidates(root: &Path) -> Vec<PathBuf> {
     let mut found = Vec::new();
@@ -408,6 +512,69 @@ $(function() {
         // `a < b:c` 같은 비교식은 태그가 아니다.
         assert!(check("if (a <b:c) {", "if (a <b:c) {"));
         assert!(!is_tag("1:2"));
+    }
+
+    #[test]
+    fn 여러_jsp로_합친_화면은_스크립트_블록마다_jsp를_찾는다() {
+        // Tiles 꼴: 레이아웃의 머리 스크립트, 머리글 조각과 본문의 스크립트가 한 화면에 든다.
+        let layout = "<%@ page contentType=\"text/html; charset=UTF-8\" %>\n<!doctype html>\n<html><head>\n<script>\nvar layoutReady = false;\nfunction markLayout() {\n  layoutReady = true;\n}\n</script>\n</head><body>\n<tiles:insertAttribute name=\"header\"/>\n<tiles:insertAttribute name=\"body\"/>\n</body></html>\n";
+        let header = "<%@ page contentType=\"text/html; charset=UTF-8\" %>\n<div id=\"header\">머리글</div>\n<script>\nfunction headerClock() {\n  var now = new Date();\n  return now.getTime();\n}\n</script>\n";
+        let body = "<%@ page contentType=\"text/html; charset=UTF-8\" %>\n<h1>${title}</h1>\n<script>\nvar ticks = 0;\nfunction tick() {\n  ticks = ticks + 1;\n  headerClock();\n}\nsetInterval(tick, <c:out value=\"${interval}\"/>);\n</script>\n";
+        let files = vec![
+            (PathBuf::from("jsp/layout/default.jsp"), layout.to_owned()),
+            (PathBuf::from("jsp/layout/header.jsp"), header.to_owned()),
+            (PathBuf::from("jsp/board/BoardList.jsp"), body.to_owned()),
+        ];
+        // js-debug가 이름으로 주는 시작 자리와 화면에서 읽은 글(실제 js-debug·Chrome으로 본 것).
+        let blocks = [
+            (
+                3,
+                9,
+                "\nvar layoutReady = false;\nfunction markLayout() {\n  layoutReady = true;\n}\n",
+            ),
+            (
+                11,
+                9,
+                "\nfunction headerClock() {\n  var now = new Date();\n  return now.getTime();\n}\n",
+            ),
+            (
+                18,
+                9,
+                "\nvar ticks = 0;\nfunction tick() {\n  ticks = ticks + 1;\n  headerClock();\n}\nsetInterval(tick, 200);\n",
+            ),
+        ];
+        let map = PageMap::find(&blocks, &files, "127.0.0.1:8080/app/board/list.do").unwrap();
+        let (layout, header, body) = (
+            Path::new("jsp/layout/default.jsp"),
+            Path::new("jsp/layout/header.jsp"),
+            Path::new("jsp/board/BoardList.jsp"),
+        );
+        assert_eq!(map.files(), [layout, header, body]);
+        // 화면 13줄(0부터 12, `var now`)은 머리글 5줄, 화면 21줄은 본문 6줄, 화면 6줄은 레이아웃 7줄.
+        assert_eq!(map.to_file(12), Some((header, 4)));
+        assert_eq!(map.to_file(20), Some((body, 5)));
+        assert_eq!(map.to_file(5), Some((layout, 6)));
+        assert_eq!(map.to_file(9), None, "스크립트 밖");
+        // 중단점: JSP 줄 → 화면 줄. 바뀌는 부분(`<c:out>`)이 든 줄도 앞뒤 글자로 맞춘다.
+        assert_eq!(map.to_page(header, 4), Some(12));
+        assert_eq!(map.to_page(body, 8), Some(23));
+        assert_eq!(map.to_page(body, 0), None, "지시자");
+        assert_eq!(map.to_page(Path::new("jsp/other.jsp"), 3), None);
+
+        // 이름에서 시작 자리를 떼고, 블록을 화면 줄에 놓는다.
+        assert_eq!(
+            inline_script("127.0.0.1\u{a789}8080/app/tiles.do\u{a789}11:9"),
+            Some(("127.0.0.1\u{a789}8080/app/tiles.do", 11, 9))
+        );
+        assert_eq!(inline_script("127.0.0.1\u{a789}8080/app/js/app.js"), None);
+        assert_eq!(inline_script("a\u{a789}0:1"), None);
+        let page = assemble(&blocks);
+        let lines: Vec<&str> = page.lines().collect();
+        assert_eq!(lines[3], "var layoutReady = false;");
+        assert_eq!(lines[12], "  var now = new Date();");
+        assert_eq!(lines[23], "setInterval(tick, 200);");
+        assert_eq!(lines[8], "", "스크립트 밖은 빈 줄");
+        assert_eq!(assemble(&[(2, 3, "x;\r\ny;")]), "\n  x;\ny;");
     }
 
     #[test]
