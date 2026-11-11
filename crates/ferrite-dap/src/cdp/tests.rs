@@ -137,7 +137,7 @@ fn requests(received: &Receiver<(u8, Vec<u8>)>) -> Vec<(String, Value)> {
         .collect()
 }
 
-/// 맨 위 화면이 list.do(자식 프레임 detail.do)인 가짜 프록시. `readyState`를 `states` 차례로(끝나면 마지막
+/// 맨 위 화면이 list.do(자식 프레임 detail.do, 그 안의 프레임 inner.do)인 가짜 프록시. `readyState`를 `states` 차례로(끝나면 마지막
 /// 것을) 주고, 지금 화면을 연 방식은 `transition`, 자식 프레임이 처음 주소(src)를 보이는지는 `from_src`다.
 /// 자식 프레임의 스크립트는 3줄(9칸)과 10줄에서 시작하고(97줄은 스크립트가 없고 98줄은 둘이 겹친다),
 /// 그 글은 `블록 {줄}`이다.
@@ -153,10 +153,13 @@ fn page_proxy(
         let result = match request["method"].as_str().unwrap() {
             "Page.getFrameTree" => json!({ "frameTree": {
                 "frame": { "id": "top", "url": "http://127.0.0.1:8080/app/list.do" },
-                "childFrames": [{ "frame": { "id": "child", "url": "http://127.0.0.1:8080/app/detail.do" } }]
+                "childFrames": [{
+                    "frame": { "id": "child", "url": "http://127.0.0.1:8080/app/detail.do" },
+                    "childFrames": [{ "frame": { "id": "grand", "url": "http://127.0.0.1:8080/app/inner.do" } }]
+                }]
             } }),
             "Page.createIsolatedWorld" => {
-                assert_eq!(params["frameId"], "child");
+                assert!(params["frameId"] == "child" || params["frameId"] == "grand");
                 json!({ "executionContextId": 7 })
             }
             "Runtime.evaluate" if params["expression"] == "document.readyState" => {
@@ -260,6 +263,7 @@ fn 화면을_다_읽기를_기다려_다시_불러도_되는지_알리고_다시
     let target = Target::Frame {
         id: "child".into(),
         url: "http://127.0.0.1:8080/app/detail.do".into(),
+        ancestors: vec![LIST.into()],
     };
     assert_eq!(
         page_loaded(&proxy, DETAIL, wait).unwrap(),
@@ -282,6 +286,16 @@ fn 화면을_다_읽기를_기다려_다시_불러도_되는지_알리고_다시
             &json!("http://127.0.0.1:8080/app/detail.do")
         )
     );
+    // 프레임 안의 프레임은 품은 화면들(맨 위 화면부터)을 함께 알린다.
+    let (proxy, _) = page_proxy(&["complete"], "link", true);
+    assert_eq!(
+        page_loaded(&proxy, "127.0.0.1:8080/app/inner.do", wait).unwrap(),
+        Loaded::Reload(Target::Frame {
+            id: "grand".into(),
+            url: "http://127.0.0.1:8080/app/inner.do".into(),
+            ancestors: vec![LIST.into(), DETAIL.into()],
+        })
+    );
     // 처음 주소에서 다른 화면으로 간 프레임.
     let (proxy, _) = page_proxy(&["complete"], "link", false);
     assert_eq!(
@@ -298,10 +312,13 @@ fn 화면을_다_읽기를_기다려_다시_불러도_되는지_알리고_다시
             .unwrap_err()
             .contains("다 읽지 못했습니다")
     );
-    assert!(
-        page_loaded(&proxy, "127.0.0.1:8080/app/gone.do", short)
-            .unwrap_err()
-            .contains("열려 있지 않습니다")
+    // 없는 화면은 알리고, 그 화면의 HTML·블록 글도 다른 화면의 것으로 주지 않는다.
+    let gone = "127.0.0.1:8080/app/gone.do";
+    assert_eq!(page_loaded(&proxy, gone, short).unwrap_err(), NOT_OPEN);
+    assert_eq!(page_html(&proxy, gone).unwrap_err(), NOT_OPEN);
+    assert_eq!(
+        script_blocks(&proxy, gone, &[(3, 9)]).unwrap_err(),
+        NOT_OPEN
     );
 }
 
@@ -345,7 +362,7 @@ fn 블록_자리에_멈추지_않는_중단점을_걸어_블록의_글을_받고
 }
 
 #[test]
-fn 프레임이_없으면_맨_위_프레임이고_cdp_오류는_알린다() {
+fn cdp_오류와_웹소켓을_열지_않는_곳을_알린다() {
     let (proxy, _) = fake_proxy(|request| {
         let id = request["id"].as_u64().unwrap();
         let body = match request["method"].as_str().unwrap() {
@@ -358,7 +375,7 @@ fn 프레임이_없으면_맨_위_프레임이고_cdp_오류는_알린다() {
         };
         vec![frame(0x1, true, body.to_string().as_bytes())]
     });
-    let error = page_html(&proxy, "127.0.0.1:8080/app/other.do").unwrap_err();
+    let error = page_html(&proxy, "127.0.0.1:8080/app/main.do").unwrap_err();
     assert!(
         error.contains("No resource with given URL found"),
         "{error}"

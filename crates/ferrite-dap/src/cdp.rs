@@ -21,6 +21,9 @@ const TIMEOUT: Duration = Duration::from_secs(5);
 /// 받을 메시지의 상한(화면 HTML도 이보다 작다).
 const MAX_MESSAGE: u64 = 64 << 20;
 
+/// 화면을 연 프레임이 지금 없다(그사이 다른 화면으로 갔거나, 품은 화면이 다시 열리는 중이라 아직 없다).
+pub const NOT_OPEN: &str = "화면이 지금 열려 있지 않습니다";
+
 /// 프록시 주소(`requestCDPProxy`의 답).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Proxy {
@@ -40,12 +43,12 @@ impl Proxy {
 }
 
 /// `page`(스킴 없는 화면 주소, 예 `127.0.0.1:8080/app/list.do`)를 연 프레임이 받은 원래 HTML. 그런 프레임이
-/// 없으면 맨 위 프레임의 것. 프레임 안 화면은 브라우저가 HTML을 남겨 두지 않아 받지 못한다.
+/// 없으면 `NOT_OPEN`이다(다른 화면의 HTML로 블록을 맞추면 틀린다). 프레임 안 화면은 브라우저가 HTML을 남겨
+/// 두지 않아 받지 못한다.
 pub fn page_html(proxy: &Proxy, page: &str) -> Result<String, String> {
     let mut socket = Socket::connect(proxy)?;
     let tree = socket.call(1, "Page.getFrameTree", json!({}))?;
-    let top = &tree["frameTree"];
-    let frame = find_frame(top, page).unwrap_or(&top["frame"]);
+    let frame = find_frame(&tree["frameTree"], page).ok_or(NOT_OPEN)?;
     let (Some(id), Some(url)) = (frame["id"].as_str(), frame["url"].as_str()) else {
         return Err("화면 프레임이 없습니다".into());
     };
@@ -74,8 +77,8 @@ pub fn script_blocks(
 ) -> Result<Vec<(usize, usize, String)>, String> {
     let mut socket = Socket::connect(proxy)?;
     let tree = socket.call(1, "Page.getFrameTree", json!({}))?;
-    let url = find_frame(&tree["frameTree"], page)
-        .and_then(|frame| frame["url"].as_str())
+    let url = find_frame(&tree["frameTree"], page).ok_or(NOT_OPEN)?["url"]
+        .as_str()
         .ok_or("화면 프레임이 없습니다")?
         .to_owned();
     let mut id = 1;
@@ -134,7 +137,23 @@ pub enum Target {
     /// 맨 위 화면(`Page.reload`).
     Top,
     /// 프레임 안 화면: 그 프레임만 같은 주소로 다시 연다(`Page.navigate`, GET).
-    Frame { id: String, url: String },
+    Frame {
+        id: String,
+        url: String,
+        /// 그 프레임을 품은 화면들의 주소(스킴·`#` 뒤를 뺀 것, 맨 위 화면부터). 품은 화면을 다시 부르면 이
+        /// 프레임도 다시 열린다.
+        ancestors: Vec<String>,
+    },
+}
+
+impl Target {
+    /// 이 곳을 품은 화면들의 주소(맨 위 화면이면 없다).
+    pub fn ancestors(&self) -> &[String] {
+        match self {
+            Self::Top => &[],
+            Self::Frame { ancestors, .. } => ancestors,
+        }
+    }
 }
 
 /// 화면을 다 읽은 뒤의 처지(다시 불러도 되는지 가린다).
@@ -157,10 +176,10 @@ pub enum Loaded {
 pub fn page_loaded(proxy: &Proxy, page: &str, wait: Duration) -> Result<Loaded, String> {
     let mut socket = Socket::connect(proxy)?;
     let tree = socket.call(1, "Page.getFrameTree", json!({}))?;
-    let top = &tree["frameTree"];
-    let frame = find_frame(top, page).ok_or("화면이 더는 열려 있지 않습니다")?;
+    let path = find_path(&tree["frameTree"], page).ok_or(NOT_OPEN)?;
+    let (frame, ancestors) = path.split_last().ok_or("화면 프레임이 없습니다")?;
     let mut id = 2;
-    if frame["id"] == top["frame"]["id"] {
+    if ancestors.is_empty() {
         if !socket.wait_loaded(&mut id, wait, None)? {
             return Err("화면을 다 읽지 못했습니다".into());
         }
@@ -201,6 +220,10 @@ pub fn page_loaded(proxy: &Proxy, page: &str, wait: Duration) -> Result<Loaded, 
         Loaded::Reload(Target::Frame {
             id: frame_id.to_owned(),
             url: url.to_owned(),
+            ancestors: ancestors
+                .iter()
+                .map(|frame| bare(frame["url"].as_str().unwrap_or_default()).to_owned())
+                .collect(),
         })
     } else {
         Loaded::FrameMoved
@@ -219,7 +242,7 @@ pub fn reload(proxy: &Proxy, target: &Target) -> Result<(), String> {
     let mut socket = Socket::connect(proxy)?;
     match target {
         Target::Top => socket.call(1, "Page.reload", json!({})).map(drop),
-        Target::Frame { id, url } => {
+        Target::Frame { id, url, .. } => {
             let result = socket.call(1, "Page.navigate", json!({ "frameId": id, "url": url }))?;
             match result["errorText"].as_str() {
                 Some(error) if !error.is_empty() => Err(format!("Page.navigate: {error}")),
@@ -237,13 +260,21 @@ fn bare(url: &str) -> &str {
 
 /// 주소(스킴·`#` 뒤를 뺀 것)가 `page`인 프레임(자식 프레임까지).
 fn find_frame<'a>(node: &'a Value, page: &str) -> Option<&'a Value> {
-    if bare(node["frame"]["url"].as_str().unwrap_or_default()) == page {
-        return Some(&node["frame"]);
+    find_path(node, page)?.pop()
+}
+
+/// 맨 위 프레임부터 주소가 `page`인 프레임까지의 프레임들.
+fn find_path<'a>(node: &'a Value, page: &str) -> Option<Vec<&'a Value>> {
+    let frame = &node["frame"];
+    if bare(frame["url"].as_str().unwrap_or_default()) == page {
+        return Some(vec![frame]);
     }
-    node["childFrames"]
+    let mut path = node["childFrames"]
         .as_array()?
         .iter()
-        .find_map(|child| find_frame(child, page))
+        .find_map(|child| find_path(child, page))?;
+    path.insert(0, frame);
+    Some(path)
 }
 
 struct Socket {
