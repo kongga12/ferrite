@@ -637,7 +637,8 @@ const APP_JS: &str = "function add(a, b) {
 
 /// 컨텍스트 경로 /app 아래에 화면(인라인 스크립트)과 외부 스크립트를 주는 웹 서버. 연결마다 따로 받는다:
 /// 브라우저는 요청 없이 미리 열어 둔 연결을 쥐고 있기도 해서, 차례로 받으면 그 연결을 읽다 다음 요청에
-/// 답하지 못한다(화면을 다시 부를 때 CI의 Windows에서 그랬다).
+/// 답하지 못한다(화면을 다시 부를 때 CI의 Windows에서 그랬다). 조각 화면은 폼(POST)으로도 연다(시험은
+/// 본문 없는 폼만 보내 본문은 읽지 않는다).
 fn web_server() -> u16 {
     use std::io::{BufRead, BufReader, Write};
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -658,7 +659,9 @@ fn web_server() -> u16 {
                     ("text/html; charset=UTF-8", PAGE)
                 } else if line.starts_with("GET /app/tiles.do ") {
                     ("text/html; charset=UTF-8", TILES_PAGE)
-                } else if line.starts_with("GET /app/frag.do ") {
+                } else if line.starts_with("GET /app/frag.do ")
+                    || line.starts_with("POST /app/frag.do ")
+                {
                     ("text/html; charset=UTF-8", FRAG_PAGE)
                 } else if line.starts_with("GET /app/js/jquery.js ") {
                     ("application/javascript", jquery())
@@ -1191,6 +1194,171 @@ fn js_debug로_조각을_끼운_화면도_원래_html에서_블록의_글을_잘
             last.len() == 2 && last.iter().all(|s| s.verified),
             "{round}번째: {last:?}"
         );
+    }
+
+    session.stop();
+    wait(&mut session, &|e| {
+        matches!(e, DebugEvent::Terminated | DebugEvent::Closed(_))
+    });
+    drop(session);
+    for dir in [servers, project, adapters::scratch_dir()] {
+        for _ in 0..40 {
+            if !dir.exists() || std::fs::remove_dir_all(&dir).is_ok() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        }
+        assert!(!dir.exists(), "폴더가 남음: {}", dir.display());
+    }
+}
+
+#[test]
+#[ignore = "GitHub에서 vscode-js-debug(약 1.2MB)를 받는다. node와 Chrome(Windows는 Edge도 된다)이 필요하다"]
+fn js_debug로_cdp_프록시로_화면을_다시_불러_맨_위_코드에서_멈추고_폼으로_연_화면을_가린다() {
+    let Some(kind) = browser() else {
+        require("Chrome", false);
+        return;
+    };
+    if !require("node", find_program("node").is_some()) {
+        return;
+    }
+    let (servers, project) = (temp_dir("js-reload-servers"), temp_dir("js-reload"));
+    let web_root = project.join("src/main/webapp");
+    std::fs::create_dir_all(&web_root).unwrap();
+    let port = web_server();
+    let adapter = install_adapter(&servers, "js-debug", &project);
+    let mut runtime_args = vec!["--headless=new", "--disable-gpu"];
+    if cfg!(target_os = "linux") {
+        runtime_args.extend(["--no-sandbox", "--disable-dev-shm-usage"]);
+    }
+    let trace = project.join("js-debug.log");
+    let _dump = DumpOnPanic(trace.clone());
+    let launch = Launch {
+        adapter_id: "js-debug".into(),
+        attach: false,
+        arguments: json!({
+            "type": kind,
+            "url": format!("http://127.0.0.1:{port}/app/frag.do"),
+            "webRoot": web_root,
+            "pathMapping": { "/app/": format!("{}/", web_root.display()) },
+            "runtimeArgs": runtime_args,
+            "timeout": 60000,
+            "trace": { "logFile": trace },
+        }),
+    };
+    let mut session = DebugSession::start(&adapter, launch, BTreeMap::new(), || {}).unwrap();
+    let mut starts = Vec::new();
+    let mut live = None;
+    let mut events = Vec::new();
+    let started = Instant::now();
+    let mut quiet = None;
+    while quiet.is_none_or(|at: Instant| at.elapsed() < Duration::from_millis(1500)) {
+        assert!(
+            started.elapsed() < Duration::from_secs(120),
+            "시간 초과: {starts:?}"
+        );
+        for event in session.poll() {
+            if let DebugEvent::LoadedSource { source, .. } = &event
+                && let Some((page, line, column)) =
+                    source.name.as_deref().and_then(page_lines::inline_script)
+                && page.ends_with("/app/frag.do")
+            {
+                starts.push((line, column));
+                live = Some(source.clone());
+            }
+            events.push(event);
+        }
+        if starts.len() >= 2 && quiet.is_none() {
+            quiet = Some(Instant::now());
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    starts.sort();
+    let live = live.unwrap();
+    let page = live
+        .name
+        .as_deref()
+        .and_then(page_lines::inline_script)
+        .unwrap()
+        .0
+        .replace('\u{a789}', ":");
+    let (mut seen, mut next) = (events, 0);
+    let mut wait = |session: &mut DebugSession, done: &dyn Fn(&DebugEvent) -> bool| {
+        wait_for(session, &mut seen, &mut next, done)
+    };
+    session.request("requestCDPProxy", json!({}));
+    let proxy = response(wait(
+        &mut session,
+        &|e| matches!(e, DebugEvent::Response { command, .. } if command == "requestCDPProxy"),
+    ));
+    let proxy = cdp::Proxy::from_json(&proxy).expect("프록시 주소");
+    // 1) 주소를 쳐서 연 화면은 맨 위 화면이고 폼을 보내 연 것이 아니다(다시 불러도 된다).
+    assert_eq!(
+        cdp::page_loaded(&proxy, &page, Duration::from_secs(10)).unwrap(),
+        cdp::Loaded {
+            top: true,
+            form_submit: false
+        }
+    );
+    // 2) 맨 위 코드(`var count = 0;`, 화면 12줄)는 이미 돌았다. 화면 줄로 걸고 다시 부르면 거기서 멈춘다.
+    let blocks = page_lines::scripts_at(FRAG_PAGE, &starts).expect("블록");
+    let local = project.join("frag.do.js");
+    std::fs::write(&local, page_lines::assemble(&blocks)).unwrap();
+    session.map_source(&local, &live);
+    session.set_breakpoints(
+        &local,
+        vec![Breakpoint {
+            line: 12,
+            condition: None,
+        }],
+    );
+    wait(
+        &mut session,
+        &|e| matches!(e, DebugEvent::Breakpoints { path, .. } if *path == local),
+    );
+    cdp::reload(&proxy).unwrap();
+    let (thread, frame) = top_frame(&mut session, &mut wait);
+    eprintln!("다시 부른 화면의 프레임: {frame:?}");
+    assert_eq!(frame.line, 12);
+    assert!(
+        frame
+            .source
+            .as_ref()
+            .and_then(|s| s.name.as_deref())
+            .is_some_and(|n| n.contains("frag.do")),
+        "{frame:?}"
+    );
+    // 3) 화면을 읽는 중에 멈춰 있다(그동안은 CDP가 화면 HTML에 답하지 않아 앱은 이어 간 뒤에 받는다).
+    assert!(!cdp::wait_loaded(&proxy, Duration::from_millis(500)).unwrap());
+    session.set_breakpoints(&local, Vec::new());
+    wait(
+        &mut session,
+        &|e| matches!(e, DebugEvent::Breakpoints { path, .. } if *path == local),
+    );
+    session.resume(thread);
+    assert!(cdp::wait_loaded(&proxy, Duration::from_secs(10)).unwrap());
+    assert_eq!(
+        cdp::page_html(&proxy, &page).unwrap(),
+        FRAG_PAGE,
+        "이어 가면 받는다"
+    );
+    // 4) 폼(POST)을 보내 연 화면은 다시 부르면 폼을 다시 보낼 수 있다.
+    session.request(
+        "evaluate",
+        json!({ "expression": "var f = document.createElement('form'); f.method = 'post'; f.action = '/app/frag.do'; document.body.appendChild(f); setTimeout(function () { f.submit(); }, 100); 1", "context": "repl" }),
+    );
+    wait(
+        &mut session,
+        &|e| matches!(e, DebugEvent::Response { command, .. } if command == "evaluate"),
+    );
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let loaded = cdp::page_loaded(&proxy, &page, Duration::from_secs(10));
+        if loaded.as_ref().is_ok_and(|l| l.form_submit) {
+            break;
+        }
+        assert!(Instant::now() < deadline, "폼으로 연 화면: {loaded:?}");
+        std::thread::sleep(Duration::from_millis(200));
     }
 
     session.stop();

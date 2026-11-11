@@ -5,6 +5,7 @@
 //! js-debug면 그 스크립트를 만든 JSP를 내용으로 찾아, JSP에 건 중단점을 화면 스크립트의 줄로 바꿔 걸고 멈춘
 //! 자리도 JSP의 줄로 보인다. 화면에 인라인 스크립트가 여럿이면(Tiles·`<jsp:include>`·`<script>` 여럿) 블록마다
 //! 그것을 만든 JSP를 찾는다. 블록의 글은 js-debug의 CDP 프록시로 받은 화면의 원래 HTML에서 잘라 낸다.
+//! 화면을 불러올 때 도는 코드에 건 JSP 중단점도 걸리게 화면마다 처음 맞춘 뒤 한 번 다시 부른다.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -124,8 +125,14 @@ struct Pages {
     inline: HashMap<String, Inline>,
     /// js-debug의 CDP 프록시(처음 쓸 때 묻는다).
     proxy: ProxyState,
-    /// 따로 받은 화면 HTML.
-    html: (Sender<PageHtml>, Receiver<PageHtml>),
+    /// CDP 프록시로 따로 한 일의 결과.
+    events: (Sender<PageEvent>, Receiver<PageEvent>),
+    /// 화면(열쇠)마다 처음 맞춘 뒤 다시 부르는 일.
+    reloads: HashMap<String, Reload>,
+    /// 화면을 읽는 중에 멈춰 미룬 원래 HTML 받기(그동안은 CDP가 답하지 않는다). 이어 가면 받는다.
+    deferred: Vec<String>,
+    /// 사용자가 계속을 눌렀다(다음 `continued`에 미룬 다시 부르기를 한다).
+    continuing: bool,
 }
 
 impl Default for Pages {
@@ -138,13 +145,45 @@ impl Default for Pages {
             asking: HashSet::new(),
             inline: HashMap::new(),
             proxy: ProxyState::default(),
-            html: channel(),
+            events: channel(),
+            reloads: HashMap::new(),
+            deferred: Vec::new(),
+            continuing: false,
         }
     }
 }
 
-/// 따로 받은 화면의 원래 HTML: (화면 열쇠, 결과).
-type PageHtml = (String, Result<String, String>);
+/// CDP 프록시로 따로(UI를 막지 않게) 한 일의 결과. 화면 열쇠와 함께 온다.
+enum PageEvent {
+    /// 화면의 원래 HTML.
+    Html(String, Result<String, String>),
+    /// 화면을 읽는 중에 멈춰 있어 HTML을 받지 않았다.
+    Deferred(String),
+    /// 화면을 다 읽었다(다시 불러도 되는지).
+    Loaded(String, Result<cdp::Loaded, String>),
+    /// 다시 불렀다.
+    Reloaded(String, Result<(), String>),
+}
+
+/// 화면을 다 읽기를 기다리는 시간(다시 부르기 전).
+const LOAD_WAIT: Duration = Duration::from_secs(10);
+/// 원래 HTML을 받기 전에 화면을 다 읽기를 기다리는 시간. 넘으면 미뤄 다시 묻는다(멈춰 있으면 이어 간 뒤에).
+const HTML_WAIT: Duration = Duration::from_secs(1);
+
+/// 처음 맞춘 화면을 한 번 다시 부르는 일. 화면을 불러올 때 도는 코드(맨 위 코드, `$(function () { … })`)는
+/// JSP 중단점을 화면 줄로 바꿔 걸기 전에 돌아 버리므로, 화면마다 처음 맞춘 뒤 한 번 다시 불러 그 코드에서도
+/// 멈추게 한다.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Reload {
+    /// 화면을 다 읽기를 기다리며 다시 불러도 되는지 보는 중.
+    Checking,
+    /// 맞춤이 끝나고 보낸 중단점의 답을 받으면 부른다(그래야 어댑터가 중단점을 건 뒤에 부른다).
+    Deciding,
+    /// 멈춰 있다. 사용자가 계속을 누르면 부른다.
+    AfterContinue,
+    /// 불렀거나 부르지 않기로 했다.
+    Done,
+}
 
 /// CDP 프록시를 아는지.
 #[derive(Default)]
@@ -471,6 +510,12 @@ impl Debugger {
             Step::In => session.step_in(thread),
             Step::Out => session.step_out(thread),
         }
+        // 미룬 다시 부르기는 계속을 누른 뒤에만 한다(한 줄씩 가는 중에 화면이 바뀌지 않게).
+        if matches!(how, Step::Continue)
+            && let Some(pages) = &mut self.pages
+        {
+            pages.continuing = true;
+        }
         self.clear_stop();
     }
 
@@ -721,13 +766,27 @@ impl Debugger {
             notices.push(DebugNotice::Status("디버그를 멈췄습니다".into()));
             return notices;
         }
-        // 따로 받은 화면 HTML로 블록을 맞춘다.
-        let fetched: Vec<PageHtml> = self
+        // CDP 프록시로 따로 한 일: 받은 화면 HTML로 블록을 맞추고, 처음 맞춘 화면을 다시 부른다.
+        let done: Vec<PageEvent> = self
             .pages
             .as_ref()
-            .map_or_else(Vec::new, |pages| pages.html.1.try_iter().collect());
-        for (key, html) in fetched {
-            notices.extend(self.on_page_html(key, html));
+            .map_or_else(Vec::new, |pages| pages.events.1.try_iter().collect());
+        for event in done {
+            match event {
+                PageEvent::Html(key, html) => notices.extend(self.on_page_html(key, html)),
+                PageEvent::Deferred(key) => self.defer_page(key),
+                PageEvent::Loaded(key, loaded) => self.on_page_loaded(key, loaded),
+                PageEvent::Reloaded(key, result) => {
+                    let page = shown(&key);
+                    self.push_console(&match result {
+                        Ok(()) => format!(
+                            "[화면을 다시 불렀습니다: {page}] 화면을 불러올 때 도는 코드에 건 JSP 중단점도 걸리게 \
+                             처음 맞춘 뒤 한 번 다시 부릅니다.\n"
+                        ),
+                        Err(e) => format!("[화면을 다시 부르지 못했습니다: {page}] {e}\n"),
+                    });
+                }
+            }
         }
         for event in events {
             match event {
@@ -755,14 +814,18 @@ impl Debugger {
                         None => self.send(Request::Threads),
                     }
                 }
-                DebugEvent::Continued => self.clear_stop(),
+                DebugEvent::Continued => {
+                    self.clear_stop();
+                    self.continued();
+                }
                 DebugEvent::Output { category, text } => {
                     if category != "telemetry" {
                         self.push_console(&text);
                     }
                 }
                 DebugEvent::Breakpoints { path, states } => {
-                    self.states.insert(path, states);
+                    self.states.insert(path.clone(), states);
+                    self.breakpoints_answered(&path);
                 }
                 DebugEvent::Response { id, result, .. } => {
                     if let Some(request) = self.requests.remove(&id) {
@@ -1009,25 +1072,203 @@ impl Debugger {
         let Some(pages) = self.pages.as_mut() else {
             return;
         };
-        match &mut pages.proxy {
-            ProxyState::Ready(proxy) => {
-                let (proxy, sender, ctx) = (proxy.clone(), pages.html.0.clone(), self.ctx.clone());
-                let page = shown(&key);
-                thread::spawn(move || {
-                    let html = cdp::page_html(&proxy, &page);
-                    let _ = sender.send((key, html));
-                    if let Some(ctx) = ctx {
-                        ctx.request_repaint();
-                    }
-                });
-            }
-            ProxyState::Asking(waiting) => waiting.push(key),
+        let proxy = match &mut pages.proxy {
+            ProxyState::Ready(proxy) => proxy.clone(),
+            ProxyState::Asking(waiting) => return waiting.push(key),
             ProxyState::Unknown => {
                 pages.proxy = ProxyState::Asking(vec![key]);
-                self.send(Request::CdpProxy);
+                return self.send(Request::CdpProxy);
             }
-            ProxyState::Missing => self.send(Request::PageScripts(key)),
+            ProxyState::Missing => return self.send(Request::PageScripts(key)),
+        };
+        let page = shown(&key);
+        self.spawn_cdp(move || {
+            // 화면을 다 읽은 뒤에 받는다(HTML이 다 왔다). 읽는 중에 멈춰 있으면(다시 부른 화면의 맨 위 코드에서
+            // 멈췄을 때) CDP가 HTML에 답하지 않으므로, 오래 읽는 중이면 미뤄 둔다(멈춰 있으면 이어 간 뒤에 받는다).
+            if cdp::wait_loaded(&proxy, HTML_WAIT) == Ok(false) {
+                return PageEvent::Deferred(key);
+            }
+            PageEvent::Html(key, cdp::page_html(&proxy, &page))
+        });
+    }
+
+    /// CDP 프록시로 할 일을 따로 돌린다(UI를 막지 않는다). 결과는 `poll`에서 받는다.
+    fn spawn_cdp(&self, work: impl FnOnce() -> PageEvent + Send + 'static) {
+        let Some(pages) = &self.pages else {
+            return;
+        };
+        let (sender, ctx) = (pages.events.0.clone(), self.ctx.clone());
+        thread::spawn(move || {
+            let _ = sender.send(work());
+            if let Some(ctx) = ctx {
+                ctx.request_repaint();
+            }
+        });
+    }
+
+    /// 화면을 다 읽지 않아 HTML을 받지 않았다: 멈춰 있으면 이어 갈 때까지 미루고, 아니면 다시 묻는다.
+    fn defer_page(&mut self, key: String) {
+        let stopped = self.is_stopped();
+        let Some(pages) = self.pages.as_mut() else {
+            return;
+        };
+        if !stopped {
+            self.ask_page(key);
+        } else if !pages.deferred.contains(&key) {
+            pages.deferred.push(key);
         }
+    }
+
+    /// 대상이 이어 갔다: 미룬 HTML을 받고, 사용자가 계속을 눌렀으면 미룬 다시 부르기를 한다.
+    fn continued(&mut self) {
+        let Some(pages) = self.pages.as_mut() else {
+            return;
+        };
+        let deferred = std::mem::take(&mut pages.deferred);
+        let reload: Vec<String> = if std::mem::take(&mut pages.continuing) {
+            pages
+                .reloads
+                .iter()
+                .filter(|(_, r)| **r == Reload::AfterContinue)
+                .map(|(key, _)| key.clone())
+                .collect()
+        } else {
+            Vec::new()
+        };
+        for key in deferred {
+            self.ask_page(key);
+        }
+        for key in reload {
+            self.reload_page(key);
+        }
+    }
+
+    /// 화면(`key`)을 맞춘 담은 파일에 JSP에서 온 중단점을 보냈는지.
+    fn has_page_breakpoints(&self, key: &str) -> bool {
+        let (Some(pages), Some(local)) = (&self.pages, self.stored.get(key)) else {
+            return false;
+        };
+        pages
+            .sent
+            .get(local)
+            .is_some_and(|origins| !origins.is_empty())
+    }
+
+    /// 화면(`key`)을 처음 맞췄다: 화면을 다 읽기를 기다려 다시 불러도 되는지 본다(화면마다 한 번).
+    fn check_reload(&mut self, key: &str) {
+        let has_breakpoints = self.has_page_breakpoints(key);
+        let Some(pages) = self.pages.as_mut() else {
+            return;
+        };
+        if !pages.inline.contains_key(key) || pages.reloads.contains_key(key) {
+            return;
+        }
+        let ProxyState::Ready(proxy) = &pages.proxy else {
+            // 옛 js-debug(CDP 프록시 없음): 폼을 보내 연 화면인지 알 수 없어 다시 부르지 않는다.
+            pages.reloads.insert(key.to_owned(), Reload::Done);
+            if has_breakpoints {
+                self.push_console(&format!(
+                    "[화면을 다시 부르지 않았습니다: {}] 이 js-debug에는 CDP 프록시가 없습니다. 화면을 불러올 때 \
+                     도는 코드에 건 JSP 중단점은 화면을 다시 불러야 걸립니다.\n",
+                    shown(key)
+                ));
+            }
+            return;
+        };
+        let (proxy, page, key) = (proxy.clone(), shown(key), key.to_owned());
+        pages.reloads.insert(key.clone(), Reload::Checking);
+        self.spawn_cdp(move || {
+            let loaded = cdp::page_loaded(&proxy, &page, LOAD_WAIT);
+            PageEvent::Loaded(key, loaded)
+        });
+    }
+
+    /// 화면을 다 읽었다: 다시 불러도 되면 맞춘 중단점을 다시 보내 그 답을 받은 뒤 부른다. 폼을 보내 연 화면,
+    /// 프레임 안 화면은 부르지 않고 알린다.
+    fn on_page_loaded(&mut self, key: String, loaded: Result<cdp::Loaded, String>) {
+        let why = match loaded {
+            Ok(cdp::Loaded {
+                top: true,
+                form_submit: false,
+            }) => None,
+            Ok(cdp::Loaded { top: false, .. }) => Some(
+                "맨 위 화면이 아닙니다(프레임 안 화면이거나 그사이 다른 화면으로 갔습니다)"
+                    .to_owned(),
+            ),
+            Ok(_) => {
+                Some("폼을 보내 연 화면이라 다시 부르면 폼을 다시 보낼 수 있습니다".to_owned())
+            }
+            Err(e) => Some(e),
+        };
+        let has_breakpoints = self.has_page_breakpoints(&key);
+        let Some(pages) = self.pages.as_mut() else {
+            return;
+        };
+        if let Some(why) = why {
+            pages.reloads.insert(key.clone(), Reload::Done);
+            if has_breakpoints {
+                self.push_console(&format!(
+                    "[화면을 다시 부르지 않았습니다: {}] {why}. 화면을 불러올 때 도는 코드에 건 JSP 중단점은 \
+                     화면을 다시 불러야 걸립니다.\n",
+                    shown(&key)
+                ));
+            }
+            return;
+        }
+        // 블록이 더 와서 다시 맞추는 중이면 그 맞춤이 보낸 중단점의 답을 기다린다.
+        if pages.asking.contains(&key) {
+            pages.reloads.insert(key, Reload::Deciding);
+        } else if has_breakpoints {
+            pages.reloads.insert(key.clone(), Reload::Deciding);
+            if let Some(local) = self.stored.get(&key).cloned() {
+                self.send_page(&local);
+            }
+        } else {
+            pages.reloads.insert(key, Reload::Done);
+        }
+    }
+
+    /// 어댑터가 담은 파일(`local`)의 중단점에 답했다: 다시 부르기로 한 화면이면 이제 부른다(멈춰 있으면
+    /// 사용자가 계속을 누른 뒤에).
+    fn breakpoints_answered(&mut self, local: &Path) {
+        let Some(key) = self
+            .stored
+            .iter()
+            .find(|(_, path)| *path == local)
+            .map(|(key, _)| key.clone())
+        else {
+            return;
+        };
+        let (has_breakpoints, stopped) = (self.has_page_breakpoints(&key), self.is_stopped());
+        let Some(pages) = self.pages.as_mut() else {
+            return;
+        };
+        if pages.reloads.get(&key) != Some(&Reload::Deciding) || pages.asking.contains(&key) {
+            return;
+        }
+        if !has_breakpoints {
+            pages.reloads.insert(key, Reload::Done);
+        } else if stopped {
+            pages.reloads.insert(key, Reload::AfterContinue);
+        } else {
+            self.reload_page(key);
+        }
+    }
+
+    /// 화면을 다시 부른다(맨 위 화면, 한 번).
+    fn reload_page(&mut self, key: String) {
+        let Some(pages) = self.pages.as_mut() else {
+            return;
+        };
+        pages.reloads.insert(key.clone(), Reload::Done);
+        let ProxyState::Ready(proxy) = &pages.proxy else {
+            return;
+        };
+        let proxy = proxy.clone();
+        self.spawn_cdp(move || {
+            let result = cdp::reload(&proxy);
+            PageEvent::Reloaded(key, result)
+        });
     }
 
     /// CDP 프록시 답을 받았다: 기다리던 화면들의 글을 묻는다.
@@ -1135,6 +1376,7 @@ impl Debugger {
                 };
             }
             self.send_page(&local);
+            self.check_reload(key);
         }
         let map = self
             .pages
@@ -1629,14 +1871,21 @@ mod tests {
         );
     }
 
-    /// 가짜 CDP 프록시(웹소켓): 손짓에 101로 답하고, 프레임 트리와 화면의 원래 HTML(`html`)을 준다.
-    fn fake_cdp(html: &'static str) -> u16 {
+    /// 가짜 CDP 프록시(웹소켓): 손짓에 101로 답하고, 프레임 트리(맨 위 화면 list.do)와 화면의 원래
+    /// HTML(`html`), 다 읽은 화면, 탐색 기록(지금 화면을 연 방식 `transition`)을 준다. 받은 명령 이름을
+    /// 돌려준다.
+    fn fake_cdp(
+        html: &'static str,
+        transition: &'static str,
+    ) -> (u16, std::sync::mpsc::Receiver<String>) {
         use std::io::{BufRead, Read, Write};
 
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
+        let (seen, methods) = channel();
         thread::spawn(move || {
             for mut stream in listener.incoming().flatten() {
+                let seen = seen.clone();
                 thread::spawn(move || {
                     let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
                     let mut line = String::new();
@@ -1666,11 +1915,20 @@ mod tests {
                             .enumerate()
                             .for_each(|(i, b)| *b ^= mask[i % 4]);
                         let request: Value = serde_json::from_slice(&payload).unwrap();
-                        let result = match request["method"].as_str() {
-                            Some("Page.getFrameTree") => json!({ "frameTree": { "frame": {
+                        let method = request["method"].as_str().unwrap_or_default().to_owned();
+                        let result = match method.as_str() {
+                            "Page.getFrameTree" => json!({ "frameTree": { "frame": {
                                 "id": "top", "url": "http://127.0.0.1:8080/app/list.do" } } }),
+                            "Runtime.evaluate" => {
+                                json!({ "result": { "type": "string", "value": "complete" } })
+                            }
+                            "Page.getNavigationHistory" => json!({ "currentIndex": 0, "entries": [
+                                { "id": 1, "url": "http://127.0.0.1:8080/app/list.do",
+                                  "transitionType": transition }] }),
+                            "Page.reload" => json!({}),
                             _ => json!({ "content": html, "base64Encoded": false }),
                         };
+                        let _ = seen.send(method);
                         let body = json!({ "id": request["id"], "result": result }).to_string();
                         let mut frame = vec![0x81u8];
                         if body.len() < 126 {
@@ -1685,18 +1943,18 @@ mod tests {
                 });
             }
         });
-        port
+        (port, methods)
     }
 
     /// 각본대로 답하는 가짜 js-debug: 시작한 뒤 화면의 인라인 스크립트 블록들(소스, 화면에서의 글)을
     /// 불러왔다고 알린다. 실제 js-debug처럼 내용은 마지막 블록만 주고, 화면에서 읽히는 글(`dom`, 없으면
-    /// 블록의 글)은 `evaluate`로, 화면의 원래 HTML(`html`)이 있으면 CDP 프록시로 준다. 마지막 블록으로 건
-    /// 중단점에 `stop`(블록 번호, 화면 줄)이 들면 그 블록의 그 줄에서 멈춘다. 받은 중단점은 (소스 번호 또는
-    /// 경로, 줄들)로 돌려준다.
+    /// 블록의 글)은 `evaluate`로 준다. `cdp`(가짜 CDP 프록시의 포트)가 있으면 CDP 프록시를 알려 준다. 마지막
+    /// 블록으로 건 중단점에 `stop`(블록 번호, 화면 줄)이 들면 그 블록의 그 줄에서 멈춘다. 받은 중단점은 (소스
+    /// 번호 또는 경로, 줄들)로 돌려준다.
     fn fake_js_debug(
         blocks: Vec<(Source, &'static str)>,
         dom: Option<Vec<&'static str>>,
-        html: Option<&'static str>,
+        cdp_port: Option<u16>,
         stop: (usize, i64),
     ) -> (
         std::net::SocketAddr,
@@ -1708,7 +1966,6 @@ mod tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let (sent, received) = channel();
-        let cdp_port = html.map(fake_cdp);
         thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
             let mut reader = std::io::BufReader::new(&stream);
@@ -1779,6 +2036,9 @@ mod tests {
                     }
                     "scopes" => body = json!({ "scopes": [] }),
                     "threads" => body = json!({ "threads": [{ "id": 1, "name": "main" }] }),
+                    "continue" => after.push(
+                        json!({ "type": "event", "event": "continued", "body": { "threadId": 1 } }),
+                    ),
                     _ => {}
                 }
                 send(
@@ -2045,7 +2305,8 @@ mod tests {
         // 화면의 원래 HTML(CDP 프록시로 받는다). 화면의 글만으로는 덧붙인 스크립트 때문에 수가 달라 짝짓지
         // 못한다.
         static HTML: &str = "<ul>\n<script>\nregister(\"a\");\nlistReady = true;\n</script>\n<script>\nregister(\"b\");\nlistReady = true;\n</script>\n</ul>\n";
-        let (address, received) = fake_js_debug(blocks, Some(dom), Some(HTML), (1, 7));
+        let (cdp_port, _) = fake_cdp(HTML, "link");
+        let (address, received) = fake_js_debug(blocks, Some(dom), Some(cdp_port), (1, 7));
         let config = DebugConfig {
             name: "화면".into(),
             adapter: "js-debug".into(),
@@ -2095,6 +2356,181 @@ mod tests {
             thread::sleep(Duration::from_millis(10));
         }
         assert!(debugger.breakpoint_state(&jsp, 0).unwrap().verified);
+        debugger.shutdown();
+        let _ = std::fs::remove_dir_all(sources_dir());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 띄운 다시 부르기 시험: 디버거, 프로젝트 폴더, 가짜 js-debug가 받은 중단점, 가짜 CDP가 받은 명령.
+    type ReloadPage = (
+        Debugger,
+        PathBuf,
+        std::sync::mpsc::Receiver<(String, Vec<i64>)>,
+        std::sync::mpsc::Receiver<String>,
+    );
+
+    /// 다시 부르기 시험의 화면: 맨 위 코드(`var count = 0;`, JSP 5줄 → 화면 6줄)와 함수가 든 JSP 하나.
+    /// JSP 5줄에 중단점을 걸고 가짜 CDP 프록시(`transition`)와 함께 띄운다. `stop`은 가짜 js-debug가
+    /// 멈출 (블록, 화면 줄)이다.
+    fn start_reload_page(name: &str, transition: &'static str, stop: (usize, i64)) -> ReloadPage {
+        let root = std::env::temp_dir().join(format!("ferrite-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let jsp = root.join("src/main/webapp/WEB-INF/jsp/board/list.jsp");
+        std::fs::create_dir_all(jsp.parent().unwrap()).unwrap();
+        std::fs::write(
+            &jsp,
+            "<script>\nfunction tick() {\n  count = count + 1;\n}\nvar count = 0;\n</script>\n",
+        )
+        .unwrap();
+        static HTML: &str = "<html><body>\n<script>\nfunction tick() {\n  count = count + 1;\n}\nvar count = 0;\n</script>\n</body></html>\n";
+        let blocks = vec![(
+            source("127.0.0.1\u{a789}8080/app/list.do\u{a789}2:9", 7),
+            "\nfunction tick() {\n  count = count + 1;\n}\nvar count = 0;\n",
+        )];
+        let (cdp_port, methods) = fake_cdp(HTML, transition);
+        let (address, received) = fake_js_debug(blocks, None, Some(cdp_port), stop);
+        let config = DebugConfig {
+            name: "화면".into(),
+            adapter: "js-debug".into(),
+            request: "launch".into(),
+            arguments: serde_json::json!({}),
+            build: None,
+        };
+        let breakpoints = BTreeMap::from([(
+            jsp,
+            vec![Breakpoint {
+                line: 5,
+                condition: None,
+            }],
+        )]);
+        let mut debugger = Debugger::default();
+        debugger
+            .start(
+                &config,
+                &root,
+                None,
+                breakpoints,
+                Adapter::Tcp(address),
+                &egui::Context::default(),
+            )
+            .unwrap();
+        (debugger, root, received, methods)
+    }
+
+    /// `done`이 참이 될 때까지 디버거를 돌린다(10초).
+    fn pump(debugger: &mut Debugger, what: &str, mut done: impl FnMut(&Debugger) -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !done(debugger) {
+            assert!(Instant::now() < deadline, "{what}: {}", debugger.console);
+            debugger.poll();
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    const RELOAD_KEY: &str = "127.0.0.1\u{a789}8080/app/list.do";
+
+    #[test]
+    fn js_debug에서_처음_맞춘_화면을_한_번_다시_불러_맨_위_코드에도_걸리게_한다() {
+        let (mut debugger, root, received, methods) =
+            start_reload_page("reload-page", "link", (0, 999));
+        let mut seen = Vec::new();
+        pump(&mut debugger, "다시 부르지 않음", |_| {
+            seen.extend(methods.try_iter());
+            seen.iter().any(|m| m == "Page.reload")
+        });
+        // 화면을 다 읽은 것을 보고, 맞춘 중단점(JSP 5줄 → 화면 6줄)을 다시 보내 답을 받은 뒤에 불렀다.
+        let sent: Vec<(String, Vec<i64>)> = received.try_iter().collect();
+        assert!(
+            sent.iter()
+                .filter(|s| *s == &("#7".to_owned(), vec![6]))
+                .count()
+                >= 2,
+            "{sent:?}"
+        );
+        assert!(
+            seen.iter().position(|m| m == "Page.getNavigationHistory")
+                < seen.iter().position(|m| m == "Page.reload"),
+            "{seen:?}"
+        );
+        pump(
+            &mut debugger,
+            "다시 부른 것을 알리지 않음",
+            |d| {
+                d.console
+                    .contains("[화면을 다시 불렀습니다: 127.0.0.1:8080/app/list.do]")
+            },
+        );
+        // 화면마다 한 번만 부른다(다시 부른 화면을 또 맞춰도 부르지 않는다).
+        debugger.loaded(
+            RELOAD_KEY.to_owned(),
+            source("127.0.0.1\u{a789}8080/app/list.do\u{a789}2:9", 9),
+        );
+        let until = Instant::now() + Duration::from_millis(500);
+        while Instant::now() < until {
+            debugger.poll();
+            seen.extend(methods.try_iter());
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            seen.iter().filter(|m| *m == "Page.reload").count(),
+            1,
+            "{seen:?}"
+        );
+        assert!(
+            seen.iter()
+                .filter(|m| *m == "Page.getResourceContent")
+                .count()
+                >= 2,
+            "다시 맞췄다: {seen:?}"
+        );
+        debugger.shutdown();
+        let _ = std::fs::remove_dir_all(sources_dir());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn js_debug에서_폼을_보내_연_화면은_다시_부르지_않고_알린다() {
+        let (mut debugger, root, _received, methods) =
+            start_reload_page("reload-form", "form_submit", (0, 999));
+        pump(&mut debugger, "알리지 않음", |d| {
+            d.console
+                .contains("[화면을 다시 부르지 않았습니다: 127.0.0.1:8080/app/list.do]")
+        });
+        assert!(
+            debugger.console.contains("폼을 보내 연 화면"),
+            "{}",
+            debugger.console
+        );
+        let seen: Vec<String> = methods.try_iter().collect();
+        assert!(!seen.iter().any(|m| m == "Page.reload"), "{seen:?}");
+        debugger.shutdown();
+        let _ = std::fs::remove_dir_all(sources_dir());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn js_debug에서_멈춰_있으면_계속을_누른_뒤에_다시_부른다() {
+        // 건 중단점(화면 6줄)에서 바로 멈춘다.
+        let (mut debugger, root, _received, methods) =
+            start_reload_page("reload-stopped", "link", (0, 6));
+        pump(&mut debugger, "계속을 기다리지 않음", |d| {
+            d.pages
+                .as_ref()
+                .is_some_and(|p| p.reloads.get(RELOAD_KEY) == Some(&Reload::AfterContinue))
+        });
+        assert!(debugger.is_stopped());
+        let mut seen: Vec<String> = methods.try_iter().collect();
+        assert!(!seen.iter().any(|m| m == "Page.reload"), "{seen:?}");
+        // 한 줄씩 가는 것으로는 부르지 않는다. 계속을 누르면 부른다.
+        debugger.resume(Step::Continue);
+        pump(
+            &mut debugger,
+            "계속 뒤에 다시 부르지 않음",
+            |_| {
+                seen.extend(methods.try_iter());
+                seen.iter().any(|m| m == "Page.reload")
+            },
+        );
         debugger.shutdown();
         let _ = std::fs::remove_dir_all(sources_dir());
         let _ = std::fs::remove_dir_all(&root);
