@@ -331,9 +331,11 @@ pub fn unreported_failure(tool: Tool, code: Option<i32>, failed: usize) -> bool 
 pub enum GradlePathProblem {
     /// 프로젝트 경로: 테스트 클래스를 찾지 못했다("Could not execute test class"와 `ClassNotFoundException`).
     Project,
-    /// Gradle 홈(`GRADLE_USER_HOME`, 기본은 사용자 폴더의 `.gradle`): 받아 둔 Gradle의 클래스까지 찾지 못해
-    /// 테스트 JVM이 뜨지 못했다("Gradle Test Executor"가 0이 아닌 코드로 끝나고 출력에 `GradleWorkerMain`).
-    /// Windows 사용자 이름이 한글이면 기본 홈이 그렇다.
+    /// Gradle 홈(`GRADLE_USER_HOME`, 기본은 사용자 폴더의 `.gradle`): 테스트 JVM이 뜨지 못했다("Gradle Test
+    /// Executor"가 0이 아닌 코드로 끝났다). 그 글자를 시스템 코드 페이지가 나타내면(한국어 Windows) 인자 파일을
+    /// 열되 받아 둔 Gradle의 클래스(`GradleWorkerMain`)를 찾지 못하고, 나타내지 못하면(영문 Windows) 홈 아래의
+    /// 인자 파일(`gradle-worker-classpath…`)부터 열지 못한다. 까닭은 출력에만 나온다. Windows 사용자 이름이
+    /// 한글이면 기본 홈이 그렇다.
     Home(PathBuf),
 }
 
@@ -356,7 +358,9 @@ pub fn gradle_path_problem(
                 && c.message.as_deref().is_some_and(|m| m.contains(message))
         })
     };
-    if !ascii(home) && failed("Gradle Test Executor") && output.contains("GradleWorkerMain") {
+    let worker_failed =
+        output.contains("GradleWorkerMain") || output.contains("gradle-worker-classpath");
+    if !ascii(home) && failed("Gradle Test Executor") && worker_failed {
         return Some(GradlePathProblem::Home(home.to_path_buf()));
     }
     let class_missing = cases.iter().any(|c| {

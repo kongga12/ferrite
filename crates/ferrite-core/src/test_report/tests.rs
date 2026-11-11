@@ -568,6 +568,12 @@ fn 한글_gradle_홈에서_테스트_jvm이_뜨지_못한_것을_알아본다() 
         ),
         cfg!(windows).then(|| GradlePathProblem::Home(korean_home.to_path_buf()))
     );
+    // 영문 Windows(코드 페이지 1252)는 한글을 나타내지 못해 홈 아래의 인자 파일부터 열지 못한다(CI에서 본 출력).
+    let cp1252 = "Could not write standard input to Gradle Test Executor 1.\nError: could not open `C:\\Users\\runneradmin\\AppData\\Local\\Temp\\ferrite-test-tools-???? ?-7368\\.tmp\\gradle-worker-classpath10517670469663812345txt'\n";
+    assert_eq!(
+        gradle_path_problem(Tool::Gradle, work, korean_home, &cases, cp1252),
+        cfg!(windows).then(|| GradlePathProblem::Home(korean_home.to_path_buf()))
+    );
     // 홈이 영문이거나, 출력에 까닭이 없으면(다른 까닭으로 테스트 JVM이 끝났다) 아니다.
     let home = Path::new(r"C:\Users\me\.gradle");
     assert_eq!(

@@ -1969,16 +1969,17 @@
     - 영문 경로의 프로젝트도 깨진다. 다만 꼴이 다르다: 테스트 클래스가 아니라 Gradle 홈에 받아 둔 Gradle의 클래스(`worker.org.gradle.process.internal.worker.GradleWorkerMain`)부터 찾지 못해 테스트 JVM이 뜨지 못한다.
     - 보고서에는 "Gradle Test Run :app:test"의 "failed to execute tests" 하나와 "Process 'Gradle Test Executor 1' finished with non-zero exit value 1"만 남고, 까닭(`ClassNotFoundException` … `GradleWorkerMain`)은 Gradle의 출력에만 나온다.
     - JDK 17로 돌리면 같은 한글 홈에서도 테스트가 돈다. 실행 구성의 환경 변수로 `GRADLE_USER_HOME`을 영문 경로로 주면 돈다.
+    - 영문 Windows(CI, 코드 페이지 1252)에서는 꼴이 또 다르다: 한글을 나타내지 못해 java가 홈 아래의 인자 파일(`…\.tmp\gradle-worker-classpath…txt`, 경로가 `????`로 깨진다)부터 열지 못한다("Error: could not open"). 그래서 출력에 `GradleWorkerMain`이나 `gradle-worker-classpath`가 있으면 홈으로 본다.
   - 고침
-    - `test_report::gradle_path_problem`이 어디가 문제인지 알린다(`GradlePathProblem::Project`·`Home(홈)`). Gradle 홈이 영문이 아니고, "Gradle Test Executor"의 실패가 있고, 출력에 `GradleWorkerMain`이 있으면 홈이다(프로젝트 경로도 한글이면 홈을 먼저 알린다. 홈이 깨지면 테스트 JVM부터 뜨지 못한다).
+    - `test_report::gradle_path_problem`이 어디가 문제인지 알린다(`GradlePathProblem::Project`·`Home(홈)`). Gradle 홈이 영문이 아니고, "Gradle Test Executor"의 실패가 있고, 출력에 `GradleWorkerMain`이나 `gradle-worker-classpath`가 있으면 홈이다(프로젝트 경로도 한글이면 홈을 먼저 알린다. 홈이 깨지면 테스트 JVM부터 뜨지 못한다).
     - `test_report::gradle_user_home`: 실행 구성의 `GRADLE_USER_HOME`, 없으면 이 프로세스의 것, 그것도 없으면 사용자 폴더의 `.gradle`(Gradle의 기본).
     - 테스트 창: 홈이면 그 경로와 함께 까닭과 해법(환경 변수 `GRADLE_USER_HOME`을 영문 경로로, 이 프로젝트만이면 `.ferrite/run.toml`의 실행 구성에 `env = { GRADLE_USER_HOME = "C:/gradle" }`, 옮길 수 없으면 JDK 17과 빌드 파일의 소스 문자셋 UTF-8)을 보인다. Ferrite가 홈을 몰래 바꾸지 않는다(받은 의존성을 모두 다시 받는다).
   - 검증
     - 단위: 실제 보고서(줄인 스택)와 출력으로 홈을 알아보기, 프로젝트 경로도 한글이면 홈이 먼저, 홈이 영문이거나 출력에 까닭이 없으면 아님, Windows가 아니면 아님. Gradle 홈은 실행 구성의 환경 변수가 먼저다.
     - 창 시험(kittest): 실행 구성의 `GRADLE_USER_HOME`이 한글이고 이 보고서와 출력이면 그 경로가 든 안내가 보인다(Windows에서만).
-    - 실제 도구(`test_tools`, CI의 3개 OS): 영문 경로의 프로젝트를 한글 경로의 Gradle 홈으로 `gradle test` → Windows는 홈 문제로 알아보고, 그 밖은 테스트가 돈다. 로컬 Windows(코드 페이지 949)에서 통과했다.
+    - 실제 도구(`test_tools`, CI의 3개 OS): 영문 경로의 프로젝트를 한글 경로의 Gradle 홈으로 `gradle test` → Windows는 홈 문제로 알아보고, 그 밖은 테스트가 돈다. 로컬 Windows(코드 페이지 949)와 CI의 Windows(1252)에서 통과했다.
     - 실제 앱(Windows, 릴리스 빌드, JDK 21): `GRADLE_USER_HOME`을 한글 경로로 둔 채 앱을 띄워(한글 사용자 이름처럼) 영문 경로의 `gradle-board`에서 [실행 > 테스트]의 `gradle test` → "통과 0 · 실패 1 · 종료 코드 1" 아래에 그 홈 경로가 든 안내가 주황색으로 보였다. 같은 프로젝트의 `.ferrite/run.toml`에 `env = { GRADLE_USER_HOME = "C:/Users/…/.gradle" }`을 둔 실행 구성으로 돌리면 테스트가 돌고("통과 1 · 실패 1") 안내가 없다.
-  - 확인하지 못한 것: 실제로 한글 이름의 Windows 사용자로는 돌리지 않았다(`GRADLE_USER_HOME`으로 같은 경로를 만들었다). 명령 줄의 `-g`·`--gradle-user-home`과 `gradle.properties`의 홈 설정은 보지 않는다. CI의 Windows(영문, 코드 페이지 1252)에서도 같은 꼴로 깨지는지는 CI 결과로 본다.
+  - 확인하지 못한 것: 실제로 한글 이름의 Windows 사용자로는 돌리지 않았다(`GRADLE_USER_HOME`으로 같은 경로를 만들었다). 명령 줄의 `-g`·`--gradle-user-home`과 `gradle.properties`의 홈 설정은 보지 않는다.
 
 - 살폈지만 넣지 않은 것: 임베디드(MCU 플래시·시리얼 모니터·장비 설정 파일), 프레임워크별 지원(React·Vue·Angular 등, JS·TS 언어 서버로 기본은 된다), 린터 개별 연동(언어 서버나 저장 시 작업으로 된다), 원격 개발·컨테이너·SFTP 배포, 로컬 AI 완성 모델, 계정 기반 설정 동기화. egov 개발과 거리가 멀거나 크기에 비해 쓰임이 적다.
 
