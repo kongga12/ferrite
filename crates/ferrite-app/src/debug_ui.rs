@@ -4,17 +4,18 @@
 //! 담아 읽기 전용으로 연다. 그 파일에 건 중단점은 원래 소스로 건다.
 //! js-debug면 그 스크립트를 만든 JSP를 내용으로 찾아, JSP에 건 중단점을 화면 스크립트의 줄로 바꿔 걸고 멈춘
 //! 자리도 JSP의 줄로 보인다. 화면에 인라인 스크립트가 여럿이면(Tiles·`<jsp:include>`·`<script>` 여럿) 블록마다
-//! 그것을 만든 JSP를 찾는다.
+//! 그것을 만든 JSP를 찾는다. 블록의 글은 js-debug의 CDP 프록시로 받은 화면의 원래 HTML에서 잘라 낸다.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::mpsc::{Receiver, channel};
+use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use eframe::egui;
 use ferrite_core::debug_config::{self, CustomAdapter, DebugConfig};
+use ferrite_dap::cdp::{self, Proxy};
 use ferrite_dap::page_lines::{self, PageMap};
 use ferrite_dap::{
     Adapter, Breakpoint, BreakpointState, DebugEvent, DebugSession, Launch, Scope, Source,
@@ -39,8 +40,10 @@ enum Request {
     /// 로컬 파일이 없는 소스의 내용.
     Source(Source),
     /// 화면(열쇠)의 인라인 스크립트 글들. js-debug는 같은 화면의 스크립트를 하나만 남겨 내용을 다 줄 수
-    /// 없으므로 화면에서 읽는다.
+    /// 없으므로 화면에서 읽는다(CDP 프록시로 원래 HTML을 받지 못할 때).
     PageScripts(String),
+    /// js-debug의 CDP 프록시 주소(화면의 원래 HTML을 받는다).
+    CdpProxy,
 }
 
 /// 로컬 파일이 없는 소스를 담아 두는 폴더(이 앱 프로세스의 것). 앱을 닫을 때 지운다.
@@ -106,7 +109,6 @@ static UNBOUND: BreakpointState = BreakpointState {
 
 /// js-debug 세션에서 JSP와 화면 스크립트를 잇는다. js-debug는 화면 주소를 만든 JSP를 모르므로 JSP에 건
 /// 중단점을 걸지 못한다. 그래서 화면 스크립트를 불러올 때마다 내용으로 JSP를 찾아 그 줄로 바꿔 건다.
-#[derive(Default)]
 struct Pages {
     /// JSP 파일에 건 중단점.
     breakpoints: BTreeMap<PathBuf, Vec<Breakpoint>>,
@@ -120,6 +122,40 @@ struct Pages {
     asking: HashSet<String>,
     /// 화면(열쇠)마다 알려 온 인라인 스크립트.
     inline: HashMap<String, Inline>,
+    /// js-debug의 CDP 프록시(처음 쓸 때 묻는다).
+    proxy: ProxyState,
+    /// 따로 받은 화면 HTML.
+    html: (Sender<PageHtml>, Receiver<PageHtml>),
+}
+
+impl Default for Pages {
+    fn default() -> Self {
+        Self {
+            breakpoints: BTreeMap::new(),
+            direct: HashMap::new(),
+            lines: HashMap::new(),
+            sent: HashMap::new(),
+            asking: HashSet::new(),
+            inline: HashMap::new(),
+            proxy: ProxyState::default(),
+            html: channel(),
+        }
+    }
+}
+
+/// 따로 받은 화면의 원래 HTML: (화면 열쇠, 결과).
+type PageHtml = (String, Result<String, String>);
+
+/// CDP 프록시를 아는지.
+#[derive(Default)]
+enum ProxyState {
+    #[default]
+    Unknown,
+    /// 묻는 중. 답을 받으면 HTML을 받을 화면들.
+    Asking(Vec<String>),
+    Ready(Proxy),
+    /// 없다(js-debug가 아니거나 옛 판). 화면에서 글을 읽는다.
+    Missing,
 }
 
 /// 한 화면의 인라인 스크립트들. js-debug는 같은 화면 주소의 스크립트가 새로 오면 앞의 것을 지우지만(번호도
@@ -497,7 +533,8 @@ impl Debugger {
                     .flatten()
                     .enumerate()
                 {
-                    if let Some(line) = map.to_page(file, b.line.saturating_sub(1)) {
+                    // 반복으로 여러 번 나온 블록이면 나온 곳마다 건다.
+                    for line in map.to_pages(file, b.line.saturating_sub(1)) {
                         list.push(Breakpoint {
                             line: line + 1,
                             condition: b.condition.clone(),
@@ -528,14 +565,18 @@ impl Debugger {
             let mut found = None;
             for (local, origins) in &pages.sent {
                 let direct = pages.direct.get(local).map_or(0, Vec::len);
-                let Some(k) = origins.iter().position(|(f, i)| f == path && *i == index) else {
-                    continue;
-                };
-                if let Some(state) = self.states.get(local).and_then(|s| s.get(direct + k)) {
-                    if state.verified {
-                        return Some(state);
+                // 반복으로 여러 곳에 건 것은 하나라도 걸리면 걸린 것이다.
+                for (k, _) in origins
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, (f, i))| f == path && *i == index)
+                {
+                    if let Some(state) = self.states.get(local).and_then(|s| s.get(direct + k)) {
+                        if state.verified {
+                            return Some(state);
+                        }
+                        found = Some(state);
                     }
-                    found = Some(state);
                 }
             }
             return Some(found.unwrap_or(&UNBOUND));
@@ -634,6 +675,7 @@ impl Debugger {
                 "evaluate",
                 json!({ "expression": page_lines::PAGE_SCRIPTS, "context": "clipboard" }),
             ),
+            Request::CdpProxy => session.request("requestCDPProxy", json!({})),
         };
         self.requests.insert(id, request);
     }
@@ -678,6 +720,14 @@ impl Debugger {
             self.end("[디버그를 멈췄습니다]");
             notices.push(DebugNotice::Status("디버그를 멈췄습니다".into()));
             return notices;
+        }
+        // 따로 받은 화면 HTML로 블록을 맞춘다.
+        let fetched: Vec<PageHtml> = self
+            .pages
+            .as_ref()
+            .map_or_else(Vec::new, |pages| pages.html.1.try_iter().collect());
+        for (key, html) in fetched {
+            notices.extend(self.on_page_html(key, html));
         }
         for event in events {
             match event {
@@ -730,12 +780,8 @@ impl Debugger {
                 // 주소가 있는 소스만 묻는다(`eval`로 만든 스크립트 등은 뺀다).
                 DebugEvent::LoadedSource { reason, source } => {
                     let key = source_key(&source);
-                    if reason != "removed"
-                        && is_remote(&source)
-                        && key.contains('/')
-                        && let Some(request) = self.loaded(key, source)
-                    {
-                        self.send(request);
+                    if reason != "removed" && is_remote(&source) && key.contains('/') {
+                        self.loaded(key, source);
                     }
                 }
                 DebugEvent::Terminated => {
@@ -779,6 +825,11 @@ impl Debugger {
                 if let Request::PageScripts(key) = request {
                     self.page_fallback(&key);
                 }
+                return None;
+            }
+            // CDP 프록시가 없으면 화면에서 글을 읽는다.
+            Err(_) if matches!(request, Request::CdpProxy) => {
+                self.proxy_answered(None);
                 return None;
             }
             Err(e) => {
@@ -827,13 +878,11 @@ impl Debugger {
                 }
                 for source in fetch {
                     let key = source_key(&source);
-                    // 인라인 스크립트는 화면에서 글을 읽는다(지워진 블록은 내용을 물을 수 없다).
+                    // 인라인 스크립트는 화면의 글로 맞춘다(지워진 블록은 내용을 물을 수 없다).
                     if self.pages.is_some()
                         && page_lines::inline_script(&source_text(&source)).is_some()
                     {
-                        if let Some(request) = self.loaded(key, source) {
-                            self.send(request);
-                        }
+                        self.loaded(key, source);
                     } else {
                         self.send(Request::Source(source));
                     }
@@ -897,73 +946,161 @@ impl Debugger {
                 self.placed(&key, local, map)
             }
             Request::PageScripts(key) => {
+                // 화면의 글이 알려 온 블록과 같은 수면 차례로 짝짓는다(화면에는 스크립트가 끼워 넣은 것도
+                // 있어 수가 다르면 어느 것이 블록인지 모른다).
                 let texts = body
                     .get("result")
                     .and_then(Value::as_str)
                     .and_then(page_lines::page_scripts);
                 let inline = self.pages.as_mut()?.inline.get_mut(&key)?;
-                let again = std::mem::take(&mut inline.again);
                 let starts: Vec<(usize, usize)> = inline.starts.iter().copied().collect();
-                let live = inline.live.clone()?;
-                // ponytail: 문서의 스크립트와 알려 온 블록을 차례로 짝짓는다. 스크립트가 만든 인라인
-                // 스크립트가 끼면 수가 달라 살아 있는 블록만 맞춘다. 내용으로 짝지으면 나아진다.
-                let Some(texts) = texts.filter(|t| t.len() == starts.len()) else {
-                    if again {
-                        self.send(Request::PageScripts(key));
-                    } else {
-                        self.page_fallback(&key);
+                match texts.filter(|t| t.len() == starts.len()) {
+                    Some(texts) => {
+                        let blocks: Vec<(usize, usize, &str)> = starts
+                            .iter()
+                            .zip(&texts)
+                            .map(|(&(line, column), text)| (line, column, text.as_str()))
+                            .collect();
+                        self.place_blocks(&key, &blocks)
                     }
-                    return None;
-                };
-                let blocks: Vec<(usize, usize, &str)> = starts
-                    .iter()
-                    .zip(&texts)
-                    .map(|(&(line, column), text)| (line, column, text.as_str()))
-                    .collect();
-                let named = Source {
-                    name: Some(key.clone()),
-                    path: Some(PathBuf::from(&key)),
-                    source_reference: live.source_reference,
-                };
-                let local = match self.store(&named, &page_lines::assemble(&blocks)) {
-                    Ok(local) => local,
-                    Err(e) => {
-                        self.push_console(&format!("[오류] 스크립트를 담지 못했습니다: {e}\n"));
-                        return None;
+                    None => {
+                        if std::mem::take(&mut inline.again) {
+                            self.send(Request::PageScripts(key));
+                        } else {
+                            self.page_fallback(&key);
+                        }
+                        None
                     }
-                };
-                if let Some(session) = &mut self.session {
-                    session.map_source(&local, &live);
                 }
-                let map = self
-                    .page_files()
-                    .map(|files| PageMap::find(&blocks, &files, &shown(&key)));
-                if again {
-                    self.send(Request::PageScripts(key.clone()));
-                } else if let Some(pages) = &mut self.pages {
-                    pages.asking.remove(&key);
-                }
-                self.placed(&key, local, map)
+            }
+            Request::CdpProxy => {
+                self.proxy_answered(Proxy::from_json(&body));
+                None
             }
         }
     }
 
-    /// 화면 스크립트 블록이 알려 왔다. 처음 보는 화면이면 글을 물을 요청을 돌려준다(묻는 중이면 답을 받은
-    /// 뒤 다시 묻게 한다). 인라인 스크립트가 아니면 그 소스의 내용을 묻는다.
-    fn loaded(&mut self, key: String, source: Source) -> Option<Request> {
-        let pages = self.pages.as_mut()?;
+    /// 화면 스크립트 블록이 알려 왔다. 처음 보는 화면이면 글을 묻는다(묻는 중이면 답을 받은 뒤 다시 묻게
+    /// 한다). 인라인 스크립트가 아니면 그 소스의 내용을 묻는다.
+    fn loaded(&mut self, key: String, source: Source) {
+        let Some(pages) = self.pages.as_mut() else {
+            return;
+        };
         let Some((_, line, column)) = page_lines::inline_script(&source_text(&source)) else {
-            return pages.asking.insert(key).then_some(Request::Source(source));
+            if pages.asking.insert(key) {
+                self.send(Request::Source(source));
+            }
+            return;
         };
         let asking = pages.asking.insert(key.clone());
         let inline = pages.inline.entry(key.clone()).or_default();
         inline.starts.insert((line, column));
         inline.live = Some(source);
-        if !asking {
+        if asking {
+            self.ask_page(key);
+        } else {
             inline.again = true;
-            return None;
         }
-        Some(Request::PageScripts(key))
+    }
+
+    /// 화면의 블록 글을 묻는다: CDP 프록시가 있으면 원래 HTML을 따로 받고(처음이면 프록시부터 묻는다),
+    /// 없으면 화면에서 읽는다.
+    fn ask_page(&mut self, key: String) {
+        let Some(pages) = self.pages.as_mut() else {
+            return;
+        };
+        match &mut pages.proxy {
+            ProxyState::Ready(proxy) => {
+                let (proxy, sender, ctx) = (proxy.clone(), pages.html.0.clone(), self.ctx.clone());
+                let page = shown(&key);
+                thread::spawn(move || {
+                    let html = cdp::page_html(&proxy, &page);
+                    let _ = sender.send((key, html));
+                    if let Some(ctx) = ctx {
+                        ctx.request_repaint();
+                    }
+                });
+            }
+            ProxyState::Asking(waiting) => waiting.push(key),
+            ProxyState::Unknown => {
+                pages.proxy = ProxyState::Asking(vec![key]);
+                self.send(Request::CdpProxy);
+            }
+            ProxyState::Missing => self.send(Request::PageScripts(key)),
+        }
+    }
+
+    /// CDP 프록시 답을 받았다: 기다리던 화면들의 글을 묻는다.
+    fn proxy_answered(&mut self, proxy: Option<Proxy>) {
+        let Some(pages) = self.pages.as_mut() else {
+            return;
+        };
+        let state = proxy.map_or(ProxyState::Missing, ProxyState::Ready);
+        let waiting = match std::mem::replace(&mut pages.proxy, state) {
+            ProxyState::Asking(waiting) => waiting,
+            _ => Vec::new(),
+        };
+        for key in waiting {
+            self.ask_page(key);
+        }
+    }
+
+    /// 따로 받은 화면의 원래 HTML에서 블록마다 글을 잘라 맞춘다. 받지 못했거나 자리가 HTML에 맞지
+    /// 않으면(그사이 화면이 바뀌었다) 화면에서 글을 읽는다.
+    fn on_page_html(&mut self, key: String, html: Result<String, String>) -> Option<DebugNotice> {
+        let starts: Vec<(usize, usize)> = self
+            .pages
+            .as_ref()?
+            .inline
+            .get(&key)?
+            .starts
+            .iter()
+            .copied()
+            .collect();
+        let html = html.ok();
+        match html
+            .as_deref()
+            .and_then(|html| page_lines::scripts_at(html, &starts))
+        {
+            Some(blocks) => self.place_blocks(&key, &blocks),
+            None => {
+                self.send(Request::PageScripts(key));
+                None
+            }
+        }
+    }
+
+    /// 화면(`key`)의 블록들(시작 줄·칸은 1부터, 글)을 화면 줄에 놓아 담고, 블록마다 JSP를 찾는다. 담은 파일은
+    /// 살아 있는 블록으로 잇는다(중단점이 화면 주소로 걸려 모든 블록에 든다). 묻는 사이 블록이 더 왔으면
+    /// 다시 묻는다.
+    fn place_blocks(&mut self, key: &str, blocks: &[(usize, usize, &str)]) -> Option<DebugNotice> {
+        let inline = self.pages.as_mut()?.inline.get_mut(key)?;
+        let again = std::mem::take(&mut inline.again);
+        let live = inline.live.clone()?;
+        let named = Source {
+            name: Some(key.to_owned()),
+            path: Some(PathBuf::from(key)),
+            source_reference: live.source_reference,
+        };
+        let local = match self.store(&named, &page_lines::assemble(blocks)) {
+            Ok(local) => local,
+            Err(e) => {
+                self.push_console(&format!("[오류] 스크립트를 담지 못했습니다: {e}\n"));
+                return None;
+            }
+        };
+        if let Some(session) = &mut self.session {
+            session.map_source(&local, &live);
+        }
+        let map = self
+            .page_files()
+            .map(|files| PageMap::find(blocks, &files, &shown(key)));
+        if again {
+            self.ask_page(key.to_owned());
+        } else if let Some(pages) = &mut self.pages {
+            pages.asking.remove(key);
+        }
+        self.placed(key, local, map)
     }
 
     /// 화면에서 글을 읽지 못했다: 살아 있는 블록의 내용으로 맞춘다.
@@ -1492,12 +1629,74 @@ mod tests {
         );
     }
 
+    /// 가짜 CDP 프록시(웹소켓): 손짓에 101로 답하고, 프레임 트리와 화면의 원래 HTML(`html`)을 준다.
+    fn fake_cdp(html: &'static str) -> u16 {
+        use std::io::{BufRead, Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                thread::spawn(move || {
+                    let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+                    let mut line = String::new();
+                    while reader.read_line(&mut line).unwrap_or(0) > 0 && line != "\r\n" {
+                        line.clear();
+                    }
+                    stream
+                        .write_all(b"HTTP/1.1 101 Switching Protocols\r\n\r\n")
+                        .unwrap();
+                    loop {
+                        let mut head = [0u8; 2];
+                        if reader.read_exact(&mut head).is_err() {
+                            return;
+                        }
+                        let mut len = usize::from(head[1] & 0x7f);
+                        if len == 126 {
+                            let mut short = [0u8; 2];
+                            reader.read_exact(&mut short).unwrap();
+                            len = usize::from(u16::from_be_bytes(short));
+                        }
+                        let mut mask = [0u8; 4];
+                        reader.read_exact(&mut mask).unwrap();
+                        let mut payload = vec![0u8; len];
+                        reader.read_exact(&mut payload).unwrap();
+                        payload
+                            .iter_mut()
+                            .enumerate()
+                            .for_each(|(i, b)| *b ^= mask[i % 4]);
+                        let request: Value = serde_json::from_slice(&payload).unwrap();
+                        let result = match request["method"].as_str() {
+                            Some("Page.getFrameTree") => json!({ "frameTree": { "frame": {
+                                "id": "top", "url": "http://127.0.0.1:8080/app/list.do" } } }),
+                            _ => json!({ "content": html, "base64Encoded": false }),
+                        };
+                        let body = json!({ "id": request["id"], "result": result }).to_string();
+                        let mut frame = vec![0x81u8];
+                        if body.len() < 126 {
+                            frame.push(body.len() as u8);
+                        } else {
+                            frame.push(126);
+                            frame.extend((body.len() as u16).to_be_bytes());
+                        }
+                        frame.extend(body.as_bytes());
+                        stream.write_all(&frame).unwrap();
+                    }
+                });
+            }
+        });
+        port
+    }
+
     /// 각본대로 답하는 가짜 js-debug: 시작한 뒤 화면의 인라인 스크립트 블록들(소스, 화면에서의 글)을
-    /// 불러왔다고 알린다. 실제 js-debug처럼 내용은 마지막 블록만 주고, 화면의 글은 `evaluate`로 준다.
-    /// 마지막 블록으로 건 중단점에 `stop`(블록 번호, 화면 줄)이 들면 그 블록의 그 줄에서 멈춘다. 받은
-    /// 중단점은 (소스 번호 또는 경로, 줄들)로 돌려준다.
+    /// 불러왔다고 알린다. 실제 js-debug처럼 내용은 마지막 블록만 주고, 화면에서 읽히는 글(`dom`, 없으면
+    /// 블록의 글)은 `evaluate`로, 화면의 원래 HTML(`html`)이 있으면 CDP 프록시로 준다. 마지막 블록으로 건
+    /// 중단점에 `stop`(블록 번호, 화면 줄)이 들면 그 블록의 그 줄에서 멈춘다. 받은 중단점은 (소스 번호 또는
+    /// 경로, 줄들)로 돌려준다.
     fn fake_js_debug(
         blocks: Vec<(Source, &'static str)>,
+        dom: Option<Vec<&'static str>>,
+        html: Option<&'static str>,
         stop: (usize, i64),
     ) -> (
         std::net::SocketAddr,
@@ -1509,6 +1708,7 @@ mod tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let (sent, received) = channel();
+        let cdp_port = html.map(fake_cdp);
         thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
             let mut reader = std::io::BufReader::new(&stream);
@@ -1524,7 +1724,8 @@ mod tests {
             let (_, line, column) =
                 page_lines::inline_script(live.name.as_deref().unwrap()).unwrap();
             let live_content = page_lines::assemble(&[(line, column, blocks.last().unwrap().1)]);
-            let texts: Vec<&str> = blocks.iter().map(|(_, text)| *text).collect();
+            let texts: Vec<&str> =
+                dom.unwrap_or_else(|| blocks.iter().map(|(_, text)| *text).collect());
             let scripts = serde_json::to_string(&serde_json::to_string(&texts).unwrap()).unwrap();
             while let Ok(Some(body)) = read_message(&mut reader) {
                 let request: Value = serde_json::from_slice(&body).unwrap();
@@ -1565,6 +1766,9 @@ mod tests {
                         }
                     }
                     "source" => body = json!({ "content": live_content }),
+                    "requestCDPProxy" if cdp_port.is_some() => {
+                        body = json!({ "host": "127.0.0.1", "port": cdp_port, "path": "/cdp" });
+                    }
                     "evaluate" if request["arguments"]["context"] == "clipboard" => {
                         body =
                             json!({ "result": scripts, "type": "string", "variablesReference": 0 });
@@ -1606,7 +1810,7 @@ mod tests {
         // 화면 15줄이다.
         static SCRIPT: &str = "\nfunction fn_egov_link_page(pageNo) {\n    alert(\"쪽 \" + pageNo);\n    location.href = \"/app/board/list.do?pageIndex=\" + pageNo;\n}\n";
         let page = source("127.0.0.1\u{a789}8080/app/board/list.do\u{a789}13:9", 7);
-        let (address, received) = fake_js_debug(vec![(page, SCRIPT)], (0, 15));
+        let (address, received) = fake_js_debug(vec![(page, SCRIPT)], None, None, (0, 15));
 
         let config = DebugConfig {
             name: "화면".into(),
@@ -1742,7 +1946,7 @@ mod tests {
                 "\nvar ticks = 0;\nfunction tick() {\n  ticks = ticks + 1;\n  headerClock();\n}\nsetInterval(tick, 200);\n",
             ),
         ];
-        let (address, received) = fake_js_debug(blocks, (0, 13));
+        let (address, received) = fake_js_debug(blocks, None, None, (0, 13));
         let config = DebugConfig {
             name: "화면".into(),
             adapter: "js-debug".into(),
@@ -1804,6 +2008,93 @@ mod tests {
         }
         assert!(debugger.breakpoint_state(&header, 0).unwrap().verified);
         assert!(debugger.breakpoint_state(&body, 0).unwrap().verified);
+        debugger.shutdown();
+        let _ = std::fs::remove_dir_all(sources_dir());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn js_debug에서_반복된_블록마다_jsp_중단점을_걸고_덧붙인_스크립트는_건너뛴다() {
+        let root =
+            std::env::temp_dir().join(format!("ferrite-jsp-foreach-debug-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let jsp = root.join("src/main/webapp/WEB-INF/jsp/board/list.jsp");
+        std::fs::create_dir_all(jsp.parent().unwrap()).unwrap();
+        // `<c:forEach>` 안의 스크립트: 항목마다 화면에 나온다.
+        std::fs::write(
+            &jsp,
+            "<c:forEach var=\"item\" items=\"${items}\">\n<script>\nregister(\"${item.id}\");\nlistReady = true;\n</script>\n</c:forEach>\n",
+        )
+        .unwrap();
+        // 항목 둘의 블록(화면 2줄·6줄). 화면에는 스크립트가 끝에 덧붙인 인라인 스크립트도 있다(알리지 않는다).
+        let blocks = vec![
+            (
+                source("127.0.0.1\u{a789}8080/app/list.do\u{a789}2:9", 8),
+                "\nregister(\"a\");\nlistReady = true;\n",
+            ),
+            (
+                source("127.0.0.1\u{a789}8080/app/list.do\u{a789}6:9", 7),
+                "\nregister(\"b\");\nlistReady = true;\n",
+            ),
+        ];
+        let dom = vec![
+            "\nregister(\"a\");\nlistReady = true;\n",
+            "\nregister(\"b\");\nlistReady = true;\n",
+            "\nadded();\n",
+        ];
+        // 화면의 원래 HTML(CDP 프록시로 받는다). 화면의 글만으로는 덧붙인 스크립트 때문에 수가 달라 짝짓지
+        // 못한다.
+        static HTML: &str = "<ul>\n<script>\nregister(\"a\");\nlistReady = true;\n</script>\n<script>\nregister(\"b\");\nlistReady = true;\n</script>\n</ul>\n";
+        let (address, received) = fake_js_debug(blocks, Some(dom), Some(HTML), (1, 7));
+        let config = DebugConfig {
+            name: "화면".into(),
+            adapter: "js-debug".into(),
+            request: "launch".into(),
+            arguments: serde_json::json!({}),
+            build: None,
+        };
+        // JSP 3줄(`register`)은 화면 3줄과 7줄이다.
+        let breakpoints = BTreeMap::from([(
+            jsp.clone(),
+            vec![Breakpoint {
+                line: 3,
+                condition: None,
+            }],
+        )]);
+        let mut debugger = Debugger::default();
+        debugger
+            .start(
+                &config,
+                &root,
+                None,
+                breakpoints,
+                Adapter::Tcp(address),
+                &egui::Context::default(),
+            )
+            .unwrap();
+        let jsp = crate::app::real_path(&jsp);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while debugger.location().is_none_or(|(path, _)| path != jsp) {
+            assert!(
+                Instant::now() < deadline,
+                "JSP에서 멈추지 않음: {:?}",
+                debugger.location()
+            );
+            debugger.poll();
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            debugger.location().unwrap().1,
+            2,
+            "두 번째 항목의 블록도 JSP 3줄"
+        );
+        let sent: Vec<(String, Vec<i64>)> = received.try_iter().collect();
+        assert!(sent.contains(&("#7".to_owned(), vec![3, 7])), "{sent:?}");
+        while debugger.states.is_empty() {
+            debugger.poll();
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(debugger.breakpoint_state(&jsp, 0).unwrap().verified);
         debugger.shutdown();
         let _ = std::fs::remove_dir_all(sources_dir());
         let _ = std::fs::remove_dir_all(&root);

@@ -90,12 +90,14 @@ impl PageMap {
             .map(|(_, _, lines)| (lines.file.as_path(), lines.to_file(page)))
     }
 
-    /// 이 JSP 줄(0부터)의 화면 줄. 그 줄을 화면에 그대로 낸 블록에서.
-    pub fn to_page(&self, file: &Path, line: usize) -> Option<usize> {
+    /// 이 JSP 줄(0부터)의 화면 줄들. 그 줄을 화면에 그대로 낸 블록마다 하나(`<c:forEach>` 안의
+    /// 스크립트처럼 한 JSP 블록이 여러 번 나오면 여럿).
+    pub fn to_pages(&self, file: &Path, line: usize) -> Vec<usize> {
         self.blocks
             .iter()
             .filter(|(_, _, lines)| lines.file == file)
-            .find_map(|(_, _, lines)| lines.to_page(line))
+            .filter_map(|(_, _, lines)| lines.to_page(line))
+            .collect()
     }
 
     /// 맞춘 JSP들(화면에 나온 차례, 겹치지 않게).
@@ -110,10 +112,40 @@ impl PageMap {
     }
 }
 
-/// 화면의 인라인 스크립트 글들(문서 차례)을 JSON 배열로 내는 식. 브라우저가 돌리는 스크립트만 센다
-/// (`<script type="text/template">` 같은 템플릿은 js-debug가 알리지 않는다). js-debug의 `evaluate`에
-/// `clipboard` 문맥으로 물으면 따옴표를 붙인 JSON 문자열로 답한다(`page_scripts`로 푼다).
+/// 화면의 인라인 스크립트 글들(문서 차례)을 JSON 배열로 내는 식(원래 HTML을 받지 못할 때 쓴다). 브라우저가
+/// 돌리는 스크립트만 센다(`<script type="text/template">` 같은 템플릿은 js-debug가 알리지 않는다). 화면에는
+/// 스크립트가 끼워 넣은 것(jQuery `.load()`·`.html()`의 조각 등)도 있어, 알려 온 블록과 수가 같을 때만
+/// 차례로 짝짓는다. js-debug의 `evaluate`에 `clipboard` 문맥으로 물으면 따옴표를 붙인 JSON 문자열로 답한다
+/// (`page_scripts`로 푼다).
 pub const PAGE_SCRIPTS: &str = "JSON.stringify(Array.from(document.scripts).filter(s => !s.src && (!s.type || /(java|ecma)script|module/i.test(s.type))).map(s => s.text))";
+
+/// 화면의 원래 HTML에서 블록 자리((줄, 칸)은 1부터, 칸은 글자 수)마다 인라인 스크립트의 글을 잘라 낸다:
+/// 그 자리부터 `</script` 앞까지(HTML 파서가 스크립트를 끝내는 곳). 자리가 HTML 밖이면 None(화면을 다시
+/// 불러 HTML이 바뀌었다).
+pub fn scripts_at<'a>(
+    html: &'a str,
+    starts: &[(usize, usize)],
+) -> Option<Vec<(usize, usize, &'a str)>> {
+    let mut lines = vec![0];
+    lines.extend(html.match_indices('\n').map(|(i, _)| i + 1));
+    starts
+        .iter()
+        .map(|&(line, column)| {
+            let from = *lines.get(line.checked_sub(1)?)?;
+            // 칸은 그 줄(줄 끝 글자까지) 안에서 센다.
+            let to = lines.get(line).copied().unwrap_or(html.len());
+            let (at, _) = html[from..to].char_indices().nth(column.checked_sub(1)?)?;
+            let at = from + at;
+            let text = &html[at..];
+            let end = text
+                .as_bytes()
+                .windows(8)
+                .position(|w| w.eq_ignore_ascii_case(b"</script"))
+                .unwrap_or(text.len());
+            Some((line, column, &text[..end]))
+        })
+        .collect()
+}
 
 /// `PAGE_SCRIPTS`의 답(`evaluate`의 `result`)을 글 목록으로 푼다.
 pub fn page_scripts(result: &str) -> Option<Vec<String>> {
@@ -556,10 +588,10 @@ $(function() {
         assert_eq!(map.to_file(5), Some((layout, 6)));
         assert_eq!(map.to_file(9), None, "스크립트 밖");
         // 중단점: JSP 줄 → 화면 줄. 바뀌는 부분(`<c:out>`)이 든 줄도 앞뒤 글자로 맞춘다.
-        assert_eq!(map.to_page(header, 4), Some(12));
-        assert_eq!(map.to_page(body, 8), Some(23));
-        assert_eq!(map.to_page(body, 0), None, "지시자");
-        assert_eq!(map.to_page(Path::new("jsp/other.jsp"), 3), None);
+        assert_eq!(map.to_pages(header, 4), [12]);
+        assert_eq!(map.to_pages(body, 8), [23]);
+        assert!(map.to_pages(body, 0).is_empty(), "지시자");
+        assert!(map.to_pages(Path::new("jsp/other.jsp"), 3).is_empty());
 
         // 이름에서 시작 자리를 떼고, 블록을 화면 줄에 놓는다.
         assert_eq!(
@@ -575,6 +607,44 @@ $(function() {
         assert_eq!(lines[23], "setInterval(tick, 200);");
         assert_eq!(lines[8], "", "스크립트 밖은 빈 줄");
         assert_eq!(assemble(&[(2, 3, "x;\r\ny;")]), "\n  x;\ny;");
+    }
+
+    #[test]
+    fn 원래_html에서_블록_자리의_스크립트를_잘라_낸다() {
+        // 조각을 끼우는 화면: 스크립트 안의 `<script>` 글자, 대문자 닫는 태그, 한글 뒤의 자리, CRLF.
+        let html = "<!doctype html>\r\n<html><head>\r\n<script>\r\nfunction load() {\r\n  $(\"#d\").html(\"<script>x()<\\/script>\");\r\n}\r\n</SCRIPT>\r\n</head><body><p>목록</p><script>var n = 1;</script>\r\n</body></html>\r\n";
+        let scripts = scripts_at(html, &[(3, 9), (8, 31)]).unwrap();
+        assert_eq!(
+            scripts,
+            [
+                (
+                    3,
+                    9,
+                    "\r\nfunction load() {\r\n  $(\"#d\").html(\"<script>x()<\\/script>\");\r\n}\r\n"
+                ),
+                (8, 31, "var n = 1;"),
+            ]
+        );
+        assert_eq!(scripts_at(html, &[(99, 1)]), None, "HTML 밖");
+        assert_eq!(scripts_at(html, &[(3, 99)]), None);
+        assert_eq!(scripts_at(html, &[(0, 1)]), None);
+    }
+
+    #[test]
+    fn 반복으로_여러_번_나온_블록은_jsp_줄을_화면_줄_여럿으로_바꾼다() {
+        // `<c:forEach>` 안의 스크립트: 같은 JSP 블록이 항목마다 화면에 나온다.
+        let jsp = "<c:forEach var=\"item\" items=\"${items}\">\n<script>\nregister(\"${item.id}\");\nlistReady = true;\n</script>\n</c:forEach>\n";
+        let files = vec![(PathBuf::from("jsp/list.jsp"), jsp.to_owned())];
+        let blocks = [
+            (2, 9, "\nregister(\"a\");\nlistReady = true;\n"),
+            (6, 9, "\nregister(\"b\");\nlistReady = true;\n"),
+        ];
+        let map = PageMap::find(&blocks, &files, "").unwrap();
+        let list = Path::new("jsp/list.jsp");
+        assert_eq!(map.to_pages(list, 2), [2, 6]);
+        assert_eq!(map.to_pages(list, 3), [3, 7]);
+        assert_eq!(map.to_file(6), Some((list, 2)));
+        assert_eq!(map.files(), [list]);
     }
 
     #[test]

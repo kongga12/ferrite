@@ -451,6 +451,10 @@ fn 거꾸로_요청한_자식_세션에서_멈추고_페이지_스크립트에_�
                 &set,
                 json!({ "breakpoints": [{ "id": 8, "verified": true, "line": 2 }] }),
             );
+            // js-debug는 같은 중단점을 다시 받으면 바꿀 것이 없어 빈 목록으로 답한다(걸어 둔 것은 그대로다).
+            let again = f.expect("setBreakpoints");
+            assert_eq!(again["arguments"]["breakpoints"], json!([{ "line": 2 }]));
+            f.respond(&again, json!({ "breakpoints": [] }));
             let resume = f.expect("continue");
             f.respond(&resume, json!({}));
             f.event("terminated", json!({}));
@@ -466,6 +470,11 @@ fn 거꾸로_요청한_자식_세션에서_멈추고_페이지_스크립트에_�
         f.respond(
             &set,
             json!({ "breakpoints": [{ "id": 2, "verified": false }] }),
+        );
+        let again = f.expect("setBreakpoints");
+        f.respond(
+            &again,
+            json!({ "breakpoints": [{ "id": 3, "verified": false }] }),
         );
         let disconnect = f.expect("disconnect");
         assert_eq!(disconnect["arguments"]["terminateDebuggee"], true);
@@ -542,6 +551,23 @@ fn 거꾸로_요청한_자식_세션에서_멈추고_페이지_스크립트에_�
     assert!(
         matches!(&event, DebugEvent::Breakpoints { states, .. } if states[0].verified),
         "부모의 미확인 응답은 버린다: {event:?}"
+    );
+    session.set_breakpoints(
+        &local,
+        vec![Breakpoint {
+            line: 2,
+            condition: None,
+        }],
+    );
+    let event = wait_for(
+        &mut session,
+        &mut log,
+        |e| matches!(e, DebugEvent::Breakpoints { path, .. } if *path == local),
+    );
+    assert!(
+        matches!(&event, DebugEvent::Breakpoints { states, .. }
+            if states.len() == 1 && states[0].verified && states[0].id == Some(8)),
+        "다시 보낸 중단점에 빈 목록이 오면 앞의 상태를 쓴다: {event:?}"
     );
     session.resume(1);
     // 자식(페이지)이 끝나도 세션은 이어진다. 부모가 끝나야 끝난다.
