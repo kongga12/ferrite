@@ -739,7 +739,16 @@ impl DebugSession {
                 )));
             }
             (Pending::Breakpoints(path), Ok(body)) => {
-                let states = types::breakpoint_states(&body);
+                let mut states = types::breakpoint_states(&body);
+                // js-debug는 지울 것도 새로 걸 것도 없으면(같은 중단점을 다시 보내면) DAP와 달리 빈 목록으로
+                // 답한다. 걸어 둔 것은 그대로이므로 앞의 상태를 쓴다.
+                let sent = self.breakpoints.get(&path).map_or(0, Vec::len);
+                if states.is_empty()
+                    && sent > 0
+                    && let Some(previous) = self.states.get(&path).filter(|p| p.len() == sent)
+                {
+                    states = previous.clone();
+                }
                 self.states.insert(path.clone(), states.clone());
                 events.push(DebugEvent::Breakpoints { path, states });
             }

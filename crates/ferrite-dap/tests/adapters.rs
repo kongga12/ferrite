@@ -1093,6 +1093,7 @@ fn js_debug로_조각을_끼운_화면도_원래_html에서_블록의_글을_잘
     let mut session = DebugSession::start(&adapter, launch, BTreeMap::new(), || {}).unwrap();
     // 화면 주소로 알리는 인라인 스크립트는 화면을 읽으며 돈 두 블록뿐이다(조각의 것은 jQuery가 따로 돌린다).
     let mut starts = Vec::new();
+    let mut live = None;
     let mut events = Vec::new();
     let started = Instant::now();
     let mut quiet = None;
@@ -1108,6 +1109,7 @@ fn js_debug로_조각을_끼운_화면도_원래_html에서_블록의_글을_잘
                 && page.ends_with("/app/frag.do")
             {
                 starts.push((line, column));
+                live = Some(source.clone());
             }
             events.push(event);
         }
@@ -1155,6 +1157,41 @@ fn js_debug로_조각을_끼운_화면도_원래_html에서_블록의_글을_잘
     let blocks = page_lines::scripts_at(&html, &starts).expect("블록");
     assert!(blocks[0].2.contains("function loadDetail()"), "{blocks:?}");
     assert!(blocks[1].2.starts_with("\nvar count = 0;"), "{blocks:?}");
+
+    // 블록 둘(화면 6·14줄)에 건다. 앱은 원래 HTML을 다시 받으면 같은 중단점을 다시 보내는데, js-debug는 그때
+    // 빈 목록으로 답한다(걸어 둔 것은 그대로다). 다시 보낸 뒤에도 둘 다 걸린 것으로 보여야 한다.
+    let local = project.join("frag.do.js");
+    std::fs::write(&local, page_lines::assemble(&blocks)).unwrap();
+    session.map_source(&local, &live.unwrap());
+    for round in 0..2 {
+        session.set_breakpoints(
+            &local,
+            [6, 14]
+                .map(|line| Breakpoint {
+                    line,
+                    condition: None,
+                })
+                .to_vec(),
+        );
+        // 응답 뒤에 오는 "changed" 알림까지 받고 마지막 상태를 본다.
+        let mut last = None;
+        let until = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < until {
+            for event in session.poll() {
+                if let DebugEvent::Breakpoints { path, states } = event
+                    && path == local
+                {
+                    last = Some(states);
+                }
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let last = last.unwrap_or_else(|| panic!("{round}번째: 중단점 상태가 오지 않음"));
+        assert!(
+            last.len() == 2 && last.iter().all(|s| s.verified),
+            "{round}번째: {last:?}"
+        );
+    }
 
     session.stop();
     wait(&mut session, &|e| {
