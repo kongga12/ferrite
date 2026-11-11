@@ -252,10 +252,7 @@ impl TestPanel {
                 for file in
                     test_report::report_files(tool, root, &running.report, running.started.0)
                 {
-                    let text = std::fs::read(&file)
-                        .map(|b| String::from_utf8_lossy(&b).into_owned())
-                        .unwrap_or_default();
-                    match test_report::parse_junit(&text) {
+                    match test_report::read_report(&file) {
                         Ok(found) => cases.extend(found),
                         Err(e) => push_limited(
                             &mut self.output,

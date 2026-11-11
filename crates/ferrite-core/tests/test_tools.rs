@@ -68,7 +68,7 @@ fn junit(tool: Tool, root: &Path, report: &Path, since: SystemTime) -> Vec<Case>
     assert!(!files.is_empty(), "보고서가 없음");
     files
         .iter()
-        .flat_map(|f| test_report::parse_junit(&std::fs::read_to_string(f).unwrap()).unwrap())
+        .flat_map(|f| test_report::read_report(f).unwrap())
         .collect()
 }
 
@@ -305,6 +305,148 @@ fn maven_다중_모듈의_테스트를_모두_돌리고_실패만_다시() {
         ],
         "두 모듈의 실패만 다시"
     );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+#[ignore = "Maven으로 JUnit 5 단위·통합 테스트(Surefire·Failsafe)를 돌린다(의존성을 받는다). Java 17 이상과 mvn이 필요하다"]
+fn maven_failsafe_통합_테스트도_돌리고_실패만_다시() {
+    if !require("mvn -v") {
+        return;
+    }
+    let root = temp_dir("maven-failsafe");
+    let java = root.join("src/test/java/com/example/board");
+    std::fs::create_dir_all(&java).unwrap();
+    std::fs::write(
+        root.join("pom.xml"),
+        r#"<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>com.example</groupId>
+  <artifactId>board</artifactId>
+  <version>1.0</version>
+  <properties>
+    <maven.compiler.release>17</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+  </properties>
+  <dependencies>
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <version>5.12.2</version>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+  <build>
+    <plugins>
+      <plugin>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <version>3.5.4</version>
+      </plugin>
+      <plugin>
+        <artifactId>maven-failsafe-plugin</artifactId>
+        <version>3.5.4</version>
+        <executions>
+          <execution>
+            <goals>
+              <goal>integration-test</goal>
+              <goal>verify</goal>
+            </goals>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+</project>
+"#,
+    )
+    .unwrap();
+    let test = |class: &str, tests: &str| {
+        let path = java.join(format!("{class}.java"));
+        std::fs::write(
+            &path,
+            format!("package com.example.board;\n\nimport static org.junit.jupiter.api.Assertions.assertEquals;\n\nimport org.junit.jupiter.api.Test;\n\nclass {class} {{\n{tests}}}\n"),
+        )
+        .unwrap();
+        path
+    };
+    test(
+        "CalcTest",
+        "    @Test\n    void adds() {\n        assertEquals(3, 1 + 2);\n    }\n\n    @Test\n    void addsWrong() {\n        assertEquals(4, 1 + 2, \"더하기\");\n    }\n",
+    );
+    let board = test(
+        "BoardIT",
+        "    @Test\n    void lists() {\n        assertEquals(2, 1 + 1);\n    }\n\n    @Test\n    void savesWrong() {\n        assertEquals(\"저장\", \"삭제\", \"게시글 저장\");\n    }\n",
+    );
+    let report = root.join("reports");
+    // 통합 테스트 단계까지 간다. 통합 테스트가 실패해도 Failsafe의 verify가 빌드를 멈추지 않는다.
+    let command = "mvn -B -q verify";
+    let since = SystemTime::now();
+    let (ok, _) = run(
+        &root,
+        &test_report::with_report(Tool::Maven, command, &report),
+    );
+    assert!(ok, "통합 테스트 실패로도 빌드를 멈추지 않는다");
+    let cases = junit(Tool::Maven, &root, &report, since);
+    let kinds: Vec<(&str, Outcome, bool)> = {
+        let mut kinds: Vec<_> = cases
+            .iter()
+            .map(|c| (c.name.as_str(), c.outcome, c.integration))
+            .collect();
+        kinds.sort_by(|a, b| a.0.cmp(b.0));
+        kinds
+    };
+    assert_eq!(
+        kinds,
+        [
+            ("adds", Outcome::Passed, false),
+            ("addsWrong", Outcome::Failed, false),
+            ("lists", Outcome::Passed, true),
+            ("savesWrong", Outcome::Failed, true),
+        ]
+    );
+    let saves = cases.iter().find(|c| c.name == "savesWrong").unwrap();
+    assert_eq!(test_line(&root, &root, saves), (board, 15));
+
+    // 실패만 다시: 단위 테스트는 Surefire로, 통합 테스트는 Failsafe로 하나씩만 돈다(통합 테스트를 단위 테스트
+    // 단계에서 돌리지 않고, 통과한 통합 테스트는 다시 돌지 않는다).
+    let rerun_failed = |failed: &[&Case]| {
+        // 보고서는 파일 시각이 `since`보다 2초 앞까지 이번 것으로 친다(거친 파일 시스템).
+        std::thread::sleep(std::time::Duration::from_secs(3));
+        let since = SystemTime::now();
+        let line = test_report::rerun(Tool::Maven, command, failed).unwrap();
+        let (ok, _) = run(
+            &root,
+            &test_report::with_report(Tool::Maven, &line, &report),
+        );
+        assert!(ok, "{line}");
+        let again = junit(Tool::Maven, &root, &report, since);
+        let mut kinds: Vec<(String, bool)> = again
+            .iter()
+            .map(|c| (c.name.clone(), c.integration))
+            .collect();
+        kinds.sort();
+        assert!(again.iter().all(|c| c.outcome == Outcome::Failed));
+        kinds
+    };
+    assert_eq!(
+        rerun_failed(&failed(&cases)),
+        [
+            ("addsWrong".to_owned(), false),
+            ("savesWrong".to_owned(), true)
+        ]
+    );
+    // 통합 테스트만 다시: 단위 테스트는 돌지 않는다.
+    let only_it: Vec<&Case> = failed(&cases)
+        .into_iter()
+        .filter(|c| c.integration)
+        .collect();
+    assert_eq!(rerun_failed(&only_it), [("savesWrong".to_owned(), true)]);
+    // 단위 테스트만 다시: 통합 테스트는 돌지 않는다.
+    let only_unit: Vec<&Case> = failed(&cases)
+        .into_iter()
+        .filter(|c| !c.integration)
+        .collect();
+    assert_eq!(rerun_failed(&only_unit), [("addsWrong".to_owned(), false)]);
     let _ = std::fs::remove_dir_all(&root);
 }
 

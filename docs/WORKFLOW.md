@@ -1800,7 +1800,7 @@
     - 한글 경로(`메이븐 게시판`, JDK 21): Surefire는 Gradle과 달리 테스트를 찾는다(보고서의 한글 메시지도 바르다).
     - 실제 앱(Windows, 릴리스 빌드, JDK 21, `메이븐 게시판` 폴더의 모듈 셋): [실행 > 테스트]의 `mvn test` → 세 모듈의 결과(web 포함)가 "통과 3 · 실패 2 · 종료 코드 0"으로 보였다. common의 테스트 컴파일을 깨뜨리고 다시 돌리면 batch의 결과와 함께 "종료 코드 1 · 보고서에 없는 실패가 있습니다(빌드 오류 등, 출력을 보세요)"가 빨갛게 보였다. 확인 뒤 예제 프로젝트와 설정 폴더를 지웠다.
   - 알게 된 것: 보고서는 파일 시각이 실행 시작보다 2초 앞까지 이번 것으로 친다(거친 파일 시스템). 실패만 다시 돌리면 걸러 낸 테스트가 없는 모듈은 보고서를 새로 쓰지 않으므로, 2초 안에 다시 돌리면 첫 실행의 보고서가 섞인다(같은 결과라 테스트 창에는 해가 없다). 시험은 3초 쉬고 다시 돌린다.
-  - 확인하지 못한 것: `mvn verify`에서 통합 테스트(Failsafe)도 실패로 멈추지 않는 것은 보지 않았다(같은 속성을 읽는다). pom이 surefire 설정에 `testFailureIgnore`를 false로 박아 두면 이 속성이 먹지 않아 `-fae`만 남는다.
+  - 확인하지 못한 것: `mvn verify`에서 통합 테스트(Failsafe)도 실패로 멈추지 않는 것은 보지 않았다(같은 속성을 읽는다. 뒤에 백로그 "Maven Failsafe 통합 테스트"(2026-11-11)에서 보니 멈추지 않았고, 실패만 다시 돌리기를 고쳤다). pom이 surefire 설정에 `testFailureIgnore`를 false로 박아 두면 이 속성이 먹지 않아 `-fae`만 남는다.
 - [x] JDK 8의 JDBC 사이드카 컴파일(2026-11-10) — 작음
   - 까닭: 위 "Maven 다중 모듈 테스트"의 전체 시험을 로컬 기본 Java(JDK 8)로 돌리다 `ferrite-db`의 JDBC 시험이 "JDBC 사이드카를 컴파일하지 못했습니다: javac: directory not found: …\classes"로 실패했다. JDK 8만 있는 PC(egov 사용자에게 흔하다)에서는 Oracle·Tibero·CUBRID 연결이 모두 막힌다.
   - 원인: 사이드카를 컴파일할 때 `-d` 출력 폴더를 만들지 않고 javac에 넘겼다. javac 9부터는 그 폴더를 스스로 만들지만 javac 8은 실패한다. `--release 8`을 모르는 javac 8을 위한 대체 실행(옵션 없이)도 같은 까닭으로 실패했다. CI와 그동안의 확인은 JDK 17·21로 돌아 드러나지 않았다.
@@ -1949,6 +1949,20 @@
     - 실제 어댑터(`adapters.yml`): `<frameset>`(메뉴·본문)과 본문 안의 `<iframe>` 화면에서 세 화면의 블록 글을 디버거에서 받고, 셋 다 그 프레임만 다시 열 수 있으며(품은 화면도 알린다), 안의 프레임만 다시 열면 맨 위 코드에서 멈추고, 메뉴의 링크로 본문 프레임에 다른 화면을 열면 "다른 화면으로 간 프레임"이다.
     - 실제 앱(Windows, 헤드리스 Chrome, 실제 jQuery 3.5.1): 같은 프레임셋 예제에서 본문 프레임 JSP의 맨 위 코드(`main.jsp:5`)와 안의 프레임 JSP의 맨 위 코드(`list.jsp:16`)에 걸고 F5 → 본문 프레임만 한 번 다시 열어 `main.jsp:5` → 계속 → `list.jsp:16`에서 멈춘다. 디버그 출력에는 "[화면을 다시 불렀습니다: …/app/main.do]"만 한 번 남고 오류가 없다.
   - 확인하지 못한 것: 다른 사이트(호스트가 다른 주소)의 `<iframe>`.
+- [x] Maven Failsafe 통합 테스트(2026-11-11) — 작음
+  - 까닭: 위 "Maven 다중 모듈 테스트"에서 `mvn verify`의 통합 테스트(Failsafe)를 보지 않았다.
+  - 찾기(실제 Maven 3.10, Surefire·Failsafe 3.5.4, JUnit 5.12)
+    - `mvn verify`에 `-Dmaven.test.failure.ignore=true`를 붙이면 Failsafe의 `verify`도 통합 테스트 실패로 빌드를 멈추지 않고(종료 코드 0), 보고서는 `target/failsafe-reports`에 남는다(이미 읽고 있었다).
+    - **실패만 다시가 틀렸다**: 실패한 통합 테스트(`BoardIT`)도 `-Dtest=BoardIT#savesWrong`으로 걸러, Surefire가 그 통합 테스트를 단위 테스트 단계에서 돌리고(통합 환경 없이) Failsafe는 `-Dtest`를 보지 않아 통합 테스트를 모두(통과한 것까지) 다시 돌렸다.
+    - Failsafe는 `-Dit.test`로 거른다. 걸러 낸 것이 없는 모듈(다중 모듈)에서는 "No tests matching pattern"으로 빌드가 실패하므로 `-Dit.failIfNoSpecifiedTests=false`가 필요하다. 통합 테스트만 다시 돌릴 때 Surefire는 맞는 클래스가 없는 이름을 주면 아무것도 돌리지 않는다(`-Dmaven.test.skip.exec`는 Failsafe도 건너뛰고, `-Dtest=!*`는 돌지만 지연된 변수 확장을 켠 cmd에서 `!`가 사라진다). 단위 테스트만 다시 돌릴 때는 `-DskipITs`로 Failsafe를 건너뛴다.
+  - 고침
+    - 보고서를 읽을 때(`test_report::read_report`) `failsafe-reports`의 것은 통합 테스트로 적는다(`Case::integration`). 테스트 창과 실제 도구 시험이 이것으로 읽는다.
+    - Maven 실패만 다시: 단위 테스트는 `-Dtest=…`(없으면 맞는 것이 없는 이름 `NoUnitTestsToRerun`), 통합 테스트는 `-Dit.test=… -Dit.failIfNoSpecifiedTests=false`, 실패한 통합 테스트가 없고 명령이 통합 테스트 단계까지 가면(`integration-test`·`verify`·`install`·`deploy`) `-DskipITs`.
+  - 검증
+    - 단위: `failsafe-reports`의 보고서만 통합 테스트로 읽고, 둘 다 실패·통합 테스트만·단위 테스트만(`install`이면 `-DskipITs`, `test`면 붙이지 않는다)의 명령
+    - 실제 도구(`test_tools`, CI의 3개 OS): 단위 테스트 둘·통합 테스트 둘(하나씩 실패)을 `mvn -B -q verify`로 돌려 종료 코드 0, 넷을 단위·통합으로 읽고, 통합 테스트의 실패 줄을 찾는다. 실패만 다시는 단위·통합 테스트를 하나씩만 돌리고(통합 테스트를 단위 테스트 단계에서 돌리지 않는다), 통합 테스트만·단위 테스트만 다시 돌리면 그것만 돈다.
+    - 실제 앱(Windows, 릴리스 빌드, JDK 21): 같은 예제에 실행 구성 `mvn -B -q verify`를 두고 [실행 > 테스트]에서 돌려 "통과 2 · 실패 2 · 종료 코드 0"(BoardIT·CalcTest), [실패만 다시]의 명령이 `-Dtest=CalcTest#addsWrong … -Dit.test=BoardIT#savesWrong -Dit.failIfNoSpecifiedTests=false`이고 Surefire·Failsafe가 하나씩만 돈 것을 출력 창에서 보았다.
+  - 확인하지 못한 것: pom이 통합 테스트를 Surefire의 `<includes>`에 넣거나 Failsafe의 `<includes>`를 바꾼 프로젝트(보고서 폴더로 가리므로 될 것으로 본다). Gradle의 통합 테스트 작업(`integrationTest`)은 따로 다루지 않는다.
 
 - 살폈지만 넣지 않은 것: 임베디드(MCU 플래시·시리얼 모니터·장비 설정 파일), 프레임워크별 지원(React·Vue·Angular 등, JS·TS 언어 서버로 기본은 된다), 린터 개별 연동(언어 서버나 저장 시 작업으로 된다), 원격 개발·컨테이너·SFTP 배포, 로컬 AI 완성 모델, 계정 기반 설정 동기화. egov 개발과 거리가 멀거나 크기에 비해 쓰임이 적다.
 

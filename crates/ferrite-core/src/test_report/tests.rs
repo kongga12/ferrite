@@ -303,6 +303,72 @@ fn 보고서_옵션과_실패만_다시_돌리는_명령을_만든다() {
 }
 
 #[test]
+fn maven_통합_테스트는_failsafe_보고서로_가리고_it_test로_다시_돌린다() {
+    // failsafe-reports의 보고서는 통합 테스트로, surefire-reports의 것은 단위 테스트로 읽는다.
+    let root = std::env::temp_dir().join(format!("ferrite-failsafe-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let (unit_dir, it_dir) = (
+        root.join("target/surefire-reports"),
+        root.join("target/failsafe-reports"),
+    );
+    std::fs::create_dir_all(&unit_dir).unwrap();
+    std::fs::create_dir_all(&it_dir).unwrap();
+    let report = |suite: &str, names: &[&str]| {
+        let cases: String = names
+            .iter()
+            .map(|name| {
+                format!(
+                    "<testcase name=\"{name}\" classname=\"com.example.board.{suite}\"><failure message=\"틀림\"/></testcase>"
+                )
+            })
+            .collect();
+        format!("<testsuite name=\"com.example.board.{suite}\">{cases}</testsuite>")
+    };
+    std::fs::write(
+        unit_dir.join("TEST-com.example.board.CalcTest.xml"),
+        report("CalcTest", &["addsWrong"]),
+    )
+    .unwrap();
+    std::fs::write(
+        it_dir.join("TEST-com.example.board.BoardIT.xml"),
+        report("BoardIT", &["savesWrong", "listsWrong"]),
+    )
+    .unwrap();
+    let unit = read_report(&unit_dir.join("TEST-com.example.board.CalcTest.xml")).unwrap();
+    let it = read_report(&it_dir.join("TEST-com.example.board.BoardIT.xml")).unwrap();
+    assert!(unit.iter().all(|c| !c.integration));
+    assert!(it.iter().all(|c| c.integration) && it.len() == 2);
+    assert!(read_report(&root.join("없음.xml")).is_err());
+    std::fs::remove_dir_all(&root).unwrap();
+
+    // 둘 다 실패: 단위 테스트는 `-Dtest`, 통합 테스트는 `-Dit.test`로 거른다. 다중 모듈이면 거른 것이 없는
+    // 모듈도 있어 둘 다 "없으면 실패"를 끈다.
+    let both: Vec<&Case> = unit.iter().chain(&it).collect();
+    assert_eq!(
+        rerun(Tool::Maven, "mvn verify", &both).unwrap(),
+        "mvn verify -Dtest=CalcTest#addsWrong -Dsurefire.failIfNoSpecifiedTests=false \
+         -Dit.test=BoardIT#savesWrong+listsWrong -Dit.failIfNoSpecifiedTests=false"
+    );
+    // 통합 테스트만 실패: Surefire는 아무것도 돌리지 않는다(맞는 클래스가 없는 이름).
+    let only_it: Vec<&Case> = it.iter().collect();
+    assert_eq!(
+        rerun(Tool::Maven, "mvn verify", &only_it).unwrap(),
+        "mvn verify -Dtest=NoUnitTestsToRerun -Dsurefire.failIfNoSpecifiedTests=false \
+         -Dit.test=BoardIT#savesWrong+listsWrong -Dit.failIfNoSpecifiedTests=false"
+    );
+    // 단위 테스트만 실패: 통합 테스트 단계까지 가는 명령이면 통합 테스트는 건너뛴다.
+    let only_unit: Vec<&Case> = unit.iter().collect();
+    assert_eq!(
+        rerun(Tool::Maven, "mvn -B install", &only_unit).unwrap(),
+        "mvn -B install -Dtest=CalcTest#addsWrong -Dsurefire.failIfNoSpecifiedTests=false -DskipITs"
+    );
+    assert_eq!(
+        rerun(Tool::Maven, "mvn test", &only_unit).unwrap(),
+        "mvn test -Dtest=CalcTest#addsWrong -Dsurefire.failIfNoSpecifiedTests=false"
+    );
+}
+
+#[test]
 fn 이번_실행의_보고서를_찾고_스택의_파일을_프로젝트에서_찾는다() {
     let root = std::env::temp_dir().join(format!("ferrite-test-report-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
@@ -366,6 +432,7 @@ fn kotlin_scala_스택의_테스트_줄을_찾는다() {
         detail: detail.to_owned(),
         file: None,
         line: None,
+        integration: false,
     };
     // Kotlin 백틱 이름은 빈칸이 들고, 그 안의 람다는 클래스 이름에도 든다.
     let kotlin = failed(
