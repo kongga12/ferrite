@@ -275,6 +275,9 @@ pub struct Debugger {
     open_after: Option<String>,
     /// 어댑터에 준 세션 임시 폴더(js-debug). 세션이 끝나면 지운다.
     scratch: Option<PathBuf>,
+    /// 담아 둔 소스를 둘 폴더(없으면 `sources_dir()`). 시험은 시험마다 따로 준다(같은 프로세스에서 함께 돌아
+    /// 한 폴더를 쓰면 먼저 끝난 시험이 지운다).
+    sources: Option<PathBuf>,
     /// 프로젝트 폴더(화면 스크립트를 만든 JSP를 찾는다).
     root: Option<PathBuf>,
     /// js-debug 세션의 JSP 잇기. 다른 어댑터면 None.
@@ -664,7 +667,7 @@ impl Debugger {
             std::fs::write(local, content)?;
             return Ok(local.clone());
         }
-        let dir = sources_dir();
+        let dir = self.sources.clone().unwrap_or_else(sources_dir);
         std::fs::create_dir_all(&dir)?;
         let dir = crate::app::real_path(&dir);
         let name = stored_name(source, content);
@@ -2164,6 +2167,8 @@ mod tests {
                 &egui::Context::default(),
             )
             .unwrap();
+        // 담아 둔 화면 스크립트는 앱이 닫힐 때 지운다. 시험은 프로젝트 폴더에 두어 함께 지운다.
+        debugger.sources = Some(root.join("sources"));
         let deadline = Instant::now() + Duration::from_secs(10);
         while debugger
             .location()
@@ -2234,8 +2239,6 @@ mod tests {
         assert!(!debugger.breakpoint_state(&jsp_path, 0).unwrap().verified);
         assert!(debugger.breakpoint_state(&jsp_path, 1).unwrap().verified);
         debugger.shutdown();
-        // 담아 둔 화면 스크립트는 앱이 닫힐 때 지우므로 시험에서는 직접 지운다.
-        let _ = std::fs::remove_dir_all(sources_dir());
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -2308,6 +2311,8 @@ mod tests {
                 &egui::Context::default(),
             )
             .unwrap();
+        // 담아 둔 화면 스크립트는 앱이 닫힐 때 지운다. 시험은 프로젝트 폴더에 두어 함께 지운다.
+        debugger.sources = Some(root.join("sources"));
         let header = crate::app::real_path(&header);
         let body = crate::app::real_path(&body);
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -2335,7 +2340,6 @@ mod tests {
         assert!(debugger.breakpoint_state(&header, 0).unwrap().verified);
         assert!(debugger.breakpoint_state(&body, 0).unwrap().verified);
         debugger.shutdown();
-        let _ = std::fs::remove_dir_all(sources_dir());
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -2399,6 +2403,8 @@ mod tests {
                 &egui::Context::default(),
             )
             .unwrap();
+        // 담아 둔 화면 스크립트는 앱이 닫힐 때 지운다. 시험은 프로젝트 폴더에 두어 함께 지운다.
+        debugger.sources = Some(root.join("sources"));
         let jsp = crate::app::real_path(&jsp);
         let deadline = Instant::now() + Duration::from_secs(10);
         while debugger.location().is_none_or(|(path, _)| path != jsp) {
@@ -2423,7 +2429,6 @@ mod tests {
         }
         assert!(debugger.breakpoint_state(&jsp, 0).unwrap().verified);
         debugger.shutdown();
-        let _ = std::fs::remove_dir_all(sources_dir());
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -2480,6 +2485,8 @@ mod tests {
                 &egui::Context::default(),
             )
             .unwrap();
+        // 담아 둔 화면 스크립트는 앱이 닫힐 때 지운다. 시험은 프로젝트 폴더에 두어 함께 지운다.
+        debugger.sources = Some(root.join("sources"));
         (debugger, root, received, methods)
     }
 
@@ -2550,7 +2557,6 @@ mod tests {
             "다시 맞췄다: {seen:?}"
         );
         debugger.shutdown();
-        let _ = std::fs::remove_dir_all(sources_dir());
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -2570,7 +2576,6 @@ mod tests {
         let seen: Vec<String> = methods.try_iter().collect();
         assert!(!seen.iter().any(|m| m == "Page.reload"), "{seen:?}");
         debugger.shutdown();
-        let _ = std::fs::remove_dir_all(sources_dir());
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -2598,7 +2603,6 @@ mod tests {
             },
         );
         debugger.shutdown();
-        let _ = std::fs::remove_dir_all(sources_dir());
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -2667,6 +2671,8 @@ mod tests {
                 &egui::Context::default(),
             )
             .unwrap();
+        // 담아 둔 화면 스크립트는 앱이 닫힐 때 지운다. 시험은 프로젝트 폴더에 두어 함께 지운다.
+        debugger.sources = Some(root.join("sources"));
         (debugger, root, received, methods)
     }
 
@@ -2692,7 +2698,6 @@ mod tests {
                 .contains("[화면을 다시 불렀습니다: 127.0.0.1:8080/app/detail.do]")
         });
         debugger.shutdown();
-        let _ = std::fs::remove_dir_all(sources_dir());
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -2716,7 +2721,6 @@ mod tests {
             "{seen:?}"
         );
         debugger.shutdown();
-        let _ = std::fs::remove_dir_all(sources_dir());
         let _ = std::fs::remove_dir_all(&root);
     }
 }
