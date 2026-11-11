@@ -1783,7 +1783,7 @@
     - 단위: 실제 실패 보고서(줄인 스택)로 알아보기, ASCII 경로·Maven·보통 실패는 아님, Windows가 아니면 아님
     - 창 시험(kittest): 한글 경로 프로젝트에서 이 결과를 보이면 안내가 보인다(Windows에서만)
     - 실제 앱(Windows, 릴리스 빌드, JDK 21, `자바 게시판` 폴더): [실행 > 테스트]의 `gradle test` → "통과 0 · 실패 1" 아래에 안내가 주황색으로 줄 바꿔 보이는 것을 화면으로 확인했다. 확인 뒤 예제 프로젝트와 설정 폴더를 지웠다.
-  - 확인하지 못한 것: Windows의 "Beta: 세계 언어 지원을 위해 Unicode UTF-8 사용"을 켜면 될 것으로 보지만 시스템 설정이라 바꾸지 않았다. Windows 사용자 이름이 한글이라 Gradle 홈(`~/.gradle`)이 한글 경로인 경우(모든 Gradle 테스트가 깨질 것으로 본다)는 이 안내의 조건(돌린 폴더 경로)에 걸리지 않는다. Maven(Surefire)은 같은 문제가 없는지 보지 않았다(뒤에 백로그 "Maven 다중 모듈 테스트"(2026-11-10)에서 보았다. 없다).
+  - 확인하지 못한 것: Windows의 "Beta: 세계 언어 지원을 위해 Unicode UTF-8 사용"을 켜면 될 것으로 보지만 시스템 설정이라 바꾸지 않았다. Windows 사용자 이름이 한글이라 Gradle 홈(`~/.gradle`)이 한글 경로인 경우(모든 Gradle 테스트가 깨질 것으로 본다)는 이 안내의 조건(돌린 폴더 경로)에 걸리지 않는다(뒤에 백로그 "한글 사용자 이름의 Gradle 홈"(2026-11-11)에서 했다). Maven(Surefire)은 같은 문제가 없는지 보지 않았다(뒤에 백로그 "Maven 다중 모듈 테스트"(2026-11-10)에서 보았다. 없다).
 - [x] Maven 다중 모듈 테스트(2026-11-10) — 작음
   - 까닭: 위 "Kotlin·Scala 테스트 확인"에서 Gradle에는 `--continue`를 붙였지만 Maven은 확인하지 않아 그대로 두었다.
   - 찾기(로컬 Windows, Maven 3.10.0, JDK 21, Surefire 3.5.4): 모듈 셋(common, common에 기대는 web, 상관없는 batch)에서 common과 batch의 테스트가 하나씩 실패할 때
@@ -1963,6 +1963,22 @@
     - 실제 도구(`test_tools`, CI의 3개 OS): 단위 테스트 둘·통합 테스트 둘(하나씩 실패)을 `mvn -B -q verify`로 돌려 종료 코드 0, 넷을 단위·통합으로 읽고, 통합 테스트의 실패 줄을 찾는다. 실패만 다시는 단위·통합 테스트를 하나씩만 돌리고(통합 테스트를 단위 테스트 단계에서 돌리지 않는다), 통합 테스트만·단위 테스트만 다시 돌리면 그것만 돈다.
     - 실제 앱(Windows, 릴리스 빌드, JDK 21): 같은 예제에 실행 구성 `mvn -B -q verify`를 두고 [실행 > 테스트]에서 돌려 "통과 2 · 실패 2 · 종료 코드 0"(BoardIT·CalcTest), [실패만 다시]의 명령이 `-Dtest=CalcTest#addsWrong … -Dit.test=BoardIT#savesWrong -Dit.failIfNoSpecifiedTests=false`이고 Surefire·Failsafe가 하나씩만 돈 것을 출력 창에서 보았다.
   - 확인하지 못한 것: pom이 통합 테스트를 Surefire의 `<includes>`에 넣거나 Failsafe의 `<includes>`를 바꾼 프로젝트(보고서 폴더로 가리므로 될 것으로 본다). Gradle의 통합 테스트 작업(`integrationTest`)은 따로 다루지 않는다.
+- [x] 한글 사용자 이름의 Gradle 홈(2026-11-11) — 작음
+  - 까닭: 위 "한글 경로의 Gradle 테스트"의 안내는 돌린 폴더 경로만 보았다. Windows 사용자 이름이 한글이면 Gradle 홈(`C:\Users\홍길동\.gradle`)이 한글 경로라 프로젝트를 영문 경로에 두어도 깨질 것으로 보았다. 한국어 사용자에게 흔하다.
+  - 찾기(로컬 Windows, 코드 페이지 949, JDK 21, Gradle 9.2.0, Windows 사용자 이름을 바꾸지 않고 `GRADLE_USER_HOME`을 한글 경로로)
+    - 영문 경로의 프로젝트도 깨진다. 다만 꼴이 다르다: 테스트 클래스가 아니라 Gradle 홈에 받아 둔 Gradle의 클래스(`worker.org.gradle.process.internal.worker.GradleWorkerMain`)부터 찾지 못해 테스트 JVM이 뜨지 못한다.
+    - 보고서에는 "Gradle Test Run :app:test"의 "failed to execute tests" 하나와 "Process 'Gradle Test Executor 1' finished with non-zero exit value 1"만 남고, 까닭(`ClassNotFoundException` … `GradleWorkerMain`)은 Gradle의 출력에만 나온다.
+    - JDK 17로 돌리면 같은 한글 홈에서도 테스트가 돈다. 실행 구성의 환경 변수로 `GRADLE_USER_HOME`을 영문 경로로 주면 돈다.
+  - 고침
+    - `test_report::gradle_path_problem`이 어디가 문제인지 알린다(`GradlePathProblem::Project`·`Home(홈)`). Gradle 홈이 영문이 아니고, "Gradle Test Executor"의 실패가 있고, 출력에 `GradleWorkerMain`이 있으면 홈이다(프로젝트 경로도 한글이면 홈을 먼저 알린다. 홈이 깨지면 테스트 JVM부터 뜨지 못한다).
+    - `test_report::gradle_user_home`: 실행 구성의 `GRADLE_USER_HOME`, 없으면 이 프로세스의 것, 그것도 없으면 사용자 폴더의 `.gradle`(Gradle의 기본).
+    - 테스트 창: 홈이면 그 경로와 함께 까닭과 해법(환경 변수 `GRADLE_USER_HOME`을 영문 경로로, 이 프로젝트만이면 `.ferrite/run.toml`의 실행 구성에 `env = { GRADLE_USER_HOME = "C:/gradle" }`, 옮길 수 없으면 JDK 17과 빌드 파일의 소스 문자셋 UTF-8)을 보인다. Ferrite가 홈을 몰래 바꾸지 않는다(받은 의존성을 모두 다시 받는다).
+  - 검증
+    - 단위: 실제 보고서(줄인 스택)와 출력으로 홈을 알아보기, 프로젝트 경로도 한글이면 홈이 먼저, 홈이 영문이거나 출력에 까닭이 없으면 아님, Windows가 아니면 아님. Gradle 홈은 실행 구성의 환경 변수가 먼저다.
+    - 창 시험(kittest): 실행 구성의 `GRADLE_USER_HOME`이 한글이고 이 보고서와 출력이면 그 경로가 든 안내가 보인다(Windows에서만).
+    - 실제 도구(`test_tools`, CI의 3개 OS): 영문 경로의 프로젝트를 한글 경로의 Gradle 홈으로 `gradle test` → Windows는 홈 문제로 알아보고, 그 밖은 테스트가 돈다. 로컬 Windows(코드 페이지 949)에서 통과했다.
+    - 실제 앱(Windows, 릴리스 빌드, JDK 21): `GRADLE_USER_HOME`을 한글 경로로 둔 채 앱을 띄워(한글 사용자 이름처럼) 영문 경로의 `gradle-board`에서 [실행 > 테스트]의 `gradle test` → "통과 0 · 실패 1 · 종료 코드 1" 아래에 그 홈 경로가 든 안내가 주황색으로 보였다. 같은 프로젝트의 `.ferrite/run.toml`에 `env = { GRADLE_USER_HOME = "C:/Users/…/.gradle" }`을 둔 실행 구성으로 돌리면 테스트가 돌고("통과 1 · 실패 1") 안내가 없다.
+  - 확인하지 못한 것: 실제로 한글 이름의 Windows 사용자로는 돌리지 않았다(`GRADLE_USER_HOME`으로 같은 경로를 만들었다). 명령 줄의 `-g`·`--gradle-user-home`과 `gradle.properties`의 홈 설정은 보지 않는다. CI의 Windows(영문, 코드 페이지 1252)에서도 같은 꼴로 깨지는지는 CI 결과로 본다.
 
 - 살폈지만 넣지 않은 것: 임베디드(MCU 플래시·시리얼 모니터·장비 설정 파일), 프레임워크별 지원(React·Vue·Angular 등, JS·TS 언어 서버로 기본은 된다), 린터 개별 연동(언어 서버나 저장 시 작업으로 된다), 원격 개발·컨테이너·SFTP 배포, 로컬 AI 완성 모델, 계정 기반 설정 동기화. egov 개발과 거리가 멀거나 크기에 비해 쓰임이 적다.
 

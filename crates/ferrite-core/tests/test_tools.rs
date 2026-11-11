@@ -624,6 +624,83 @@ fn gradle_kotlin_scala_테스트의_줄과_실패만_다시() {
 }
 
 #[test]
+#[ignore = "Gradle로 JUnit 5 테스트를 한글 경로의 Gradle 홈으로 돌린다(그 홈에 의존성을 새로 받는다). Java 18 이상과 gradle이 필요하다"]
+fn gradle_홈이_한글_경로면_windows에서_테스트_jvm이_뜨지_못한_것을_알아본다() {
+    if !require("gradle --version") {
+        return;
+    }
+    // 프로젝트 경로는 영문이고 Gradle 홈만 한글이다(Windows 사용자 이름이 한글이면 기본 홈이 그렇다).
+    let root = gradle_project(
+        "gradle-home",
+        &[(
+            "app",
+            "plugins {\n    java\n}\n\nrepositories {\n    mavenCentral()\n}\n\ndependencies {\n    testImplementation(\"org.junit.jupiter:junit-jupiter:5.11.4\")\n    testRuntimeOnly(\"org.junit.platform:junit-platform-launcher\")\n}\n\ntasks.test {\n    useJUnitPlatform()\n}\n",
+        )],
+    );
+    let java = root.join("app/src/test/java/com/example/board");
+    std::fs::create_dir_all(&java).unwrap();
+    std::fs::write(
+        java.join("CalcTest.java"),
+        "package com.example.board;\n\nimport static org.junit.jupiter.api.Assertions.assertEquals;\n\nimport org.junit.jupiter.api.Test;\n\nclass CalcTest {\n    @Test\n    void adds() {\n        assertEquals(3, 1 + 2);\n    }\n}\n",
+    )
+    .unwrap();
+    let home = temp_dir("그레이들 홈");
+    let env = std::collections::BTreeMap::from([(
+        "GRADLE_USER_HOME".to_owned(),
+        home.to_string_lossy().into_owned(),
+    )]);
+    assert_eq!(test_report::gradle_user_home(&env), Some(home.clone()));
+    let since = SystemTime::now();
+    // 테스트 창처럼 표준 출력과 오류를 함께 받는다(테스트 JVM이 뜨지 못한 까닭은 출력에만 나온다).
+    let output = {
+        #[cfg(windows)]
+        let mut command = {
+            use std::os::windows::process::CommandExt;
+            let mut command = Command::new("cmd.exe");
+            command.args(["/d", "/s", "/c"]).raw_arg("\"gradle test\"");
+            command
+        };
+        #[cfg(not(windows))]
+        let mut command = {
+            let mut command = Command::new("sh");
+            command.args(["-c", "gradle test"]);
+            command
+        };
+        let output = command
+            .current_dir(&root)
+            .env("GRADLE_USER_HOME", &home)
+            .output()
+            .unwrap();
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    };
+    let cases = junit(Tool::Gradle, &root, &root, since);
+    let problem = test_report::gradle_path_problem(Tool::Gradle, &root, &home, &cases, &output);
+    if cfg!(windows) {
+        // JDK 18 이상이 Gradle이 UTF-8로 적은 클래스 경로 파일을 시스템 코드 페이지로 읽어, Gradle 홈에 받아 둔
+        // Gradle의 클래스부터 찾지 못한다.
+        assert_eq!(
+            problem,
+            Some(test_report::GradlePathProblem::Home(home.clone())),
+            "{output}"
+        );
+    } else {
+        assert_eq!(problem, None);
+        assert_eq!(outcomes(&cases), [("adds()".to_owned(), Outcome::Passed)]);
+    }
+    let _ = std::fs::remove_dir_all(&root);
+    for _ in 0..20 {
+        if !home.exists() || std::fs::remove_dir_all(&home).is_ok() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+}
+
+#[test]
 #[ignore = "Gradle로 의존성 나무를 푼다(의존성의 POM을 받는다). Java 17 이상과 gradle이 필요하다"]
 fn gradle_dependencies로_전이_의존과_고른_버전을_읽는다() {
     use ferrite_core::vuln::manifest;

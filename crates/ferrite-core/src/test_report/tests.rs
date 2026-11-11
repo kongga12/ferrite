@@ -509,24 +509,88 @@ Caused by: java.lang.ClassNotFoundException: com.example.board.CalcTest
   <system-err><![CDATA[]]></system-err>
 </testsuite>"#;
 
+/// Windows에서 Gradle 홈이 한글 경로일 때(Gradle 9.2.0, JDK 21) 남는 보고서에서 스택을 줄였다. 까닭
+/// (`GradleWorkerMain`을 찾지 못함)은 보고서에 없고 Gradle의 출력에만 나온다.
+const GRADLE_EXECUTOR_EXITED: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="Gradle Test Run :app:test" tests="1" skipped="0" failures="1" errors="0">
+  <properties/>
+  <testcase name="failed to execute tests" classname="Gradle Test Run :app:test" time="0.514">
+    <failure message="org.gradle.process.ProcessExecutionException: Process 'Gradle Test Executor 1' finished with non-zero exit value 1" type="org.gradle.process.ProcessExecutionException">org.gradle.process.ProcessExecutionException: Process 'Gradle Test Executor 1' finished with non-zero exit value 1
+	at org.gradle.process.internal.DefaultExecHandle$ExecResultImpl.assertNormalExitValue(DefaultExecHandle.java:450)
+</failure>
+  </testcase>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>"#;
+
 #[test]
 fn 한글_경로에서_gradle이_테스트_클래스를_찾지_못한_것을_알아본다() {
     let cases = parse_junit(GRADLE_CLASS_NOT_FOUND).unwrap();
     let korean = Path::new(r"C:\Users\me\자바 게시판");
+    let home = Path::new(r"C:\Users\me\.gradle");
+    let problem =
+        |tool, dir: &Path, cases: &[Case]| gradle_path_problem(tool, dir, home, cases, "");
     assert_eq!(
-        gradle_path_problem(Tool::Gradle, korean, &cases),
-        cfg!(windows),
+        problem(Tool::Gradle, korean, &cases),
+        cfg!(windows).then_some(GradlePathProblem::Project),
         "Windows에서만 생긴다"
     );
-    assert!(!gradle_path_problem(
-        Tool::Gradle,
-        Path::new(r"C:\work\board"),
-        &cases
-    ));
-    assert!(!gradle_path_problem(Tool::Maven, korean, &cases));
+    assert_eq!(
+        problem(Tool::Gradle, Path::new(r"C:\work\board"), &cases),
+        None
+    );
+    assert_eq!(problem(Tool::Maven, korean, &cases), None);
     // 테스트가 실제로 실패한 것은 아니다.
     let ordinary = parse_junit(GRADLE).unwrap();
-    assert!(!gradle_path_problem(Tool::Gradle, korean, &ordinary));
+    assert_eq!(problem(Tool::Gradle, korean, &ordinary), None);
+}
+
+#[test]
+fn 한글_gradle_홈에서_테스트_jvm이_뜨지_못한_것을_알아본다() {
+    let cases = parse_junit(GRADLE_EXECUTOR_EXITED).unwrap();
+    let work = Path::new(r"C:\work\board");
+    let korean_home = Path::new(r"C:\Users\홍길동\.gradle");
+    // 테스트 JVM의 오류(한국어 Windows의 java가 949로 낸 글에서 클래스 이름은 그대로다).
+    let output = "오류: java.lang.ClassNotFoundException: worker.org.gradle.process.internal.worker.GradleWorkerMain\n";
+    assert_eq!(
+        gradle_path_problem(Tool::Gradle, work, korean_home, &cases, output),
+        cfg!(windows).then(|| GradlePathProblem::Home(korean_home.to_path_buf())),
+        "Windows에서만 생긴다"
+    );
+    // 프로젝트 경로도 한글이면 홈을 먼저 알린다(홈이 깨지면 테스트 JVM부터 뜨지 못한다).
+    assert_eq!(
+        gradle_path_problem(
+            Tool::Gradle,
+            Path::new(r"C:\자바"),
+            korean_home,
+            &cases,
+            output
+        ),
+        cfg!(windows).then(|| GradlePathProblem::Home(korean_home.to_path_buf()))
+    );
+    // 홈이 영문이거나, 출력에 까닭이 없으면(다른 까닭으로 테스트 JVM이 끝났다) 아니다.
+    let home = Path::new(r"C:\Users\me\.gradle");
+    assert_eq!(
+        gradle_path_problem(Tool::Gradle, work, home, &cases, output),
+        None
+    );
+    assert_eq!(
+        gradle_path_problem(Tool::Gradle, work, korean_home, &cases, "Killed\n"),
+        None
+    );
+
+    // Gradle 홈: 실행 구성의 환경 변수가 먼저다.
+    let env = std::collections::BTreeMap::from([(
+        "GRADLE_USER_HOME".to_owned(),
+        r"D:\그레이들".to_owned(),
+    )]);
+    assert_eq!(gradle_user_home(&env), Some(PathBuf::from(r"D:\그레이들")));
+    let default = gradle_user_home(&std::collections::BTreeMap::new()).unwrap();
+    assert!(
+        std::env::var_os("GRADLE_USER_HOME").is_some() || default.ends_with(".gradle"),
+        "{}",
+        default.display()
+    );
 }
 
 #[test]

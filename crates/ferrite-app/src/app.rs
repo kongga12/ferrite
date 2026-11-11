@@ -7761,7 +7761,7 @@ mod tests {
         };
         {
             let app = harness.state_mut();
-            app.tests.show_results(config, dir.clone(), cases);
+            app.tests.show_results(config, dir.clone(), cases, "");
             dock::show(&mut app.layout, Pane::Tests);
         }
         harness.run_ok();
@@ -7818,7 +7818,7 @@ Caused by: java.lang.ClassNotFoundException: com.example.board.CalcTest
         };
         {
             let app = harness.state_mut();
-            app.tests.show_results(config, dir.clone(), cases);
+            app.tests.show_results(config, dir.clone(), cases, "");
             dock::show(&mut app.layout, Pane::Tests);
         }
         harness.run_ok();
@@ -7827,6 +7827,56 @@ Caused by: java.lang.ClassNotFoundException: com.example.board.CalcTest
             harness
                 .query_by_label(crate::test_ui::GRADLE_PATH_PROBLEM)
                 .is_some(),
+            cfg!(windows),
+            "Windows에서만 생기는 일이다"
+        );
+        drop(harness);
+        remove_project(&dir);
+    }
+
+    #[test]
+    fn 한글_gradle_홈이면_테스트_jvm이_뜨지_못한_까닭과_해법을_알린다() {
+        // 프로젝트 경로는 영문이고 Gradle 홈만 한글이다(Windows 사용자 이름이 한글일 때).
+        let dir =
+            std::env::temp_dir().join(format!("ferrite-tests-gradle-home-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("settings.gradle.kts"), "").unwrap();
+        // Windows·JDK 21·Gradle 9.2.0이 실제로 남긴 보고서의 꼴. 까닭은 출력에만 나온다.
+        let report = r#"<testsuite name="Gradle Test Run :app:test">
+  <testcase name="failed to execute tests" classname="Gradle Test Run :app:test" time="0.514">
+    <failure message="org.gradle.process.ProcessExecutionException: Process 'Gradle Test Executor 1' finished with non-zero exit value 1">org.gradle.process.ProcessExecutionException: Process 'Gradle Test Executor 1' finished with non-zero exit value 1</failure>
+  </testcase>
+</testsuite>"#;
+        let output = "Could not write standard input to Gradle Test Executor 1.\n오류: java.lang.ClassNotFoundException: worker.org.gradle.process.internal.worker.GradleWorkerMain\n";
+        let cases = ferrite_core::test_report::parse_junit(report).unwrap();
+        let mut harness = harness_builder()
+            .with_size(egui::vec2(1200.0, 1000.0))
+            .build_eframe(|cc| FerriteApp::new(cc, Some(dir.clone())));
+        harness.run_ok();
+        let home = r"C:\Users\홍길동\.gradle";
+        let config = ferrite_core::run::RunConfig {
+            name: "gradle test".into(),
+            command: "gradle test".into(),
+            cwd: None,
+            env: [("GRADLE_USER_HOME".to_owned(), home.to_owned())].into(),
+        };
+        {
+            let app = harness.state_mut();
+            app.tests.show_results(config, dir.clone(), cases, output);
+            dock::show(&mut app.layout, Pane::Tests);
+        }
+        harness.run_ok();
+        harness.get_by_label("Gradle Test Run :app:test (실패 1/1)");
+        let text = crate::test_ui::path_problem_text(
+            &ferrite_core::test_report::GradlePathProblem::Home(home.into()),
+        );
+        assert!(
+            text.contains(home) && text.contains("GRADLE_USER_HOME"),
+            "{text}"
+        );
+        assert_eq!(
+            harness.query_by_label(&text).is_some(),
             cfg!(windows),
             "Windows에서만 생기는 일이다"
         );
