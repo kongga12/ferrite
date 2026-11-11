@@ -595,6 +595,16 @@ setInterval(tick, 200);
 </body></html>
 ";
 
+/// 조각 화면을 프레임(`<iframe>`)으로 보이는 화면.
+const MAIN_PAGE: &str = "<!doctype html>
+<html><body>
+<script>
+var mainReady = true;
+</script>
+<iframe id=\"content\" src=\"/app/frag.do\"></iframe>
+</body></html>
+";
+
 /// jQuery `.html()`이 조각의 스크립트를 다루는 꼴만 흉내 낸 대역: 조각을 넣고, 스크립트마다 새
 /// `<script>`로 돌려 바로 떼고, 원래 스크립트에 `globalEval` 표시를 남긴다(`jQuery._data`로 읽는다).
 const JQUERY_STUB: &str = "(function () {
@@ -657,6 +667,8 @@ fn web_server() -> u16 {
                 }
                 let (kind, body) = if line.starts_with("GET /app/list.do ") {
                     ("text/html; charset=UTF-8", PAGE)
+                } else if line.starts_with("GET /app/main.do ") {
+                    ("text/html; charset=UTF-8", MAIN_PAGE)
                 } else if line.starts_with("GET /app/tiles.do ") {
                     ("text/html; charset=UTF-8", TILES_PAGE)
                 } else if line.starts_with("GET /app/frag.do ")
@@ -1295,10 +1307,7 @@ fn js_debug로_cdp_프록시로_화면을_다시_불러_맨_위_코드에서_멈
     // 1) 주소를 쳐서 연 화면은 맨 위 화면이고 폼을 보내 연 것이 아니다(다시 불러도 된다).
     assert_eq!(
         cdp::page_loaded(&proxy, &page, Duration::from_secs(10)).unwrap(),
-        cdp::Loaded {
-            top: true,
-            form_submit: false
-        }
+        cdp::Loaded::Reload(cdp::Target::Top)
     );
     // 2) 맨 위 코드(`var count = 0;`, 화면 12줄)는 이미 돌았다. 화면 줄로 걸고 다시 부르면 거기서 멈춘다.
     let blocks = page_lines::scripts_at(FRAG_PAGE, &starts).expect("블록");
@@ -1316,7 +1325,7 @@ fn js_debug로_cdp_프록시로_화면을_다시_불러_맨_위_코드에서_멈
         &mut session,
         &|e| matches!(e, DebugEvent::Breakpoints { path, .. } if *path == local),
     );
-    cdp::reload(&proxy).unwrap();
+    cdp::reload(&proxy, &cdp::Target::Top).unwrap();
     let (thread, frame) = top_frame(&mut session, &mut wait);
     eprintln!("다시 부른 화면의 프레임: {frame:?}");
     assert_eq!(frame.line, 12);
@@ -1354,10 +1363,194 @@ fn js_debug로_cdp_프록시로_화면을_다시_불러_맨_위_코드에서_멈
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let loaded = cdp::page_loaded(&proxy, &page, Duration::from_secs(10));
-        if loaded.as_ref().is_ok_and(|l| l.form_submit) {
+        if loaded == Ok(cdp::Loaded::FormSubmit) {
             break;
         }
         assert!(Instant::now() < deadline, "폼으로 연 화면: {loaded:?}");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    session.stop();
+    wait(&mut session, &|e| {
+        matches!(e, DebugEvent::Terminated | DebugEvent::Closed(_))
+    });
+    drop(session);
+    for dir in [servers, project, adapters::scratch_dir()] {
+        for _ in 0..40 {
+            if !dir.exists() || std::fs::remove_dir_all(&dir).is_ok() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        }
+        assert!(!dir.exists(), "폴더가 남음: {}", dir.display());
+    }
+}
+
+#[test]
+#[ignore = "GitHub에서 vscode-js-debug(약 1.2MB)를 받는다. node와 Chrome(Windows는 Edge도 된다)이 필요하다"]
+fn js_debug로_프레임_안_화면의_블록을_디버거에서_받고_그_프레임만_다시_연다() {
+    let Some(kind) = browser() else {
+        require("Chrome", false);
+        return;
+    };
+    if !require("node", find_program("node").is_some()) {
+        return;
+    }
+    let (servers, project) = (temp_dir("js-frame-servers"), temp_dir("js-frame"));
+    let web_root = project.join("src/main/webapp");
+    std::fs::create_dir_all(&web_root).unwrap();
+    let port = web_server();
+    let adapter = install_adapter(&servers, "js-debug", &project);
+    let mut runtime_args = vec!["--headless=new", "--disable-gpu"];
+    if cfg!(target_os = "linux") {
+        runtime_args.extend(["--no-sandbox", "--disable-dev-shm-usage"]);
+    }
+    let trace = project.join("js-debug.log");
+    let _dump = DumpOnPanic(trace.clone());
+    let launch = Launch {
+        adapter_id: "js-debug".into(),
+        attach: false,
+        arguments: json!({
+            "type": kind,
+            "url": format!("http://127.0.0.1:{port}/app/main.do"),
+            "webRoot": web_root,
+            "pathMapping": { "/app/": format!("{}/", web_root.display()) },
+            "runtimeArgs": runtime_args,
+            "timeout": 60000,
+            "trace": { "logFile": trace },
+        }),
+    };
+    let mut session = DebugSession::start(&adapter, launch, BTreeMap::new(), || {}).unwrap();
+    // 프레임 안 화면의 인라인 스크립트도 그 화면(프레임) 주소로 알린다.
+    let mut starts = Vec::new();
+    let mut live = None;
+    let mut events = Vec::new();
+    let started = Instant::now();
+    let mut quiet = None;
+    while quiet.is_none_or(|at: Instant| at.elapsed() < Duration::from_millis(1500)) {
+        assert!(
+            started.elapsed() < Duration::from_secs(120),
+            "시간 초과: {starts:?}"
+        );
+        for event in session.poll() {
+            if let DebugEvent::LoadedSource { source, .. } = &event
+                && let Some((page, line, column)) =
+                    source.name.as_deref().and_then(page_lines::inline_script)
+                && page.ends_with("/app/frag.do")
+            {
+                starts.push((line, column));
+                live = Some(source.clone());
+            }
+            events.push(event);
+        }
+        if starts.len() >= 2 && quiet.is_none() {
+            quiet = Some(Instant::now());
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    starts.sort();
+    assert_eq!(starts, [(4, 9), (11, 9)]);
+    let live = live.unwrap();
+    let page = live
+        .name
+        .as_deref()
+        .and_then(page_lines::inline_script)
+        .unwrap()
+        .0
+        .replace('\u{a789}', ":");
+    let (mut seen, mut next) = (events, 0);
+    let mut wait = |session: &mut DebugSession, done: &dyn Fn(&DebugEvent) -> bool| {
+        wait_for(session, &mut seen, &mut next, done)
+    };
+    session.request("requestCDPProxy", json!({}));
+    let proxy = response(wait(
+        &mut session,
+        &|e| matches!(e, DebugEvent::Response { command, .. } if command == "requestCDPProxy"),
+    ));
+    let proxy = cdp::Proxy::from_json(&proxy).expect("프록시 주소");
+    // 1) 프레임 안 화면은 브라우저가 원래 HTML을 남겨 두지 않는다. 블록의 글은 디버거에서 블록마다 받는다.
+    eprintln!(
+        "프레임 화면의 원래 HTML: {:?}",
+        cdp::page_html(&proxy, &page).map(|h| h.len())
+    );
+    let expected: Vec<(usize, usize, String)> = page_lines::scripts_at(FRAG_PAGE, &starts)
+        .unwrap()
+        .into_iter()
+        .map(|(line, column, text)| (line, column, text.to_owned()))
+        .collect();
+    assert_eq!(
+        cdp::script_blocks(&proxy, &page, &starts).unwrap(),
+        expected
+    );
+    // 2) 처음 주소(src)를 보이는 프레임은 그 프레임만 다시 열어도 된다.
+    let Ok(cdp::Loaded::Reload(target)) = cdp::page_loaded(&proxy, &page, Duration::from_secs(10))
+    else {
+        panic!("프레임을 다시 열 수 있어야 한다");
+    };
+    assert!(matches!(&target, cdp::Target::Frame { url, .. } if url.ends_with("/app/frag.do")));
+    // 3) 블록을 받으며 건 중단점은 지웠다(조건이 거짓이라 멈추지도 않았다). 맨 위 코드(화면 12줄)에 걸고
+    // 프레임만 다시 열면 거기서 멈춘다.
+    let local = project.join("frag.do.js");
+    std::fs::write(
+        &local,
+        page_lines::assemble(&page_lines::scripts_at(FRAG_PAGE, &starts).unwrap()),
+    )
+    .unwrap();
+    session.map_source(&local, &live);
+    session.set_breakpoints(
+        &local,
+        vec![Breakpoint {
+            line: 12,
+            condition: None,
+        }],
+    );
+    wait(
+        &mut session,
+        &|e| matches!(e, DebugEvent::Breakpoints { path, .. } if *path == local),
+    );
+    cdp::reload(&proxy, &target).unwrap();
+    let (thread, frame) = top_frame(&mut session, &mut wait);
+    eprintln!("다시 연 프레임의 프레임: {frame:?}");
+    assert_eq!(frame.line, 12);
+    assert!(
+        frame
+            .source
+            .as_ref()
+            .and_then(|s| s.name.as_deref())
+            .is_some_and(|n| n.contains("frag.do")),
+        "{frame:?}"
+    );
+    // 프레임이 다시 열리는 중에 멈춰 있어도 블록의 글을 받는다.
+    assert_eq!(
+        cdp::script_blocks(&proxy, &page, &starts).unwrap(),
+        expected
+    );
+    session.set_breakpoints(&local, Vec::new());
+    wait(
+        &mut session,
+        &|e| matches!(e, DebugEvent::Breakpoints { path, .. } if *path == local),
+    );
+    session.resume(thread);
+    // 4) 프레임이 링크로 다른 화면으로 가면(처음 주소와 다르다) 다시 열지 않는다.
+    session.request(
+        "evaluate",
+        json!({ "expression": "document.getElementById('content').contentWindow.location.href = '/app/list.do'; 1", "context": "repl" }),
+    );
+    wait(
+        &mut session,
+        &|e| matches!(e, DebugEvent::Response { command, .. } if command == "evaluate"),
+    );
+    let moved = page.replace("/app/frag.do", "/app/list.do");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let loaded = cdp::page_loaded(&proxy, &moved, Duration::from_secs(10));
+        if loaded == Ok(cdp::Loaded::FrameMoved) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "다른 화면으로 간 프레임: {loaded:?}"
+        );
         std::thread::sleep(Duration::from_millis(200));
     }
 

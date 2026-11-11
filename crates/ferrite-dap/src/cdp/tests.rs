@@ -122,36 +122,57 @@ fn 프록시로_화면을_연_프레임의_원래_html을_받는다() {
     assert!(frames.contains(&(0xa, b"hi".to_vec())), "{frames:?}");
 }
 
-/// 받은 글 틀의 CDP 명령 이름들.
-fn methods(received: &Receiver<(u8, Vec<u8>)>) -> Vec<String> {
+/// 받은 글 틀의 CDP 명령들(이름, 인자).
+fn requests(received: &Receiver<(u8, Vec<u8>)>) -> Vec<(String, Value)> {
     received
         .try_iter()
         .filter(|(opcode, _)| *opcode == 0x1)
         .map(|(_, payload)| {
             let request: Value = serde_json::from_slice(&payload).unwrap();
-            request["method"].as_str().unwrap().to_owned()
+            (
+                request["method"].as_str().unwrap().to_owned(),
+                request["params"].clone(),
+            )
         })
         .collect()
 }
 
-/// 맨 위 화면이 list.do(자식 프레임 detail.do)이고, `readyState`를 `states` 차례로(끝나면 마지막 것을) 주고,
-/// 지금 화면을 연 방식이 `transition`인 가짜 프록시.
+/// 맨 위 화면이 list.do(자식 프레임 detail.do)인 가짜 프록시. `readyState`를 `states` 차례로(끝나면 마지막
+/// 것을) 주고, 지금 화면을 연 방식은 `transition`, 자식 프레임이 처음 주소(src)를 보이는지는 `from_src`다.
+/// 자식 프레임의 스크립트는 3줄(9칸)과 10줄에서 시작하고(97줄은 스크립트가 없고 98줄은 둘이 겹친다),
+/// 그 글은 `블록 {줄}`이다.
 fn page_proxy(
     states: &'static [&'static str],
     transition: &'static str,
+    from_src: bool,
 ) -> (Proxy, Receiver<(u8, Vec<u8>)>) {
     let asked = std::sync::atomic::AtomicUsize::new(0);
     fake_proxy(move |request| {
         let id = request["id"].as_u64().unwrap();
+        let params = &request["params"];
         let result = match request["method"].as_str().unwrap() {
             "Page.getFrameTree" => json!({ "frameTree": {
                 "frame": { "id": "top", "url": "http://127.0.0.1:8080/app/list.do" },
                 "childFrames": [{ "frame": { "id": "child", "url": "http://127.0.0.1:8080/app/detail.do" } }]
             } }),
-            "Runtime.evaluate" => {
-                assert_eq!(request["params"]["expression"], "document.readyState");
+            "Page.createIsolatedWorld" => {
+                assert_eq!(params["frameId"], "child");
+                json!({ "executionContextId": 7 })
+            }
+            "Runtime.evaluate" if params["expression"] == "document.readyState" => {
                 let n = asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 json!({ "result": { "type": "string", "value": states[n.min(states.len() - 1)] } })
+            }
+            "Runtime.evaluate" => {
+                // 프레임이 처음 주소를 보이는지는 그 프레임의 문서에서 묻는다.
+                assert_eq!(params["contextId"], 7);
+                assert!(
+                    params["expression"]
+                        .as_str()
+                        .unwrap()
+                        .contains("frameElement.src")
+                );
+                json!({ "result": { "type": "boolean", "value": from_src } })
             }
             // 앞 화면에서 링크로 왔다가 지금 화면은 `transition`으로 열었다.
             "Page.getNavigationHistory" => json!({ "currentIndex": 1, "entries": [
@@ -159,6 +180,28 @@ fn page_proxy(
                 { "id": 2, "url": "http://127.0.0.1:8080/app/list.do", "transitionType": transition },
             ] }),
             "Page.reload" => json!({}),
+            "Page.navigate" => json!({ "frameId": params["frameId"], "loaderId": "L2" }),
+            "Debugger.setBreakpointByUrl" => {
+                assert_eq!(params["url"], "http://127.0.0.1:8080/app/detail.do");
+                assert_eq!(params["condition"], "false", "멈추지 않는 중단점");
+                let line = params["lineNumber"].as_u64().unwrap() + 1;
+                let locations: Vec<Value> = match line {
+                    97 => Vec::new(),
+                    98 => vec![
+                        json!({ "scriptId": "s3", "lineNumber": 97, "columnNumber": 0 }),
+                        json!({ "scriptId": "s4", "lineNumber": 98, "columnNumber": 0 }),
+                    ],
+                    _ => vec![
+                        json!({ "scriptId": format!("s{line}"), "lineNumber": line, "columnNumber": 2 }),
+                    ],
+                };
+                json!({ "breakpointId": format!("bp{line}"), "locations": locations })
+            }
+            "Debugger.getScriptSource" => {
+                let script = params["scriptId"].as_str().unwrap();
+                json!({ "scriptSource": format!("블록 {}", &script[1..]) })
+            }
+            "Debugger.removeBreakpoint" => json!({}),
             other => panic!("{other}"),
         };
         vec![frame(
@@ -169,20 +212,34 @@ fn page_proxy(
     })
 }
 
-#[test]
-fn 화면을_다_읽기를_기다려_폼을_보내_열었는지_알리고_다시_부른다() {
-    // 읽는 중이던 화면이 다 읽히면 탐색 기록을 본다. 링크로 연 화면은 다시 불러도 된다.
-    let (proxy, received) = page_proxy(&["loading", "loading", "interactive"], "link");
-    let loaded = page_loaded(&proxy, "127.0.0.1:8080/app/list.do", Duration::from_secs(5)).unwrap();
-    assert_eq!(
-        loaded,
-        Loaded {
-            top: true,
-            form_submit: false
+/// 받은 명령 이름이 `method`인 것이 올 때까지 기다린다.
+fn wait_method(received: &Receiver<(u8, Vec<u8>)>, method: &str) -> Value {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut seen = Vec::new();
+    loop {
+        seen.extend(requests(received));
+        if let Some((_, params)) = seen.iter().find(|(m, _)| m == method) {
+            return params.clone();
         }
-    );
+        assert!(Instant::now() < deadline, "{seen:?}");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn 화면을_다_읽기를_기다려_다시_불러도_되는지_알리고_다시_부른다() {
+    const LIST: &str = "127.0.0.1:8080/app/list.do";
+    const DETAIL: &str = "127.0.0.1:8080/app/detail.do";
+    let wait = Duration::from_secs(5);
+    // 맨 위 화면: 읽는 중이던 화면이 다 읽히면 탐색 기록을 본다. 링크로 연 화면은 다시 불러도 된다.
+    let (proxy, received) = page_proxy(&["loading", "loading", "interactive"], "link", true);
     assert_eq!(
-        methods(&received),
+        page_loaded(&proxy, LIST, wait).unwrap(),
+        Loaded::Reload(Target::Top)
+    );
+    let names: Vec<String> = requests(&received).into_iter().map(|(m, _)| m).collect();
+    assert_eq!(
+        names,
         [
             "Page.getFrameTree",
             "Runtime.evaluate",
@@ -191,46 +248,100 @@ fn 화면을_다_읽기를_기다려_폼을_보내_열었는지_알리고_다시
             "Page.getNavigationHistory"
         ]
     );
-    reload(&proxy).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let mut seen = Vec::new();
-    while !seen.iter().any(|m| m == "Page.reload") {
-        assert!(Instant::now() < deadline, "{seen:?}");
-        seen.extend(methods(&received));
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    reload(&proxy, &Target::Top).unwrap();
+    wait_method(&received, "Page.reload");
+    // 폼을 보내 연 맨 위 화면.
+    let (proxy, _) = page_proxy(&["complete"], "form_submit", true);
+    assert_eq!(page_loaded(&proxy, LIST, wait).unwrap(), Loaded::FormSubmit);
 
-    // 폼을 보내 연 화면.
-    let (proxy, _) = page_proxy(&["complete"], "form_submit");
-    assert!(
-        page_loaded(&proxy, "127.0.0.1:8080/app/list.do", Duration::from_secs(5))
-            .unwrap()
-            .form_submit
+    // 프레임 안 화면: 그 프레임의 문서(격리된 세계)에서 다 읽기를 기다리고, 처음 주소를 보이면 그 프레임만
+    // 같은 주소로 다시 연다.
+    let (proxy, received) = page_proxy(&["loading", "complete"], "form_submit", true);
+    let target = Target::Frame {
+        id: "child".into(),
+        url: "http://127.0.0.1:8080/app/detail.do".into(),
+    };
+    assert_eq!(
+        page_loaded(&proxy, DETAIL, wait).unwrap(),
+        Loaded::Reload(target.clone()),
+        "맨 위 화면을 연 방식과는 상관없다"
     );
-    // 프레임 안 화면은 맨 위가 아니다(읽기를 기다리지 않는다).
-    let (proxy, received) = page_proxy(&["complete"], "link");
+    let seen = requests(&received);
     assert!(
-        !page_loaded(
-            &proxy,
-            "127.0.0.1:8080/app/detail.do",
-            Duration::from_secs(5)
+        seen.iter()
+            .filter(|(m, _)| m == "Runtime.evaluate")
+            .all(|(_, params)| params["contextId"] == 7),
+        "{seen:?}"
+    );
+    reload(&proxy, &target).unwrap();
+    let navigate = wait_method(&received, "Page.navigate");
+    assert_eq!(
+        (&navigate["frameId"], &navigate["url"]),
+        (
+            &json!("child"),
+            &json!("http://127.0.0.1:8080/app/detail.do")
         )
-        .unwrap()
-        .top
     );
-    assert_eq!(methods(&received), ["Page.getFrameTree"]);
-    // 다 읽지 못하면(읽는 중에 멈춰 있으면) 기다리다 그만둔다.
-    let (proxy, _) = page_proxy(&["loading"], "link");
-    assert!(!wait_loaded(&proxy, Duration::from_millis(250)).unwrap());
+    // 처음 주소에서 다른 화면으로 간 프레임.
+    let (proxy, _) = page_proxy(&["complete"], "link", false);
+    assert_eq!(
+        page_loaded(&proxy, DETAIL, wait).unwrap(),
+        Loaded::FrameMoved
+    );
+
+    // 다 읽지 못하면(읽는 중에 멈춰 있으면) 기다리다 그만둔다. 없는 화면은 알린다.
+    let (proxy, _) = page_proxy(&["loading"], "link", true);
+    let short = Duration::from_millis(250);
+    assert!(!wait_loaded(&proxy, short).unwrap());
     assert!(
-        page_loaded(
-            &proxy,
-            "127.0.0.1:8080/app/list.do",
-            Duration::from_millis(250)
-        )
-        .unwrap_err()
-        .contains("다 읽지 못했습니다")
+        page_loaded(&proxy, LIST, short)
+            .unwrap_err()
+            .contains("다 읽지 못했습니다")
     );
+    assert!(
+        page_loaded(&proxy, "127.0.0.1:8080/app/gone.do", short)
+            .unwrap_err()
+            .contains("열려 있지 않습니다")
+    );
+}
+
+#[test]
+fn 블록_자리에_멈추지_않는_중단점을_걸어_블록의_글을_받고_바로_지운다() {
+    const DETAIL: &str = "127.0.0.1:8080/app/detail.do";
+    let (proxy, received) = page_proxy(&["complete"], "link", true);
+    assert_eq!(
+        script_blocks(&proxy, DETAIL, &[(3, 9), (10, 9)]).unwrap(),
+        [(3, 9, "블록 3".to_owned()), (10, 9, "블록 10".to_owned())]
+    );
+    let seen = requests(&received);
+    let set: Vec<(u64, u64)> = seen
+        .iter()
+        .filter(|(m, _)| m == "Debugger.setBreakpointByUrl")
+        .map(|(_, p)| {
+            (
+                p["lineNumber"].as_u64().unwrap(),
+                p["columnNumber"].as_u64().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(set, [(2, 8), (9, 8)], "0부터 센 자리");
+    let removed: Vec<&Value> = seen
+        .iter()
+        .filter(|(m, _)| m == "Debugger.removeBreakpoint")
+        .map(|(_, p)| &p["breakpointId"])
+        .collect();
+    assert_eq!(removed, [&json!("bp3"), &json!("bp10")]);
+    // 그 자리의 스크립트가 없거나 여럿이면 가려내지 못한다. 그래도 건 중단점은 지운다.
+    for line in [97, 98] {
+        let (proxy, received) = page_proxy(&["complete"], "link", true);
+        let error = script_blocks(&proxy, DETAIL, &[(3, 9), (line, 1)]).unwrap_err();
+        assert!(error.contains("가려내지 못했습니다"), "{error}");
+        let removed = requests(&received)
+            .iter()
+            .filter(|(m, _)| m == "Debugger.removeBreakpoint")
+            .count();
+        assert_eq!(removed, 2);
+    }
 }
 
 #[test]
