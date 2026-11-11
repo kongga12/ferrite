@@ -5,7 +5,7 @@
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
@@ -54,6 +54,56 @@ pub fn page_html(proxy: &Proxy, page: &str) -> Result<String, String> {
         .as_str()
         .map(str::to_owned)
         .ok_or_else(|| "화면 HTML이 없습니다".into())
+}
+
+/// 화면을 다 읽은 뒤의 처지(다시 불러도 되는지 가린다).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Loaded {
+    /// `page`를 연 프레임이 맨 위다(맨 위 화면을 다시 부르면 그 화면이 다시 열린다).
+    pub top: bool,
+    /// 맨 위 화면을 폼을 보내 열었다(다시 부르면 폼을 다시 보낼 수 있다).
+    pub form_submit: bool,
+}
+
+/// `page`를 연 프레임이 맨 위인지 알리고, 맨 위면 화면을 다 읽을 때까지(`document.readyState`가 "loading"이
+/// 아닐 때까지, 넉넉히 `wait`) 기다린 뒤 그 화면을 폼을 보내 열었는지(`Page.getNavigationHistory`) 알린다.
+/// 다 읽은 뒤면 화면의 인라인 스크립트가 모두 돌아 js-debug가 블록을 다 알렸다.
+pub fn page_loaded(proxy: &Proxy, page: &str, wait: Duration) -> Result<Loaded, String> {
+    let mut socket = Socket::connect(proxy)?;
+    let tree = socket.call(1, "Page.getFrameTree", json!({}))?;
+    let top = &tree["frameTree"];
+    if find_frame(top, page).is_none_or(|frame| frame["id"] != top["frame"]["id"]) {
+        return Ok(Loaded {
+            top: false,
+            form_submit: false,
+        });
+    }
+    let mut id = 2;
+    if !socket.wait_loaded(&mut id, wait)? {
+        return Err("화면을 다 읽지 못했습니다".into());
+    }
+    let history = socket.call(id, "Page.getNavigationHistory", json!({}))?;
+    let current = history["currentIndex"]
+        .as_u64()
+        .and_then(|i| history["entries"].get(usize::try_from(i).ok()?));
+    Ok(Loaded {
+        top: true,
+        form_submit: current.is_some_and(|entry| entry["transitionType"] == "form_submit"),
+    })
+}
+
+/// 맨 위 화면을 다 읽을 때까지(`document.readyState`가 "loading"이 아닐 때까지, 넉넉히 `wait`) 기다린다. 다
+/// 읽었으면 true. 읽는 중에 멈춰 있으면 CDP가 화면 HTML(`Page.getResourceContent`)에 답하지 않으므로 그
+/// 전에 본다.
+pub fn wait_loaded(proxy: &Proxy, wait: Duration) -> Result<bool, String> {
+    Socket::connect(proxy)?.wait_loaded(&mut 1, wait)
+}
+
+/// 맨 위 화면을 다시 부른다(`Page.reload`).
+pub fn reload(proxy: &Proxy) -> Result<(), String> {
+    Socket::connect(proxy)?
+        .call(1, "Page.reload", json!({}))
+        .map(drop)
 }
 
 /// 주소(스킴·`#` 뒤를 뺀 것)가 `page`인 프레임(자식 프레임까지).
@@ -128,6 +178,27 @@ impl Socket {
                 ));
             }
             return Ok(message["result"].clone());
+        }
+    }
+
+    /// 맨 위 화면의 `document.readyState`가 "loading"이 아닐 때까지(넉넉히 `wait`) 0.1초마다 본다(멈춰 있어도
+    /// 답한다). 다 읽었으면 true. 명령 번호는 `id`부터 쓴다.
+    fn wait_loaded(&mut self, id: &mut u64, wait: Duration) -> Result<bool, String> {
+        let started = Instant::now();
+        loop {
+            let state = self.call(
+                *id,
+                "Runtime.evaluate",
+                json!({ "expression": "document.readyState", "returnByValue": true }),
+            )?;
+            *id += 1;
+            if state["result"]["value"].as_str() != Some("loading") {
+                return Ok(true);
+            }
+            if started.elapsed() >= wait {
+                return Ok(false);
+            }
+            std::thread::sleep(Duration::from_millis(100));
         }
     }
 
