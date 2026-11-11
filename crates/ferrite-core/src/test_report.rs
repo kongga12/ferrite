@@ -69,6 +69,9 @@ pub struct Case {
     /// 보고서가 알려 준 소스 위치(pytest 일부 형식).
     pub file: Option<String>,
     pub line: Option<u32>,
+    /// Maven Failsafe가 돌린 통합 테스트(`failsafe-reports`의 보고서). 실패만 다시 돌릴 때 Surefire의
+    /// `-Dtest`가 아니라 `-Dit.test`로 거른다.
+    pub integration: bool,
 }
 
 /// Go 패키지 자체가 실패했을 때(빌드 실패 등)의 이름.
@@ -153,6 +156,7 @@ pub fn parse_junit(xml: &str) -> Result<Vec<Case>, String> {
             detail,
             file: node.attribute("file").map(str::to_owned),
             line: node.attribute("line").and_then(|l| l.parse().ok()),
+            integration: false,
         });
     }
     Ok(cases)
@@ -212,6 +216,7 @@ pub fn parse_go_json(output: &str) -> Vec<Case> {
                         detail,
                         file: None,
                         line: None,
+                        integration: false,
                     });
                 }
                 _ => {}
@@ -261,6 +266,7 @@ pub fn parse_go_json(output: &str) -> Vec<Case> {
                     detail: output,
                     file: None,
                     line: None,
+                    integration: false,
                 });
             }
             _ => {}
@@ -364,6 +370,20 @@ pub fn enable_tests(pom: &str) -> Option<String> {
     Some(format!("{}{}", &pom[..cut.start], &pom[cut.end..]))
 }
 
+/// 보고서 파일 하나(JUnit XML)를 읽는다. Maven Failsafe의 보고서(`failsafe-reports`)면 통합 테스트로 적는다.
+pub fn read_report(path: &Path) -> Result<Vec<Case>, String> {
+    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+    let mut cases = parse_junit(&String::from_utf8_lossy(&bytes))?;
+    let integration = path
+        .parent()
+        .and_then(Path::file_name)
+        .is_some_and(|dir| dir == "failsafe-reports");
+    for case in &mut cases {
+        case.integration = integration;
+    }
+    Ok(cases)
+}
+
 /// 이번 실행이 남긴 보고서 파일(`since` 뒤에 고친 것). Maven은 `target/surefire-reports`·
 /// `failsafe-reports`, Gradle은 `build/test-results`, pytest·CTest는 `dir`. Go는 표준 출력으로 준다.
 pub fn report_files(tool: Tool, root: &Path, dir: &Path, since: SystemTime) -> Vec<PathBuf> {
@@ -426,8 +446,8 @@ pub fn report_files(tool: Tool, root: &Path, dir: &Path, since: SystemTime) -> V
     files
 }
 
-/// 실패한 것만 다시 돌리는 명령: Maven `-Dtest`, Gradle `--tests`, pytest `--lf`, CTest
-/// `--rerun-failed`, Go `-run`.
+/// 실패한 것만 다시 돌리는 명령: Maven `-Dtest`(통합 테스트는 `-Dit.test`), Gradle `--tests`, pytest `--lf`,
+/// CTest `--rerun-failed`, Go `-run`.
 pub fn rerun(tool: Tool, command: &str, failed: &[&Case]) -> Option<String> {
     if failed.is_empty() {
         return None;
@@ -436,25 +456,48 @@ pub fn rerun(tool: Tool, command: &str, failed: &[&Case]) -> Option<String> {
     let method = |name: &str| name.split(['(', '[']).next().unwrap_or(name).to_owned();
     Some(match tool {
         Tool::Maven => {
-            let mut classes: Vec<(String, Vec<String>)> = Vec::new();
-            for case in failed {
-                let class = case.suite.rsplit('.').next().unwrap_or(&case.suite);
-                let class = class.split('$').next().unwrap_or(class).to_owned();
-                let name = method(&case.name);
-                match classes.iter_mut().find(|(c, _)| *c == class) {
-                    Some((_, names)) if !names.contains(&name) => names.push(name),
-                    Some(_) => {}
-                    None => classes.push((class, vec![name])),
+            // `클래스#메서드+메서드,…`(Surefire·Failsafe의 거르기 꼴).
+            let filter = |cases: &[&&Case]| {
+                let mut classes: Vec<(String, Vec<String>)> = Vec::new();
+                for case in cases {
+                    let class = case.suite.rsplit('.').next().unwrap_or(&case.suite);
+                    let class = class.split('$').next().unwrap_or(class).to_owned();
+                    let name = method(&case.name);
+                    match classes.iter_mut().find(|(c, _)| *c == class) {
+                        Some((_, names)) if !names.contains(&name) => names.push(name),
+                        Some(_) => {}
+                        None => classes.push((class, vec![name])),
+                    }
                 }
+                classes
+                    .iter()
+                    .map(|(class, names)| format!("{class}#{}", names.join("+")))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            };
+            // 단위 테스트(Surefire)와 통합 테스트(Failsafe)는 거르는 속성이 다르다. `-Dtest`에 통합 테스트를
+            // 넣으면 Surefire가 그것을 단위 테스트 단계에서 돌리고, Failsafe는 통합 테스트를 모두 돈다.
+            let (integration, unit): (Vec<&&Case>, Vec<&&Case>) =
+                failed.iter().partition(|case| case.integration);
+            // 실패한 단위 테스트가 없으면 Surefire는 아무것도 돌리지 않는다(맞는 클래스가 없는 이름). `-Dtest=!*`는
+            // 지연된 변수 확장을 켠 cmd에서 `!`가 사라진다.
+            let unit = if unit.is_empty() {
+                MAVEN_NO_UNIT_TESTS.to_owned()
+            } else {
+                filter(&unit)
+            };
+            let mut line =
+                format!("{command} -Dtest={unit} -Dsurefire.failIfNoSpecifiedTests=false");
+            if !integration.is_empty() {
+                // 다중 모듈이면 그 통합 테스트가 없는 모듈도 있다.
+                line.push_str(&format!(
+                    " -Dit.test={} -Dit.failIfNoSpecifiedTests=false",
+                    filter(&integration)
+                ));
+            } else if runs_integration_tests(command) {
+                line.push_str(" -DskipITs");
             }
-            let list: Vec<String> = classes
-                .iter()
-                .map(|(class, names)| format!("{class}#{}", names.join("+")))
-                .collect();
-            format!(
-                "{command} -Dtest={} -Dsurefire.failIfNoSpecifiedTests=false",
-                list.join(",")
-            )
+            line
         }
         Tool::Gradle => {
             let mut line = command.to_owned();
@@ -488,6 +531,19 @@ pub fn rerun(tool: Tool, command: &str, failed: &[&Case]) -> Option<String> {
             };
             format!("go test -json{run} {}", packages.join(" "))
         }
+    })
+}
+
+/// 실패한 통합 테스트만 다시 돌릴 때 Surefire에 주는 거르기(맞는 단위 테스트 클래스가 없는 이름).
+const MAVEN_NO_UNIT_TESTS: &str = "NoUnitTestsToRerun";
+
+/// Maven 명령이 통합 테스트 단계(`integration-test`)까지 가는지(Failsafe가 돈다).
+fn runs_integration_tests(command: &str) -> bool {
+    command.split_whitespace().any(|word| {
+        matches!(
+            word.trim_matches('"'),
+            "integration-test" | "post-integration-test" | "verify" | "install" | "deploy"
+        )
     })
 }
 
