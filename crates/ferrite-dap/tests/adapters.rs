@@ -503,6 +503,74 @@ setInterval(tick, <c:out value=\"${interval}\"/>);
 </body></html>
 ";
 
+/// Tiles 꼴 화면: 레이아웃(`TILES_LAYOUT`)의 머리 스크립트, 머리글 조각(`TILES_HEADER`)과 본문
+/// (`TILES_BODY`)의 스크립트가 한 화면에 든다. 서버는 JSP를 돌리지 않고 합친 결과를 준다.
+const TILES_PAGE: &str = "<!doctype html>
+<html><head>
+<script>
+var layoutReady = false;
+function markLayout() {
+  layoutReady = true;
+}
+</script>
+</head><body>
+<div id=\"header\">머리글</div>
+<script>
+function headerClock() {
+  var now = new Date();
+  return now.getTime();
+}
+</script>
+<h1>목록</h1>
+<script>
+var ticks = 0;
+function tick() {
+  ticks = ticks + 1;
+  headerClock();
+}
+setInterval(tick, 200);
+</script>
+</body></html>
+";
+
+const TILES_LAYOUT: &str = "<%@ page contentType=\"text/html; charset=UTF-8\" %>
+<%@ taglib prefix=\"tiles\" uri=\"http://tiles.apache.org/tags-tiles\" %>
+<!doctype html>
+<html><head>
+<script>
+var layoutReady = false;
+function markLayout() {
+  layoutReady = true;
+}
+</script>
+</head><body>
+<tiles:insertAttribute name=\"header\"/>
+<tiles:insertAttribute name=\"body\"/>
+</body></html>
+";
+
+const TILES_HEADER: &str = "<%@ page contentType=\"text/html; charset=UTF-8\" %>
+<div id=\"header\">머리글</div>
+<script>
+function headerClock() {
+  var now = new Date();
+  return now.getTime();
+}
+</script>
+";
+
+const TILES_BODY: &str = "<%@ page contentType=\"text/html; charset=UTF-8\" %>
+<h1>${title}</h1>
+<script>
+var ticks = 0;
+function tick() {
+  ticks = ticks + 1;
+  headerClock();
+}
+setInterval(tick, <c:out value=\"${interval}\"/>);
+</script>
+";
+
 const APP_JS: &str = "function add(a, b) {
   var total = a + b;
   return total;
@@ -530,6 +598,8 @@ fn web_server() -> u16 {
                 }
                 let (kind, body) = if line.starts_with("GET /app/list.do ") {
                     ("text/html; charset=UTF-8", PAGE)
+                } else if line.starts_with("GET /app/tiles.do ") {
+                    ("text/html; charset=UTF-8", TILES_PAGE)
                 } else if line.starts_with("GET /app/js/app.js ") {
                     ("application/javascript", APP_JS)
                 } else {
@@ -760,6 +830,162 @@ fn js_debug를_설치해_브라우저의_외부_스크립트와_화면_스크립
     drop(session);
     // js-debug에 임시 폴더로 준 곳(브라우저 프로필)까지 지운다. 브라우저가 늦게 끝나 폴더를 쥐고 있으면
     // 잠깐 기다린다.
+    for dir in [servers, project, adapters::scratch_dir()] {
+        for _ in 0..40 {
+            if !dir.exists() || std::fs::remove_dir_all(&dir).is_ok() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        }
+        assert!(!dir.exists(), "폴더가 남음: {}", dir.display());
+    }
+}
+
+#[test]
+#[ignore = "GitHub에서 vscode-js-debug(약 1.2MB)를 받는다. node와 Chrome(Windows는 Edge도 된다)이 필요하다"]
+fn js_debug로_여러_jsp를_합친_화면의_블록마다_jsp_줄에서_멈춘다() {
+    let Some(kind) = browser() else {
+        require("Chrome", false);
+        return;
+    };
+    if !require("node", find_program("node").is_some()) {
+        return;
+    }
+    let (servers, project) = (temp_dir("js-tiles-servers"), temp_dir("js-tiles"));
+    let web_root = project.join("src/main/webapp");
+    let jsp = web_root.join("WEB-INF/jsp");
+    let (layout, header, body) = (
+        jsp.join("layout/default.jsp"),
+        jsp.join("layout/header.jsp"),
+        jsp.join("board/BoardList.jsp"),
+    );
+    for (path, text) in [
+        (&layout, TILES_LAYOUT),
+        (&header, TILES_HEADER),
+        (&body, TILES_BODY),
+    ] {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+    let port = web_server();
+    let adapter = install_adapter(&servers, "js-debug", &project);
+    let mut runtime_args = vec!["--headless=new", "--disable-gpu"];
+    if cfg!(target_os = "linux") {
+        runtime_args.extend(["--no-sandbox", "--disable-dev-shm-usage"]);
+    }
+    let trace = project.join("js-debug.log");
+    let _dump = DumpOnPanic(trace.clone());
+    let launch = Launch {
+        adapter_id: "js-debug".into(),
+        attach: false,
+        arguments: json!({
+            "type": kind,
+            "url": format!("http://127.0.0.1:{port}/app/tiles.do"),
+            "webRoot": web_root,
+            "pathMapping": { "/app/": format!("{}/", web_root.display()) },
+            "runtimeArgs": runtime_args,
+            "timeout": 60000,
+            "trace": { "logFile": trace },
+        }),
+    };
+    let mut session = DebugSession::start(&adapter, launch, BTreeMap::new(), || {}).unwrap();
+    let (mut seen, mut next) = (Vec::new(), 0);
+    let mut wait = |session: &mut DebugSession, done: &dyn Fn(&DebugEvent) -> bool| {
+        wait_for(session, &mut seen, &mut next, done)
+    };
+    // 0) 인라인 스크립트 셋을 블록마다 알린다(이름 끝 `꞉줄:칸`). js-debug는 같은 화면 주소의 스크립트가 새로
+    // 오면 앞의 것을 지워(번호도 다시 쓴다) 내용은 마지막 블록만 받을 수 있다.
+    let mut starts = Vec::new();
+    let mut live = None;
+    while starts.len() < 3 {
+        let DebugEvent::LoadedSource { source, .. } = wait(&mut session, &|e| {
+            matches!(e, DebugEvent::LoadedSource { source, .. }
+                if source.name.as_deref().and_then(page_lines::inline_script)
+                    .is_some_and(|(page, ..)| page.ends_with("/app/tiles.do")))
+        }) else {
+            unreachable!()
+        };
+        let (_, line, column) = page_lines::inline_script(source.name.as_deref().unwrap()).unwrap();
+        starts.push((line, column));
+        live = Some(source);
+    }
+    starts.sort();
+    assert_eq!(starts, [(3, 9), (11, 9), (18, 9)]);
+    let live = live.unwrap();
+
+    // 1) 화면에서 블록의 글을 읽어(앱과 같은 식) 블록마다 JSP를 찾는다.
+    session.request(
+        "evaluate",
+        json!({ "expression": page_lines::PAGE_SCRIPTS, "context": "clipboard" }),
+    );
+    let result = response(wait(
+        &mut session,
+        &|e| matches!(e, DebugEvent::Response { command, .. } if command == "evaluate"),
+    ));
+    let texts = page_lines::page_scripts(result["result"].as_str().unwrap()).expect("글 목록");
+    let blocks: Vec<(usize, usize, &str)> = starts
+        .iter()
+        .zip(&texts)
+        .map(|(&(line, column), text)| (line, column, text.as_str()))
+        .collect();
+    let files: Vec<(PathBuf, String)> = page_lines::candidates(&project)
+        .into_iter()
+        .map(|p| {
+            let text = std::fs::read_to_string(&p).unwrap();
+            (p, text)
+        })
+        .collect();
+    let map = page_lines::PageMap::find(&blocks, &files, "127.0.0.1/app/tiles.do").expect("JSP");
+    assert_eq!(
+        map.files(),
+        [layout.as_path(), header.as_path(), body.as_path()]
+    );
+
+    // 2) 머리글 JSP 5줄과 본문 JSP 6줄을 화면 줄로 바꿔 살아 있는 블록 하나로 건다(화면 주소로 걸려 모든
+    // 블록에 든다). 본문의 tick이 머리글의 headerClock을 부르므로 두 곳에서 차례로 멈춘다.
+    let local = project.join("tiles.do.js");
+    std::fs::write(&local, page_lines::assemble(&blocks)).unwrap();
+    session.map_source(&local, &live);
+    let lines = [
+        map.to_page(&header, 4).expect("머리글 5줄"),
+        map.to_page(&body, 5).expect("본문 6줄"),
+    ];
+    assert_eq!(lines, [12, 20]);
+    session.set_breakpoints(
+        &local,
+        lines
+            .iter()
+            .map(|l| Breakpoint {
+                line: l + 1,
+                condition: None,
+            })
+            .collect(),
+    );
+    let mut stops = Vec::new();
+    let mut thread = None;
+    while stops.len() < 2 {
+        if let Some(thread) = thread {
+            session.resume(thread);
+        }
+        let (stopped, frame) = top_frame(&mut session, &mut wait);
+        thread = Some(stopped);
+        eprintln!("멈춘 프레임: {frame:?}");
+        let name = frame
+            .source
+            .as_ref()
+            .and_then(|s| s.name.clone())
+            .unwrap_or_default();
+        assert!(name.contains("tiles.do"), "{name}");
+        let (file, line) = map.to_file(frame.line as usize - 1).expect("JSP 줄");
+        stops.push((file.to_path_buf(), line));
+    }
+    assert_eq!(stops, [(body.clone(), 5), (header.clone(), 4)]);
+
+    session.stop();
+    wait(&mut session, &|e| {
+        matches!(e, DebugEvent::Terminated | DebugEvent::Closed(_))
+    });
+    drop(session);
     for dir in [servers, project, adapters::scratch_dir()] {
         for _ in 0..40 {
             if !dir.exists() || std::fs::remove_dir_all(&dir).is_ok() {
