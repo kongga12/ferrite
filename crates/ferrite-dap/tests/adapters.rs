@@ -1977,6 +1977,23 @@ fn js_debug로_다른_사이트_iframe은_그_세션의_cdp로_블록을_받고_
             if url.ends_with("/app/frag.do") && *ancestors == [top.clone()]),
         "{target:?}"
     );
+    // 불러온 스크립트 목록도 세션마다 따로다: 페이지 세션은 프레임의 스크립트를 모른다(앱은 화면이 있는 세션마다
+    // 물어 모은다).
+    assert_eq!(session.target_sessions(), [top_session, frame_session]);
+    for (id, has_frame) in [(top_session, false), (frame_session, true)] {
+        session.request_in(id, "loadedSources", json!({})).unwrap();
+        let sources = types::sources(&response(wait(
+            &mut session,
+            &|e| matches!(e, DebugEvent::Response { command, .. } if command == "loadedSources"),
+        )));
+        assert_eq!(
+            sources
+                .iter()
+                .any(|s| s.name.as_deref().is_some_and(|n| n.contains("frag.do"))),
+            has_frame,
+            "{sources:?}"
+        );
+    }
     // 3) 멈추지 않았으면 콘솔의 식은 맨 위 화면에서 돈다(나중에 열린 프레임 세션이 아니다).
     session.request(
         "evaluate",

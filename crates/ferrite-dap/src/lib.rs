@@ -453,6 +453,23 @@ impl DebugSession {
         }
     }
 
+    /// 화면(대상)이 있는 세션들의 번호: 자식 세션이 있으면 그것들과 그 아래 세션들(js-debug: 페이지, 다른 사이트의
+    /// `<iframe>`, 워커), 없으면 이 세션. js-debug의 맨 위 세션은 브라우저를 띄울 뿐 스크립트가 없다.
+    pub fn target_sessions(&self) -> Vec<u64> {
+        fn walk(session: &DebugSession, found: &mut Vec<u64>) {
+            for child in &session.children {
+                found.push(child.id);
+                walk(child, found);
+            }
+        }
+        if self.children.is_empty() {
+            return vec![self.id];
+        }
+        let mut found = Vec::new();
+        walk(self, &mut found);
+        found
+    }
+
     /// 지금 있는 세션 중 가장 나중에 열린 것의 번호(번호는 열린 차례로 커진다). 이보다 큰 번호의 세션은 지금
     /// 뒤에 열린다.
     pub fn newest_session(&self) -> u64 {
