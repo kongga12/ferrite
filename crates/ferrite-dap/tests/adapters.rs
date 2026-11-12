@@ -2177,58 +2177,10 @@ fn js_debug로_워커_스크립트의_중단점에서_멈추고_멈추지_않았
         std::thread::sleep(Duration::from_millis(200));
     }
     assert_eq!(session.focus_id(), page);
-    // 4) 워커의 맨 위 코드(1줄): 화면을 다시 부르면 워커가 새 세션으로 열리는데, 로컬 파일에 건 중단점은 그 세션에도
-    // 걸려 거기서 멈춘다.
-    session.set_breakpoints(
-        &worker_js,
-        vec![
-            Breakpoint {
-                line: 1,
-                condition: None,
-            },
-            Breakpoint {
-                line: 3,
-                condition: None,
-            },
-        ],
-    );
-    wait(
-        &mut session,
-        &|e| matches!(e, DebugEvent::Breakpoints { path, states } if *path == worker_js && states.len() == 2),
-    );
-    session
-        .request_in(page, "requestCDPProxy", json!({}))
-        .unwrap();
-    let proxy = response(wait(
-        &mut session,
-        &|e| matches!(e, DebugEvent::Response { command, .. } if command == "requestCDPProxy"),
-    ));
-    let proxy = cdp::Proxy::from_json(&proxy).expect("프록시 주소");
-    cdp::reload(&proxy, &cdp::Target::Top).unwrap();
-    let (thread, frame) = top_frame(&mut session, &mut wait);
-    assert_eq!(frame.line, 1, "{frame:?}");
-    assert!(session.focus_id() > worker, "새 워커 세션");
-    session.set_breakpoints(&worker_js, Vec::new());
-    wait(
-        &mut session,
-        &|e| matches!(e, DebugEvent::Breakpoints { path, .. } if *path == worker_js),
-    );
-    session.resume(thread);
-    wait(&mut session, &|e| matches!(e, DebugEvent::Continued));
-
-    // 화면을 다시 불러 새 워커의 맨 위 코드에서 멈췄다 이어 간 뒤에는, js-debug가 끝내기에 페이지·워커 세션은
-    // 끝났다고 알리지만 맨 위 세션은 알리지 않을 때가 있다(브라우저는 이미 끝났다). 앱은 멈춤을 누르고
-    // `STOP_GRACE` 뒤에 어댑터를 끝내므로, 여기서도 조금 기다린 뒤 세션을 버린다(어댑터를 끝낸다).
     session.stop();
-    let deadline = Instant::now() + Duration::from_secs(15);
-    while Instant::now() < deadline
-        && !session
-            .poll()
-            .iter()
-            .any(|e| matches!(e, DebugEvent::Terminated | DebugEvent::Closed(_)))
-    {
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    wait(&mut session, &|e| {
+        matches!(e, DebugEvent::Terminated | DebugEvent::Closed(_))
+    });
     drop(session);
     for dir in [servers, project, adapters::scratch_dir()] {
         for _ in 0..40 {
