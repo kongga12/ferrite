@@ -1022,8 +1022,10 @@ impl Debugger {
                 }
                 for source in fetch {
                     let key = source_key(&source);
+                    // 스택에는 멈춘 세션 밖의 소스도 있다(워커에서 멈추면 그 워커에 메시지를 보낸 화면 스크립트가
+                    // 비동기 스택으로 나온다). 그 소스를 알린 세션을 알면 그대로 둔다.
                     if let Some(owner) = self.stack_session {
-                        self.owners.insert(key.clone(), owner);
+                        self.owners.entry(key.clone()).or_insert(owner);
                     }
                     // 인라인 스크립트는 화면의 글로 맞춘다(지워진 블록은 내용을 물을 수 없다).
                     if self.pages.is_some()
@@ -3016,8 +3018,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// 한 화면 세션: 알릴 블록들과 그 세션의 CDP 프록시 포트.
-    type FakePage = (Vec<(Source, &'static str)>, u16);
+    /// 한 화면 세션: 알릴 블록들, 그 세션의 CDP 프록시 포트, 시작하자마자 멈추면 그때의 호출 스택(워커처럼).
+    type FakePage = (Vec<(Source, &'static str)>, u16, Option<Value>);
 
     /// 세션이 겹친 가짜 js-debug: 브라우저 세션이 첫 화면의 세션을, 각 화면 세션이 다음 화면의 세션을 거꾸로
     /// 요청한다(페이지 안 다른 사이트의 `<iframe>`처럼). 화면 세션마다 그 블록들을 알리고 그 세션의 CDP 프록시
@@ -3059,7 +3061,7 @@ mod tests {
                     });
                 }
                 thread::spawn(move || {
-                    let (blocks, cdp) = role.unwrap_or_default();
+                    let (blocks, cdp, stack) = role.unwrap_or_default();
                     let mut reader = std::io::BufReader::new(&stream);
                     let mut writer = &stream;
                     let mut seq = 0;
@@ -3100,7 +3102,15 @@ mod tests {
                                     after.push(json!({ "type": "request", "command": "startDebugging",
                                         "arguments": { "request": "launch", "configuration": {} } }));
                                 }
+                                if stack.is_some() {
+                                    after.push(json!({ "type": "event", "event": "stopped",
+                                        "body": { "reason": "breakpoint", "threadId": 1 } }));
+                                }
                             }
+                            "stackTrace" => {
+                                body = json!({ "stackFrames": stack.clone().unwrap_or_default() });
+                            }
+                            "scopes" => body = json!({ "scopes": [] }),
                             "source" => {
                                 let (source, text) = blocks.last().unwrap();
                                 let (_, line, column) =
@@ -3229,10 +3239,11 @@ mod tests {
                         LIST,
                     )],
                     top_cdp,
+                    None,
                 ),
-                (frame_block(), frame_cdp),
+                (frame_block(), frame_cdp, None),
             ],
-            Some((reloaded, (frame_block(), again_cdp))),
+            Some((reloaded, (frame_block(), again_cdp, None))),
         );
         let config = DebugConfig {
             name: "다른 사이트 프레임".into(),
@@ -3392,6 +3403,102 @@ mod tests {
             "{}",
             debugger.console
         );
+        debugger.shutdown();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn js_debug에서_워커에서_멈춘_스택의_화면_스크립트는_그_화면을_알린_세션에_묻는다() {
+        // 워커는 페이지 세션 아래의 세션이다. 워커에서 멈추면 그 워커에 메시지를 보낸 화면 스크립트가 비동기 스택으로
+        // 나온다. 그 화면을 맞추는 중이어도 그 화면의 글·다시 부르기는 화면을 알린 세션(페이지)에 묻는다.
+        let root =
+            std::env::temp_dir().join(format!("ferrite-worker-stack-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let jsp = root.join("src/main/webapp/WEB-INF/jsp/board/list.jsp");
+        std::fs::create_dir_all(jsp.parent().unwrap()).unwrap();
+        std::fs::write(&jsp, "<p>목록</p>\n<script>\nvar list = 1;\n</script>\n").unwrap();
+        let worker_js = root.join("src/main/webapp/js/worker.js");
+        std::fs::create_dir_all(worker_js.parent().unwrap()).unwrap();
+        std::fs::write(
+            &worker_js,
+            "self.onmessage = function (e) {\n  return e.data;\n};\n",
+        )
+        .unwrap();
+        const LIST: &str = "\nvar list = 1;\n";
+        let page = source("127.0.0.1\u{a789}8080/app/list.do\u{a789}2:9", 5);
+        // 원래 HTML을 늦게 줘서 그 화면을 맞추기 전에 워커의 스택이 온다.
+        let (top_cdp, _) = fake_cdp_with(|method, params| match method {
+            "Page.getFrameTree" => json!({ "frameTree": { "frame": {
+                "id": "top", "url": "http://127.0.0.1:8080/app/list.do" } } }),
+            "Runtime.evaluate" if params["expression"] == "document.readyState" => {
+                json!({ "result": { "type": "string", "value": "complete" } })
+            }
+            "Page.getNavigationHistory" => json!({ "currentIndex": 0, "entries": [
+                { "id": 1, "url": "http://127.0.0.1:8080/app/list.do", "transitionType": "link" }] }),
+            "Page.getResourceContent" => {
+                thread::sleep(Duration::from_millis(500));
+                json!({ "content": "<p>목록</p>\n<script>\nvar list = 1;\n</script>\n",
+                    "base64Encoded": false })
+            }
+            other => panic!("페이지 세션에 물음: {other}"),
+        });
+        // 워커 세션에는 화면이 없다(여기로 물으면 틀린 것이다).
+        let (worker_cdp, worker_methods) =
+            fake_cdp_with(|method, _| panic!("워커 세션에 물음: {method}"));
+        let stack = json!([
+            { "id": 1, "name": "self.onmessage", "line": 2, "column": 3, "source": {
+                "name": "127.0.0.1\u{a789}8080/app/js/worker.js", "path": worker_js, "sourceReference": 0 } },
+            { "id": 2, "name": "Worker.postMessage", "line": 0, "column": 0, "presentationHint": "label" },
+            { "id": 3, "name": "ask", "line": 3, "column": 1, "source": page.to_json() },
+        ]);
+        let address = fake_js_debug_nested(
+            vec![
+                (vec![(page, LIST)], top_cdp, None),
+                (Vec::new(), worker_cdp, Some(stack)),
+            ],
+            None,
+        );
+        let config = DebugConfig {
+            name: "워커".into(),
+            adapter: "js-debug".into(),
+            request: "launch".into(),
+            arguments: serde_json::json!({}),
+            build: None,
+        };
+        let breakpoints = BTreeMap::from([(
+            jsp,
+            vec![Breakpoint {
+                line: 3,
+                condition: None,
+            }],
+        )]);
+        let mut debugger = Debugger::default();
+        debugger
+            .start(
+                &config,
+                &root,
+                None,
+                breakpoints,
+                Adapter::Tcp(address),
+                &egui::Context::default(),
+            )
+            .unwrap();
+        debugger.sources = Some(root.join("sources"));
+        const KEY: &str = "127.0.0.1\u{a789}8080/app/list.do";
+        // 워커에서 멈춰 있으니 화면은 계속을 누른 뒤에 다시 부른다(페이지 세션의 CDP로 정했다).
+        pump(
+            &mut debugger,
+            "페이지 세션으로 다시 부를지 정하지 않음",
+            |d| {
+                d.pages
+                    .as_ref()
+                    .is_some_and(|p| matches!(p.reloads.get(KEY), Some(Reload::AfterContinue(_))))
+            },
+        );
+        let worker = debugger.stack_session.expect("워커 세션의 스택");
+        assert_ne!(debugger.owners.get(KEY), Some(&worker));
+        assert!(debugger.stored.contains_key(KEY));
+        assert_eq!(worker_methods.try_iter().count(), 0);
         debugger.shutdown();
         let _ = std::fs::remove_dir_all(&root);
     }
