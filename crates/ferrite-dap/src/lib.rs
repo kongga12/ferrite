@@ -453,6 +453,15 @@ impl DebugSession {
         }
     }
 
+    /// 지금 있는 세션 중 가장 나중에 열린 것의 번호(번호는 열린 차례로 커진다). 이보다 큰 번호의 세션은 지금
+    /// 뒤에 열린다.
+    pub fn newest_session(&self) -> u64 {
+        self.children
+            .iter()
+            .map(Self::newest_session)
+            .fold(self.id, u64::max)
+    }
+
     /// 사용자 요청([`Self::request`])을 받는 세션의 번호.
     pub fn focus_id(&self) -> u64 {
         self.focus_ref().id

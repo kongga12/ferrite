@@ -137,10 +137,10 @@ struct Pages {
     deferred: Vec<String>,
     /// 사용자가 계속을 눌렀다(다음 `continued`에 미룬 다시 부르기를 한다).
     continuing: bool,
-    /// 다시 부를지 정한 뒤 다른 세션에서 다시 알려 온 화면(다른 사이트의 `<iframe>`은 품은 화면을 다시 부르면 새
-    /// 세션으로 열린다). 새 세션은 앞 세션의 소스 번호로 건 중단점을 화면이 돈 뒤에야 걸어 맨 위 코드를 지나치므로,
-    /// 품은 화면을 다시 불렀어도 그 세션에서 한 번 더 다시 연다.
-    recreated: HashSet<String>,
+    /// 다시 부른 화면 → 그때 있던 가장 새 세션의 번호. 다른 사이트의 `<iframe>`은 품은 화면을 다시 부르면 새
+    /// 세션으로 열리는데, 새 세션은 앞 세션의 소스 번호로 건 중단점을 화면이 돈 뒤에야 걸어 맨 위 코드를
+    /// 지나친다. 그래서 이보다 새 세션의 화면은 품은 화면을 다시 불렀어도 따로 다시 연다.
+    reload_marks: HashMap<String, u64>,
 }
 
 impl Default for Pages {
@@ -158,15 +158,16 @@ impl Default for Pages {
             reloads: HashMap::new(),
             deferred: Vec::new(),
             continuing: false,
-            recreated: HashSet::new(),
+            reload_marks: HashMap::new(),
         }
     }
 }
 
 /// CDP 프록시로 따로(UI를 막지 않게) 한 일의 결과. 화면 열쇠와 함께 온다.
 enum PageEvent {
-    /// 화면의 블록들(시작 줄·칸은 1부터, 글): 원래 HTML에서 잘랐거나 브라우저의 디버거에서 받았다.
-    Blocks(String, Result<Vec<(usize, usize, String)>, String>),
+    /// 화면의 블록들(시작 줄·칸은 1부터, 글): 원래 HTML에서 잘랐거나 브라우저의 디버거에서 받았다. 물은 세션과
+    /// 함께 온다.
+    Blocks(String, u64, Result<Vec<(usize, usize, String)>, String>),
     /// 화면을 읽는 중에 멈춰 있어 HTML을 받지 않았다.
     Deferred(String),
     /// 화면을 다 읽었다(다시 불러도 되는지).
@@ -820,7 +821,12 @@ impl Debugger {
             .map_or_else(Vec::new, |pages| pages.events.1.try_iter().collect());
         for event in done {
             match event {
-                PageEvent::Blocks(key, blocks) => notices.extend(self.on_page_blocks(key, blocks)),
+                // 그사이 다른 세션이 다시 알려 왔으면 앞 세션의 글은 버린다(새 세션에 다시 물었다).
+                PageEvent::Blocks(key, owner, blocks) => {
+                    if self.owners.get(&key) == Some(&owner) {
+                        notices.extend(self.on_page_blocks(key, blocks));
+                    }
+                }
                 PageEvent::Deferred(key) => self.defer_page(key),
                 PageEvent::Loaded(key, loaded) => self.on_page_loaded(key, loaded),
                 PageEvent::Reloaded(key, result) => {
@@ -896,11 +902,13 @@ impl Debugger {
                     let key = source_key(&source);
                     if reason != "removed" && is_remote(&source) && key.contains('/') {
                         let previous = self.owners.insert(key.clone(), session);
+                        // 다른 세션이 다시 알려 왔다(다른 사이트의 프레임이 품은 화면과 함께 새로 열렸다). 앞
+                        // 세션은 없어지므로 그 세션에 물은 글·다시 부르기는 버리고 새 세션으로 새로 본다.
                         if previous.is_some_and(|previous| previous != session)
                             && let Some(pages) = &mut self.pages
-                            && pages.reloads.remove(&key).is_some()
                         {
-                            pages.recreated.insert(key.clone());
+                            pages.reloads.remove(&key);
+                            pages.asking.remove(&key);
                         }
                         self.loaded(key, source);
                     }
@@ -1187,7 +1195,7 @@ impl Debugger {
                 Some(blocks) => Ok(blocks),
                 None => cdp::script_blocks(&proxy, &page, &starts),
             };
-            PageEvent::Blocks(key, blocks)
+            PageEvent::Blocks(key, owner, blocks)
         });
     }
 
@@ -1270,16 +1278,17 @@ impl Debugger {
         if !pages.inline.contains_key(key) || pages.reloads.contains_key(key) {
             return;
         }
+        // 그 화면을 알린 세션과 품은 세션들의 프록시가 다 있어야 본다(아직 묻는 중이면 답을 받은 뒤 다시 본다).
         let mut outer = Vec::new();
         let mut ask = Vec::new();
-        for parent in parents {
-            match pages.proxies.entry(parent).or_default() {
-                ProxyState::Ready(proxy) => outer.push(proxy.clone()),
-                ProxyState::Missing => {}
+        for session in owner.into_iter().chain(parents.iter().copied()) {
+            match pages.proxies.entry(session).or_default() {
+                ProxyState::Ready(proxy) if Some(session) != owner => outer.push(proxy.clone()),
+                ProxyState::Ready(_) | ProxyState::Missing => {}
                 ProxyState::Asking(_) => ask.push(None),
                 state @ ProxyState::Unknown => {
                     *state = ProxyState::Asking(Vec::new());
-                    ask.push(Some(parent));
+                    ask.push(Some(session));
                 }
             }
         }
@@ -1287,8 +1296,8 @@ impl Debugger {
             if !pages.checks.iter().any(|k| k == key) {
                 pages.checks.push(key.to_owned());
             }
-            for parent in ask.into_iter().flatten() {
-                self.send(Request::CdpProxy(parent));
+            for session in ask.into_iter().flatten() {
+                self.send(Request::CdpProxy(session));
             }
             return;
         }
@@ -1397,20 +1406,30 @@ impl Debugger {
     /// 멈춰 있으면 사용자가 계속을 누른 뒤에 부른다.
     fn reload_when_ready(&mut self, key: String, target: cdp::Target) {
         let stopped = self.is_stopped();
+        let owner = self.owners.get(&key).copied().unwrap_or_default();
         let Some(pages) = self.pages.as_ref() else {
             return;
         };
-        let ancestor = |state: fn(&Reload) -> bool| {
+        let ancestor = |state: &dyn Fn(&str, &Reload) -> bool| {
             target.ancestors().iter().any(|page| {
                 pages
                     .reloads
                     .iter()
-                    .any(|(other, reload)| shown(other) == *page && state(reload))
+                    .any(|(other, reload)| shown(other) == *page && state(other, reload))
             })
         };
-        if !pages.recreated.contains(&key) && ancestor(|reload| *reload == Reload::Reloaded) {
+        // 품은 화면을 다시 불렀을 때 이 화면의 세션이 이미 있었으면 함께 다시 열렸다. 그 뒤에 열린 세션(다른 사이트의
+        // 프레임이 새 세션으로 다시 열렸다)이면 맨 위 코드를 지나쳤으므로 따로 연다.
+        let reopened = |other: &str, reload: &Reload| {
+            *reload == Reload::Reloaded
+                && pages
+                    .reload_marks
+                    .get(other)
+                    .is_none_or(|&mark| owner <= mark)
+        };
+        if ancestor(&reopened) {
             self.settle(key, Reload::Done);
-        } else if ancestor(Reload::pending) {
+        } else if ancestor(&|_, reload| reload.pending()) {
             self.settle(key, Reload::Waiting(target));
         } else if stopped {
             self.settle(key, Reload::AfterContinue(target));
@@ -1458,6 +1477,10 @@ impl Debugger {
             return;
         };
         let (proxy, reloading) = (proxy.clone(), key.clone());
+        let newest = self.session.as_ref().map(DebugSession::newest_session);
+        if let (Some(pages), Some(newest)) = (self.pages.as_mut(), newest) {
+            pages.reload_marks.insert(key.clone(), newest);
+        }
         self.spawn_cdp(move || {
             let result = cdp::reload(&proxy, &target);
             PageEvent::Reloaded(reloading, result)
@@ -3117,14 +3140,18 @@ mod tests {
     );
 
     /// 다른 사이트 프레임 세션의 가짜 CDP: 트리는 그 프레임(`frame`)에서 시작하고 품은 프레임(top)을 `parentId`로
-    /// 안다. 원래 HTML은 주지 않아 블록 글(`text`)은 디버거에서 준다.
+    /// 안다. 원래 HTML은 주지 않아 블록 글(`text`)은 디버거에서 준다. 트리는 `delay` 뒤에 준다(느린 세션).
     fn cross_frame_cdp(
         frame: &'static str,
         text: &'static str,
+        delay: Duration,
     ) -> (u16, std::sync::mpsc::Receiver<String>) {
         fake_cdp_with(move |method, params| match method {
-            "Page.getFrameTree" => json!({ "frameTree": { "frame": {
-                "id": frame, "parentId": "top", "url": "http://localhost:8080/app/frag.do" } } }),
+            "Page.getFrameTree" => {
+                thread::sleep(delay);
+                json!({ "frameTree": { "frame": {
+                    "id": frame, "parentId": "top", "url": "http://localhost:8080/app/frag.do" } } })
+            }
             "Runtime.evaluate" if params["expression"] == "document.readyState" => {
                 json!({ "result": { "type": "string", "value": "complete" } })
             }
@@ -3142,8 +3169,9 @@ mod tests {
 
     /// 맨 위 화면(list.do, 페이지 세션)이 다른 사이트의 화면(localhost의 frag.do)을 `<iframe>`으로 보이는 시험.
     /// 두 화면 모두 블록 하나(화면 2줄)를 JSP에서 받았고, `breakpoints`로 고른 JSP(화면 3줄 = JSP 3줄)에 중단점을
-    /// 건다. 맨 위 화면을 다시 부르면 프레임이 새 세션(프레임 far2)으로 다시 열린다.
-    fn start_cross_site(name: &str, breakpoints: &[&str]) -> CrossSite {
+    /// 건다. 맨 위 화면을 다시 부르면 프레임이 새 세션(프레임 far2)으로 다시 열린다. `slow`면 처음 프레임 세션의
+    /// CDP가 느려 그 프레임을 맞추는 중에 맨 위 화면을 다시 부른다.
+    fn start_cross_site(name: &str, breakpoints: &[&str], slow: bool) -> CrossSite {
         let root = std::env::temp_dir().join(format!("ferrite-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let jsp = root.join("src/main/webapp/WEB-INF/jsp/board");
@@ -3184,8 +3212,9 @@ mod tests {
             // 페이지 세션은 다른 사이트 프레임의 블록을 모른다(여기로 물으면 틀린 것이다).
             other => panic!("페이지 세션에 물음: {other}"),
         });
-        let (frame_cdp, frame_methods) = cross_frame_cdp("far", FRAG);
-        let (again_cdp, again_methods) = cross_frame_cdp("far2", FRAG);
+        let delay = Duration::from_millis(if slow { 1500 } else { 0 });
+        let (frame_cdp, frame_methods) = cross_frame_cdp("far", FRAG, delay);
+        let (again_cdp, again_methods) = cross_frame_cdp("far2", FRAG, Duration::ZERO);
         let frame_block = || {
             vec![(
                 source("localhost\u{a789}8080/app/frag.do\u{a789}2:9", 5),
@@ -3245,7 +3274,7 @@ mod tests {
     #[test]
     fn js_debug에서_다른_사이트_iframe은_그_세션의_cdp로_맞추고_그_프레임만_다시_연다() {
         let (mut debugger, root, top_methods, frame_methods, _) =
-            start_cross_site("cross-frame", &["frag.jsp"]);
+            start_cross_site("cross-frame", &["frag.jsp"], false);
         let (mut top_seen, mut frame_seen) = (Vec::new(), Vec::new());
         pump(&mut debugger, "프레임을 다시 열지 않음", |_| {
             top_seen.extend(top_methods.try_iter());
@@ -3277,7 +3306,7 @@ mod tests {
     fn js_debug에서_다른_사이트_iframe을_품은_화면을_다시_부르면_새_세션에서_그_프레임을_한_번_더_연다()
      {
         let (mut debugger, root, top_methods, frame_methods, again_methods) =
-            start_cross_site("cross-both", &["list.jsp", "frag.jsp"]);
+            start_cross_site("cross-both", &["list.jsp", "frag.jsp"], false);
         let (mut top_seen, mut again_seen) = (Vec::new(), Vec::new());
         // 맨 위 화면을 다시 부르면 그 안의 프레임도 다시 열리므로, 앞 세션의 프레임은 따로 열지 않는다.
         pump(
@@ -3318,6 +3347,51 @@ mod tests {
             .filter(|m| m.starts_with("Page.navigate"))
             .count();
         assert_eq!(navigated, 1, "{again_seen:?}");
+        debugger.shutdown();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn js_debug에서_다른_사이트_iframe을_맞추는_중에_품은_화면을_다시_불러도_새_세션에서_그_프레임을_연다()
+     {
+        // 실제 js-debug에서 본 차례: 프레임 세션에 글을 묻는 동안 맨 위 화면을 다시 불러 프레임이 새 세션으로 열린다.
+        // 앞 세션의 늦은 답은 버리고 새 세션에 바로 묻고, 새 세션의 프록시를 받은 뒤 다시 열지 정한다("CDP 프록시가
+        // 없다"고 그만두지 않는다).
+        let (mut debugger, root, top_methods, frame_methods, again_methods) =
+            start_cross_site("cross-slow", &["list.jsp", "frag.jsp"], true);
+        let (mut top_seen, mut again_seen) = (Vec::new(), Vec::new());
+        pump(
+            &mut debugger,
+            "새 세션에서 프레임을 다시 열지 않음",
+            |_| {
+                top_seen.extend(top_methods.try_iter());
+                again_seen.extend(again_methods.try_iter());
+                again_seen.iter().any(|m| m == "Page.navigate far2")
+            },
+        );
+        assert!(top_seen.iter().any(|m| m == "Page.reload"), "{top_seen:?}");
+        // 앞 세션의 늦은 답이 와도 다시 맞추거나 다시 열지 않는다.
+        let until = Instant::now() + Duration::from_millis(2000);
+        while Instant::now() < until {
+            debugger.poll();
+            again_seen.extend(again_methods.try_iter());
+            thread::sleep(Duration::from_millis(10));
+        }
+        let frame_seen: Vec<String> = frame_methods.try_iter().collect();
+        assert!(
+            !frame_seen.iter().any(|m| m.starts_with("Page.navigate")),
+            "{frame_seen:?}"
+        );
+        let navigated = again_seen
+            .iter()
+            .filter(|m| m.starts_with("Page.navigate"))
+            .count();
+        assert_eq!(navigated, 1, "{again_seen:?}");
+        assert!(
+            !debugger.console.contains("CDP 프록시가 없습니다"),
+            "{}",
+            debugger.console
+        );
         debugger.shutdown();
         let _ = std::fs::remove_dir_all(&root);
     }
