@@ -140,7 +140,22 @@ fn locals_at_breakpoint(
         &mut session,
         &|e| matches!(e, DebugEvent::Response { command, .. } if command == "variables"),
     )));
-    // 이어 가고, 프로그램이 도는 동안(예제는 끝에서 몇 초 쉰다) 프레임 없이 식을 보내 본다(탐색: 실행 중 식).
+    // 디버그 출력의 식: 멈춘 자리에서 계산한다(codelldb는 REPL 문맥이면 LLDB 명령으로 읽어 감시 식 문맥으로 보낸다).
+    let sum = if adapter_id == "php-debug" {
+        "$a + $b"
+    } else {
+        "a + b"
+    };
+    session.evaluate(sum, Some(frames[0].id));
+    let value = response(wait(
+        &mut session,
+        &|e| matches!(e, DebugEvent::Response { command, .. } if command == "evaluate"),
+    ));
+    assert_eq!(
+        value["result"], "42",
+        "{adapter_id} 멈춘 자리의 식: {value}"
+    );
+    // 이어 가고, 프로그램이 도는 동안(예제는 끝에서 몇 초 쉰다) 프레임 없이 식을 보낸다.
     // 한 줄에 걸 자리가 여럿이면(Rust의 println! 펼침) 다시 멈출 수 있어 그때마다 이어 간다.
     session.resume(thread);
     let mut ended = false;
@@ -162,6 +177,8 @@ fn locals_at_breakpoint(
     while !ended && Instant::now() < settle {
         step(&mut session, &mut ended);
     }
+    // 실행 중(프레임 없이): js-debug·debugpy만 계산하고 나머지는 멈춰 있어야 한다는 오류로 답한다(앱은 그 어댑터면
+    // 실행 중에 식 칸을 쓰지 못하게 한다).
     let probe = session.evaluate("1 + 2", None);
     let mut running = None;
     let deadline = Instant::now() + Duration::from_secs(30);
@@ -174,7 +191,16 @@ fn locals_at_breakpoint(
             }
         }
     }
-    eprintln!("[{adapter_id}] 실행 중 식(1 + 2): {running:?} (끝남: {ended})");
+    let running = running.expect("실행 중에 보낸 식의 답");
+    if adapters::evaluates_while_running(adapter_id) {
+        assert_eq!(
+            running.as_ref().map(|v| v["result"].clone()),
+            Ok(json!("3")),
+            "{adapter_id}"
+        );
+    } else {
+        assert!(running.is_err(), "{adapter_id}: {running:?}");
+    }
     let deadline = Instant::now() + Duration::from_secs(60);
     while !ended && Instant::now() < deadline {
         step(&mut session, &mut ended);
