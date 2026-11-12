@@ -108,6 +108,15 @@ fn 명령으로_테스트_도구를_알아낸다() {
     assert_eq!(Tool::of("mvn package"), None, "테스트 명령이 아니다");
     assert_eq!(Tool::of("gradlew.bat test"), Some(Tool::Gradle));
     assert_eq!(Tool::of("gradle bootRun"), None);
+    // 이름이 test로 끝나는 작업과 check. `-x test`는 테스트를 빼는 것이다.
+    assert_eq!(Tool::of("gradle integrationTest"), Some(Tool::Gradle));
+    assert_eq!(
+        Tool::of("./gradlew :app:test --offline"),
+        Some(Tool::Gradle)
+    );
+    assert_eq!(Tool::of("gradle build"), None, "테스트를 거치기만 한다");
+    assert_eq!(Tool::of("gradle check"), Some(Tool::Gradle));
+    assert_eq!(Tool::of("gradle assemble -x test"), None);
     assert_eq!(Tool::of("python -m pytest -q"), Some(Tool::Pytest));
     assert_eq!(Tool::of("pytest tests"), Some(Tool::Pytest));
     assert_eq!(Tool::of("ctest --test-dir build"), Some(Tool::Ctest));
@@ -369,6 +378,82 @@ fn maven_통합_테스트는_failsafe_보고서로_가리고_it_test로_다시_�
 }
 
 #[test]
+fn gradle_보고서의_작업을_읽고_실패한_작업마다_다시_돌린다() {
+    // `<프로젝트>/build/test-results/<작업>`: 프로젝트 경로는 settings.gradle이 있는 루트에서 센다.
+    let root = std::env::temp_dir().join(format!("ferrite-gradle-tasks-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("settings.gradle.kts"), "include(\"app\")").unwrap();
+    let write = |dir: &Path, suite: &str, names: &[&str]| {
+        std::fs::create_dir_all(dir).unwrap();
+        let cases: String = names
+            .iter()
+            .map(|name| {
+                format!(
+                    "<testcase name=\"{name}()\" classname=\"com.example.board.{suite}\"><failure message=\"틀림\"/></testcase>"
+                )
+            })
+            .collect();
+        let file = dir.join(format!("TEST-com.example.board.{suite}.xml"));
+        std::fs::write(
+            &file,
+            format!("<testsuite name=\"com.example.board.{suite}\">{cases}</testsuite>"),
+        )
+        .unwrap();
+        read_report(&file).unwrap()
+    };
+    let unit = write(
+        &root.join("app/build/test-results/test"),
+        "CalcTest",
+        &["addsWrong"],
+    );
+    let it = write(
+        &root.join("app/build/test-results/integrationTest"),
+        "BoardIT",
+        &["savesWrong", "listsWrong"],
+    );
+    let top = write(
+        &root.join("build/test-results/test"),
+        "RootTest",
+        &["checksWrong"],
+    );
+    assert!(unit.iter().all(|c| c.task.as_deref() == Some(":app:test")));
+    assert!(
+        it.iter()
+            .all(|c| c.task.as_deref() == Some(":app:integrationTest"))
+    );
+    assert_eq!(top[0].task.as_deref(), Some(":test"));
+    // Maven의 보고서나 다른 폴더의 것은 작업이 없다.
+    let maven = write(&root.join("target/surefire-reports"), "MavenTest", &["x"]);
+    assert_eq!(maven[0].task, None);
+    std::fs::remove_dir_all(&root).unwrap();
+
+    // `check`는 `--tests`를 받지 못한다. 작업 이름과 옛 `--tests`는 빼고 옵션은 둔 채 작업마다 붙인다.
+    let both: Vec<&Case> = unit.iter().chain(&it).collect();
+    assert_eq!(
+        rerun(
+            Tool::Gradle,
+            "gradlew --offline check -x lint --tests Old --continue",
+            &both
+        )
+        .unwrap(),
+        "gradlew --offline -x lint --continue :app:test --tests \"com.example.board.CalcTest.addsWrong\" :app:integrationTest --tests \"com.example.board.BoardIT.savesWrong\" --tests \"com.example.board.BoardIT.listsWrong\""
+    );
+    let only_it: Vec<&Case> = it.iter().collect();
+    assert_eq!(
+        rerun(Tool::Gradle, "gradle -p backend check", &only_it).unwrap(),
+        "gradle -p backend :app:integrationTest --tests \"com.example.board.BoardIT.savesWrong\" --tests \"com.example.board.BoardIT.listsWrong\""
+    );
+    // 작업을 모르는 것이 섞이면 예전대로 명령에 붙인다.
+    let gradle = parse_junit(GRADLE).unwrap();
+    let mixed: Vec<&Case> = vec![&it[0], &gradle[1]];
+    assert_eq!(
+        rerun(Tool::Gradle, "gradle test", &mixed).unwrap(),
+        "gradle test --tests \"com.example.board.BoardIT.savesWrong\" --tests \"com.example.board.CalcTest.addsWrong\""
+    );
+}
+
+#[test]
 fn 이번_실행의_보고서를_찾고_스택의_파일을_프로젝트에서_찾는다() {
     let root = std::env::temp_dir().join(format!("ferrite-test-report-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
@@ -433,6 +518,7 @@ fn kotlin_scala_스택의_테스트_줄을_찾는다() {
         file: None,
         line: None,
         integration: false,
+        task: None,
     };
     // Kotlin 백틱 이름은 빈칸이 들고, 그 안의 람다는 클래스 이름에도 든다.
     let kotlin = failed(

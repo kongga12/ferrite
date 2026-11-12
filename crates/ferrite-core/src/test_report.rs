@@ -36,7 +36,7 @@ impl Tool {
         let has = |word: &str| words.iter().any(|w| w == word);
         match program.as_str() {
             "mvn" | "mvnw" if has("test") || has("verify") => Some(Tool::Maven),
-            "gradle" | "gradlew" if has("test") || has("check") => Some(Tool::Gradle),
+            "gradle" | "gradlew" if gradle_runs_tests(&words) => Some(Tool::Gradle),
             "pytest" => Some(Tool::Pytest),
             _ if words.windows(2).any(|w| w[0] == "-m" && w[1] == "pytest") => Some(Tool::Pytest),
             "ctest" => Some(Tool::Ctest),
@@ -72,6 +72,9 @@ pub struct Case {
     /// Maven Failsafe가 돌린 통합 테스트(`failsafe-reports`의 보고서). 실패만 다시 돌릴 때 Surefire의
     /// `-Dtest`가 아니라 `-Dit.test`로 거른다.
     pub integration: bool,
+    /// 이 테스트를 돌린 Gradle 테스트 작업(`:app:test`, `:app:integrationTest`). 보고서 폴더
+    /// (`<프로젝트>/build/test-results/<작업>`)에서 읽는다. 실패만 다시 돌릴 때 그 작업에 `--tests`를 붙인다.
+    pub task: Option<String>,
 }
 
 /// Go 패키지 자체가 실패했을 때(빌드 실패 등)의 이름.
@@ -157,6 +160,7 @@ pub fn parse_junit(xml: &str) -> Result<Vec<Case>, String> {
             file: node.attribute("file").map(str::to_owned),
             line: node.attribute("line").and_then(|l| l.parse().ok()),
             integration: false,
+            task: None,
         });
     }
     Ok(cases)
@@ -217,6 +221,7 @@ pub fn parse_go_json(output: &str) -> Vec<Case> {
                         file: None,
                         line: None,
                         integration: false,
+                        task: None,
                     });
                 }
                 _ => {}
@@ -267,6 +272,7 @@ pub fn parse_go_json(output: &str) -> Vec<Case> {
                     file: None,
                     line: None,
                     integration: false,
+                    task: None,
                 });
             }
             _ => {}
@@ -416,7 +422,8 @@ pub fn enable_tests(pom: &str) -> Option<String> {
     Some(format!("{}{}", &pom[..cut.start], &pom[cut.end..]))
 }
 
-/// 보고서 파일 하나(JUnit XML)를 읽는다. Maven Failsafe의 보고서(`failsafe-reports`)면 통합 테스트로 적는다.
+/// 보고서 파일 하나(JUnit XML)를 읽는다. Maven Failsafe의 보고서(`failsafe-reports`)면 통합 테스트로 적고,
+/// Gradle의 보고서(`<프로젝트>/build/test-results/<작업>`)면 그것을 돌린 작업을 적는다.
 pub fn read_report(path: &Path) -> Result<Vec<Case>, String> {
     let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
     let mut cases = parse_junit(&String::from_utf8_lossy(&bytes))?;
@@ -424,10 +431,116 @@ pub fn read_report(path: &Path) -> Result<Vec<Case>, String> {
         .parent()
         .and_then(Path::file_name)
         .is_some_and(|dir| dir == "failsafe-reports");
+    let task = gradle_task(path);
     for case in &mut cases {
         case.integration = integration;
+        case.task.clone_from(&task);
     }
     Ok(cases)
+}
+
+/// Gradle 보고서(`<프로젝트>/build/test-results/<작업>/TEST-….xml`)를 남긴 작업의 경로(`:app:test`, 루트
+/// 프로젝트면 `:test`). 빌드의 루트는 위로 가장 가까운 `settings.gradle(.kts)`가 있는 폴더(없으면 그 프로젝트)이고,
+/// 프로젝트 경로는 루트에서 그 폴더까지의 폴더 이름이다(설정에서 프로젝트 이름·폴더를 따로 정한 빌드는 맞지 않을
+/// 수 있다).
+fn gradle_task(path: &Path) -> Option<String> {
+    let task_dir = path.parent()?;
+    let results = task_dir.parent()?;
+    let build = results.parent()?;
+    if results.file_name()? != "test-results" || build.file_name()? != "build" {
+        return None;
+    }
+    let project_dir = build.parent()?;
+    let root = project_dir
+        .ancestors()
+        .find(|dir| {
+            ["settings.gradle", "settings.gradle.kts"]
+                .iter()
+                .any(|f| dir.join(f).is_file())
+        })
+        .unwrap_or(project_dir);
+    let project = project_dir.strip_prefix(root).ok()?;
+    let mut task = String::new();
+    for part in project.components() {
+        task.push(':');
+        task.push_str(&part.as_os_str().to_string_lossy());
+    }
+    task.push(':');
+    task.push_str(&task_dir.file_name()?.to_string_lossy());
+    Some(task)
+}
+
+/// Gradle 명령이 테스트를 돌리는지: `check`, 또는 이름이 `test`로 끝나는 작업
+/// (`integrationTest`, `:app:test`). 옵션의 값(`-x test`)은 작업이 아니다. `build`는 테스트를 거치기만 하므로 Maven의
+/// `install`처럼 보지 않는다(자동 감지한 `gradle build`가 테스트 창의 기본 구성이 되지 않게).
+fn gradle_runs_tests(words: &[String]) -> bool {
+    gradle_tasks(words).any(|task| {
+        let name = task.rsplit(':').next().unwrap_or(task);
+        name == "check" || name.ends_with("test")
+    })
+}
+
+/// 값을 다음 낱말로 받는 Gradle 옵션.
+const GRADLE_OPTIONS_WITH_VALUE: &[&str] = &[
+    "-p",
+    "--project-dir",
+    "-c",
+    "--settings-file",
+    "-I",
+    "--init-script",
+    "-g",
+    "--gradle-user-home",
+    "-x",
+    "--exclude-task",
+    "--console",
+    "--warning-mode",
+    "--include-build",
+    "--project-cache-dir",
+    "--priority",
+    "--tests",
+];
+
+/// 명령의 낱말(첫 낱말은 프로그램)에서 작업 이름들. 옵션과 그 값은 뺀다.
+fn gradle_tasks(words: &[String]) -> impl Iterator<Item = &str> {
+    let mut takes_value = false;
+    words.iter().skip(1).filter_map(move |word| {
+        let word = word.as_str();
+        if std::mem::take(&mut takes_value) {
+            return None;
+        }
+        if word.starts_with('-') {
+            takes_value = GRADLE_OPTIONS_WITH_VALUE.contains(&word);
+            return None;
+        }
+        Some(word)
+    })
+}
+
+/// Gradle 명령에서 작업 이름과 이미 있던 `--tests`(그 값까지)를 뺀 것: 프로그램과 옵션.
+fn gradle_without_tasks(command: &str) -> String {
+    let mut kept = Vec::new();
+    let mut words = command.split_whitespace();
+    if let Some(program) = words.next() {
+        kept.push(program);
+    }
+    let mut value_of: Option<&str> = None;
+    for word in words {
+        if let Some(option) = value_of.take() {
+            if option != "--tests" {
+                kept.push(word);
+            }
+            continue;
+        }
+        if word.starts_with('-') {
+            if GRADLE_OPTIONS_WITH_VALUE.contains(&word) {
+                value_of = Some(word);
+            }
+            if word != "--tests" && !word.starts_with("--tests=") {
+                kept.push(word);
+            }
+        }
+    }
+    kept.join(" ")
 }
 
 /// 이번 실행이 남긴 보고서 파일(`since` 뒤에 고친 것). Maven은 `target/surefire-reports`·
@@ -542,6 +655,29 @@ pub fn rerun(tool: Tool, command: &str, failed: &[&Case]) -> Option<String> {
                 ));
             } else if runs_integration_tests(command) {
                 line.push_str(" -DskipITs");
+            }
+            line
+        }
+        // 보고서가 알려 준 작업마다 `--tests`를 붙인다. `check`·`build`는 테스트 작업이 아니라 `--tests`를 받지
+        // 못하고("Unknown command-line option"), 작업 이름만으로는 다른 테스트 작업(`integrationTest`)의 것을 거르지
+        // 못한다. 명령의 작업 이름은 빼고 옵션은 둔다. 작업을 모르는 것이 있으면 명령에 그대로 붙인다.
+        Tool::Gradle if failed.iter().all(|case| case.task.is_some()) => {
+            let mut tasks: Vec<(&str, Vec<String>)> = Vec::new();
+            for case in failed {
+                let task = case.task.as_deref().unwrap_or_default();
+                let test = format!("{}.{}", case.suite, method(&case.name));
+                match tasks.iter_mut().find(|(t, _)| *t == task) {
+                    Some((_, tests)) if !tests.contains(&test) => tests.push(test),
+                    Some(_) => {}
+                    None => tasks.push((task, vec![test])),
+                }
+            }
+            let mut line = gradle_without_tasks(command);
+            for (task, tests) in tasks {
+                line.push_str(&format!(" {task}"));
+                for test in tests {
+                    line.push_str(&format!(" --tests \"{test}\""));
+                }
             }
             line
         }
