@@ -162,11 +162,17 @@ fn page_proxy(
                 assert!(params["frameId"] == "child" || params["frameId"] == "grand");
                 json!({ "executionContextId": 7 })
             }
-            "Runtime.evaluate" if params["expression"] == "document.readyState" => {
+            "Runtime.evaluate"
+                if params["expression"] == format!("document.readyState{HIDDEN}") =>
+            {
                 let n = asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 json!({ "result": { "type": "string", "value": states[n.min(states.len() - 1)] } })
             }
             "Runtime.evaluate" => {
+                assert!(
+                    params["expression"].as_str().unwrap().ends_with(HIDDEN),
+                    "{params}"
+                );
                 // 프레임이 처음 주소를 보이는지는 그 프레임의 문서에서 묻는다.
                 assert_eq!(params["contextId"], 7);
                 assert!(
@@ -377,11 +383,14 @@ fn session_proxy(tree: Value, shown: bool) -> SessionProxy {
         let result = match request["method"].as_str().unwrap() {
             "Page.getFrameTree" => json!({ "frameTree": tree }),
             "Page.createIsolatedWorld" => json!({ "executionContextId": 9 }),
-            "Runtime.evaluate" if params["expression"] == "document.readyState" => {
+            "Runtime.evaluate"
+                if params["expression"] == format!("document.readyState{HIDDEN}") =>
+            {
                 json!({ "result": { "type": "string", "value": "complete" } })
             }
             "Runtime.evaluate" => {
                 let expression = params["expression"].as_str().unwrap();
+                assert!(expression.ends_with(HIDDEN), "{expression}");
                 // 다른 사이트의 프레임에서는 `frameElement`를 읽을 수 없다.
                 assert!(!expression.contains("frameElement"), "{expression}");
                 assert_eq!(params["contextId"], 9);

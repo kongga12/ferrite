@@ -63,6 +63,12 @@ fn is_remote(source: &Source) -> bool {
             .is_some_and(|p| p.is_absolute() && p.is_file())
 }
 
+/// 식 칸에 친 식으로 만든 스크립트. js-debug는 식에 `eval-….repl` 주소를 붙여 "repl"이란 이름으로 알린다
+/// (js-debug 1.140.0). 화면이 불러온 스크립트가 아니라 "화면 스크립트" 목록에서 뺀다.
+fn is_console_input(source: &Source) -> bool {
+    source.name.as_deref() == Some("repl")
+}
+
 /// 어댑터가 준 소스 이름을 보일 글. js-debug는 경로에 쓸 수 없는 `:` 대신 `꞉`(U+A789)을 쓰는데 글꼴에 없다.
 fn shown(name: &str) -> String {
     name.replace('\u{a789}', ":")
@@ -1080,7 +1086,9 @@ impl Debugger {
                 for source in types::sources(&body).into_iter().filter(is_remote) {
                     let key = source_key(&source);
                     self.owners.entry(key.clone()).or_insert(owner);
-                    if !self.scripts.iter().any(|s| source_key(s) == key) {
+                    if !is_console_input(&source)
+                        && !self.scripts.iter().any(|s| source_key(s) == key)
+                    {
                         self.scripts.push(source);
                     }
                 }
@@ -2190,7 +2198,9 @@ mod tests {
                                     "frame": { "id": "child", "url": "http://127.0.0.1:8080/app/detail.do" },
                                     "childFrames": [{ "frame": {
                                         "id": "grand", "url": "http://127.0.0.1:8080/app/inner.do" } }] }] } }),
-            "Runtime.evaluate" if params["expression"] == "document.readyState" => {
+            "Runtime.evaluate"
+                if params["expression"] == format!("document.readyState{}", cdp::HIDDEN) =>
+            {
                 json!({ "result": { "type": "string", "value": "complete" } })
             }
             "Runtime.evaluate" => {
@@ -3370,7 +3380,9 @@ mod tests {
                 json!({ "frameTree": { "frame": {
                     "id": frame, "parentId": "top", "url": "http://localhost:8080/app/frag.do" } } })
             }
-            "Runtime.evaluate" if params["expression"] == "document.readyState" => {
+            "Runtime.evaluate"
+                if params["expression"] == format!("document.readyState{}", cdp::HIDDEN) =>
+            {
                 json!({ "result": { "type": "string", "value": "complete" } })
             }
             "Page.createIsolatedWorld" => json!({ "executionContextId": 9 }),
@@ -3413,7 +3425,9 @@ mod tests {
         let (top_cdp, top_methods) = fake_cdp_with(move |method, params| match method {
             "Page.getFrameTree" => json!({ "frameTree": { "frame": {
                 "id": "top", "url": "http://127.0.0.1:8080/app/list.do" } } }),
-            "Runtime.evaluate" if params["expression"] == "document.readyState" => {
+            "Runtime.evaluate"
+                if params["expression"] == format!("document.readyState{}", cdp::HIDDEN) =>
+            {
                 json!({ "result": { "type": "string", "value": "complete" } })
             }
             "Runtime.evaluate" => json!({ "result": { "type": "boolean", "value": true } }),
@@ -3639,7 +3653,9 @@ mod tests {
         let (top_cdp, _) = fake_cdp_with(|method, params| match method {
             "Page.getFrameTree" => json!({ "frameTree": { "frame": {
                 "id": "top", "url": "http://127.0.0.1:8080/app/list.do" } } }),
-            "Runtime.evaluate" if params["expression"] == "document.readyState" => {
+            "Runtime.evaluate"
+                if params["expression"] == format!("document.readyState{}", cdp::HIDDEN) =>
+            {
                 json!({ "result": { "type": "string", "value": "complete" } })
             }
             "Page.getNavigationHistory" => json!({ "currentIndex": 0, "entries": [
@@ -3735,10 +3751,14 @@ mod tests {
         let address = fake_js_debug_nested(
             vec![
                 (
-                    vec![(
-                        source("127.0.0.1\u{a789}8080/app/list.do\u{a789}2:9", 5),
-                        LIST,
-                    )],
+                    vec![
+                        (
+                            source("127.0.0.1\u{a789}8080/app/list.do\u{a789}2:9", 5),
+                            LIST,
+                        ),
+                        // 식 칸에 친 식(화면이 불러온 스크립트가 아니다).
+                        (source("repl", 9), "1 + 2\n//# sourceURL=eval-1.repl\n"),
+                    ],
                     0,
                     None,
                 ),
@@ -3776,7 +3796,7 @@ mod tests {
         pump(
             &mut debugger,
             "두 세션이 화면을 알리지 않음",
-            |d| d.owners.len() == 2,
+            |d| d.owners.len() == 3,
         );
         debugger.ask_scripts();
         pump(

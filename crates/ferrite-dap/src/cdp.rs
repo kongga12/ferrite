@@ -342,6 +342,11 @@ pub fn reload(proxy: &Proxy, target: &Target) -> Result<(), String> {
     }
 }
 
+/// Ferrite가 화면에서 돌리는 식(`Runtime.evaluate`) 끝에 붙이는 주소. js-debug는 주소가 `.cdp`로 끝나는
+/// 스크립트를 알리지 않는다(자기 식에 쓰는 약속). 없으면 식마다 `<eval>/VM…` 스크립트로 알려 "화면 스크립트"
+/// 목록에 남는다(js-debug 1.140.0으로 확인).
+pub const HIDDEN: &str = "\n//# sourceURL=ferrite.cdp";
+
 /// 주소에서 스킴과 `#` 뒤를 뺀 것.
 fn bare(url: &str) -> &str {
     let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
@@ -416,7 +421,12 @@ impl Socket {
     }
 
     /// CDP 명령 하나를 보내고 그 답의 `result`를 돌려준다(그 사이에 온 다른 메시지는 버린다).
-    fn call(&mut self, id: u64, method: &str, params: Value) -> Result<Value, String> {
+    fn call(&mut self, id: u64, method: &str, mut params: Value) -> Result<Value, String> {
+        if method == "Runtime.evaluate"
+            && let Some(expression) = params["expression"].as_str()
+        {
+            params["expression"] = format!("{expression}{HIDDEN}").into();
+        }
         let request = json!({ "id": id, "method": method, "params": params });
         self.send(0x1, request.to_string().as_bytes())?;
         loop {

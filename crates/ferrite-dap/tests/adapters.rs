@@ -1430,6 +1430,33 @@ fn js_debug로_cdp_프록시로_화면을_다시_불러_맨_위_코드에서_멈
         cdp::page_loaded(&proxy, &page, Duration::from_secs(10), &[]).unwrap(),
         cdp::Loaded::Reload(cdp::Target::Top)
     );
+    // 화면을 다 읽었는지 본 식(`document.readyState`)은 스크립트(`<eval>/VM…`)로 남지 않는다(화면 스크립트
+    // 목록에 나오지 않는다). 화면이 스스로 `eval`한 스크립트는 남는다.
+    assert!(cdp::wait_loaded(&proxy, Duration::from_secs(10)).unwrap());
+    session.request("loadedSources", json!({}));
+    let sources = types::sources(&response(wait(
+        &mut session,
+        &|e| matches!(e, DebugEvent::Response { command, .. } if command == "loadedSources"),
+    )));
+    for source in sources
+        .iter()
+        .filter(|s| s.name.as_deref().is_some_and(|n| n.starts_with("<eval>")))
+    {
+        let reference = source.source_reference;
+        session.request(
+            "source",
+            json!({ "source": { "sourceReference": reference }, "sourceReference": reference }),
+        );
+        let content = response(wait(
+            &mut session,
+            &|e| matches!(e, DebugEvent::Response { command, .. } if command == "source"),
+        ));
+        let content = content["content"].as_str().unwrap_or_default();
+        assert!(
+            !content.contains("readyState"),
+            "Ferrite의 식이 남음: {content}"
+        );
+    }
     // 2) 맨 위 코드(`var count = 0;`, 화면 12줄)는 이미 돌았다. 화면 줄로 걸고 다시 부르면 거기서 멈춘다.
     let blocks = page_lines::scripts_at(FRAG_PAGE, &starts).expect("블록");
     let local = project.join("frag.do.js");
