@@ -610,6 +610,53 @@ const GRADLE_EXECUTOR_EXITED: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 </testsuite>"#;
 
 #[test]
+fn gradle_설정이_폴더를_적은_프로젝트와_품은_빌드는_그_경로로_작업을_적는다() {
+    let root = std::env::temp_dir().join(format!("ferrite-gradle-dirs-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("lib")).unwrap();
+    // 바깥 빌드(Kotlin DSL): app은 modules/application에 있고 lib를 품는다. 주석으로 막은 줄은 보지 않는다.
+    std::fs::write(
+        root.join("settings.gradle.kts"),
+        "rootProject.name = \"board\"\ninclude(\"app\", \"web\")\nproject(\":app\").projectDir = file(\"modules/application\")\n  // project(\":web\").projectDir = file(\"modules/web\")\n/* includeBuild(\"old\")\n */\nincludeBuild(\"lib\")\n",
+    )
+    .unwrap();
+    // 품은 빌드(Groovy DSL, MS949 주석): core는 폴더 이름 그대로, api는 다른 폴더.
+    let mut groovy = b"// \xb8\xf0\xb5\xe2\n".to_vec();
+    groovy.extend_from_slice(
+        b"rootProject.name = 'libroot'\ninclude 'core', 'api'\nproject('api').projectDir = new File(settingsDir, 'services/../services/api')\n",
+    );
+    std::fs::write(root.join("lib/settings.gradle"), groovy).unwrap();
+    std::fs::create_dir_all(root.join("old")).unwrap();
+    std::fs::write(root.join("old/settings.gradle"), "").unwrap();
+    let task = |dir: &str| {
+        let report = root.join(dir).join("build/test-results/test");
+        std::fs::create_dir_all(&report).unwrap();
+        let file = report.join("TEST-demo.T.xml");
+        std::fs::write(
+            &file,
+            "<testsuite name=\"demo.T\"><testcase name=\"t\" classname=\"demo.T\"/></testsuite>",
+        )
+        .unwrap();
+        read_report(&file).unwrap()[0]
+            .task
+            .clone()
+            .unwrap_or_default()
+    };
+    assert_eq!(task("modules/application"), ":app:test");
+    assert_eq!(task("web"), ":web:test");
+    assert_eq!(
+        task("modules/web"),
+        ":modules:web:test",
+        "주석의 폴더는 보지 않는다"
+    );
+    assert_eq!(task("lib/core"), ":lib:core:test");
+    assert_eq!(task("lib/services/api"), ":lib:api:test");
+    assert_eq!(task("lib"), ":lib:test");
+    assert_eq!(task("old"), ":test", "주석으로 막은 품은 빌드는 따로 돈다");
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
 fn 한글_경로에서_gradle이_테스트_클래스를_찾지_못한_것을_알아본다() {
     let cases = parse_junit(GRADLE_CLASS_NOT_FOUND).unwrap();
     let korean = Path::new(r"C:\Users\me\자바 게시판");

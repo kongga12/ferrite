@@ -644,6 +644,96 @@ fn gradle_통합_테스트_작업도_돌리고_작업마다_실패만_다시() {
 }
 
 #[test]
+#[ignore = "Gradle로 JUnit 5 테스트를 돌린다(의존성을 받는다). Java 17 이상과 gradle이 필요하다"]
+fn gradle_설정이_폴더를_바꾼_프로젝트와_품은_빌드의_실패만_다시() {
+    if !require("gradle --version") {
+        return;
+    }
+    // app은 modules/application에 있고(설정이 폴더를 적었다), lib(품은 빌드, Groovy DSL)의 core도 루트에서 돌린다.
+    let root = temp_dir("gradle-dirs");
+    let build = "plugins {\n    id 'java'\n}\n\nrepositories {\n    mavenCentral()\n}\n\ndependencies {\n    testImplementation 'org.junit.jupiter:junit-jupiter:5.11.4'\n    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'\n}\n\ntest {\n    useJUnitPlatform()\n}\n";
+    let files = [
+        (
+            "settings.gradle.kts",
+            "rootProject.name = \"board\"\ninclude(\"app\")\nproject(\":app\").projectDir = file(\"modules/application\")\nincludeBuild(\"lib\")\n".to_owned(),
+        ),
+        ("gradle.properties", "org.gradle.daemon=false\n".to_owned()),
+        ("modules/application/build.gradle", build.to_owned()),
+        ("lib/settings.gradle", "rootProject.name = 'libroot'\ninclude 'core'\n".to_owned()),
+        ("lib/core/build.gradle", build.to_owned()),
+    ];
+    for (file, text) in files {
+        let path = root.join(file);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+    for (dir, class) in [("modules/application", "AppTest"), ("lib/core", "CoreTest")] {
+        let java = root.join(dir).join("src/test/java/demo");
+        std::fs::create_dir_all(&java).unwrap();
+        std::fs::write(
+            java.join(format!("{class}.java")),
+            format!("package demo;\n\nimport static org.junit.jupiter.api.Assertions.assertEquals;\n\nimport org.junit.jupiter.api.Test;\n\nclass {class} {{\n    @Test\n    void ok() {{\n        assertEquals(3, 1 + 2);\n    }}\n\n    @Test\n    void wrong() {{\n        assertEquals(4, 1 + 2);\n    }}\n}}\n"),
+        )
+        .unwrap();
+    }
+    let command = "gradle test :lib:core:test --continue";
+    assert_eq!(Tool::of(command), Some(Tool::Gradle));
+    let since = SystemTime::now();
+    let (ok, output) = run(
+        &root,
+        &test_report::with_report(Tool::Gradle, command, &root),
+    );
+    assert!(!ok, "{output}");
+    let tasks = |cases: &[Case]| {
+        let mut found: Vec<(String, String, Outcome, String)> = cases
+            .iter()
+            .map(|c| {
+                let class = c.suite.rsplit('.').next().unwrap_or_default().to_owned();
+                (
+                    class,
+                    c.name.clone(),
+                    c.outcome,
+                    c.task.clone().unwrap_or_default(),
+                )
+            })
+            .collect();
+        found.sort_by(|a, b| (&a.0, &a.1).cmp(&(&b.0, &b.1)));
+        found
+    };
+    let case = |class: &str, name: &str, outcome, task: &str| {
+        (class.to_owned(), name.to_owned(), outcome, task.to_owned())
+    };
+    let cases = junit(Tool::Gradle, &root, &root, since);
+    assert_eq!(
+        tasks(&cases),
+        [
+            case("AppTest", "ok()", Outcome::Passed, ":app:test"),
+            case("AppTest", "wrong()", Outcome::Failed, ":app:test"),
+            case("CoreTest", "ok()", Outcome::Passed, ":lib:core:test"),
+            case("CoreTest", "wrong()", Outcome::Failed, ":lib:core:test"),
+        ]
+    );
+    // 실패만 다시: 작업마다 그 작업의 실패만 돈다(폴더 이름으로 셈한 `:modules:application:test`·`:core:test`는
+    // Gradle이 찾지 못한다).
+    for dir in ["modules/application", "lib/core"] {
+        std::fs::remove_dir_all(root.join(dir).join("build/test-results")).unwrap();
+    }
+    let since = SystemTime::now();
+    let line = test_report::rerun(Tool::Gradle, command, &failed(&cases)).unwrap();
+    let (ok, output) = run(&root, &test_report::with_report(Tool::Gradle, &line, &root));
+    assert!(!ok, "{line}\n{output}");
+    assert_eq!(
+        tasks(&junit(Tool::Gradle, &root, &root, since)),
+        [
+            case("AppTest", "wrong()", Outcome::Failed, ":app:test"),
+            case("CoreTest", "wrong()", Outcome::Failed, ":lib:core:test"),
+        ],
+        "{line}\n{output}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
 #[ignore = "Gradle로 Kotlin·Scala의 JUnit 5 테스트를 돌린다(컴파일러와 의존성을 받는다). Java 17 이상과 gradle이 필요하다"]
 fn gradle_kotlin_scala_테스트의_줄과_실패만_다시() {
     if !require("gradle --version") {

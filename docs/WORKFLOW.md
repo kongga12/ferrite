@@ -1996,7 +1996,7 @@
     - 실제 도구(`test_tools`, CI의 3개 OS): JVM Test Suite로 만든 `integrationTest`와 `test`에 하나씩 실패를 두고 `gradle check` → 넷을 작업과 함께 읽고, 실패만 다시는 두 작업에서 실패한 하나씩만 돌고, 통합 테스트만 다시 돌리면 그것만 돈다.
     - 작업마다 다시 돌리면 돌지 않은 작업의 보고서는 그대로 남는다. 보고서는 고친 시각으로 고르고 2초 앞당겨 보므로(FAT) 바로 앞 실행이 끝 무렵 남긴 다른 작업의 보고서가 섞여, 실제 도구 시험(새 시험은 로컬에서, Kotlin·Scala 시험은 CI의 macOS·Windows에서)이 흔들렸다. 시험은 다시 돌리기 전에 보고서 폴더를 지운다. 앱은 다시 돌린 결과를 이름으로 앞 결과에 덮어 쓰므로 섞여도 결과가 같다.
     - 실제 앱(Windows, 릴리스 빌드, Gradle 9.2.0, JDK 21): 같은 예제에 실행 구성 `gradle check`를 두고 [실행 > 테스트]에서 돌려 "통과 2 · 실패 2 · 종료 코드 1"(BoardIT·CalcTest), [실패만 다시]의 출력 첫 줄이 `gradle :app:integrationTest --tests "com.example.board.BoardIT.savesWrong" :app:test --tests "com.example.board.CalcTest.addsWrong" --continue`인 것을 화면으로 확인했다. 자동 감지한 `gradle build`는 테스트 창의 구성 목록에 없다.
-  - 확인하지 못한 것: 설정에서 프로젝트 이름이나 폴더를 바꾼 빌드(`project(":x").projectDir = …`)와 포함된 빌드(`includeBuild`)는 폴더 이름으로 셈해 작업 경로가 틀릴 수 있다(그때는 Gradle이 작업을 찾지 못한다고 알린다). Groovy DSL의 `testSets` 같은 옛 플러그인도 보고서 폴더가 같으면 될 것으로 보지만 돌려 보지 않았다.
+  - 확인하지 못한 것: 설정에서 프로젝트 이름이나 폴더를 바꾼 빌드(`project(":x").projectDir = …`)와 포함된 빌드(`includeBuild`)는 폴더 이름으로 셈해 작업 경로가 틀릴 수 있다(그때는 Gradle이 작업을 찾지 못한다고 알린다. 뒤에 백로그 "Gradle 폴더를 바꾼 프로젝트와 품은 빌드"(2026-11-13)에서 고쳤다). Groovy DSL의 `testSets` 같은 옛 플러그인도 보고서 폴더가 같으면 될 것으로 보지만 돌려 보지 않았다.
 
 - [x] 다른 사이트 iframe 디버깅(2026-11-12) — 중간
   - 까닭: 위 "프레임 안 화면 디버깅"과 "프레임셋과 프레임 안의 프레임"에서 다른 사이트(호스트가 다른 주소)의 `<iframe>`을 보지 않았다.
@@ -2107,6 +2107,22 @@
     - 실제 어댑터(`adapters`, js-debug): 화면을 살핀 뒤 `<eval>` 항목의 내용에 Ferrite의 식이 없다(표시를 빼면 "Ferrite의 식이 남음: document.readyState"로 깨지는 것을 보았다).
     - 단위: 가짜 CDP 프록시가 표시 붙은 식만 알아본다. 앱 시험: 식 칸의 식은 목록에 나오지 않는다.
   - 확인하지 못한 것: 앱 화면에서 목록을 열어 본 것(위 실제 어댑터 시험과 앱 시험으로 갈음).
+
+- [x] Gradle 폴더를 바꾼 프로젝트와 품은 빌드(2026-11-13) — 작음
+  - 까닭: 위 "Gradle 통합 테스트 작업"은 작업 경로를 보고서 폴더 이름으로 셌다. 설정이 폴더를 따로 적은 프로젝트와 품은 빌드(`includeBuild`)에서는 틀릴 수 있었다.
+  - 찾기(실제 Gradle 9.2.0, JDK 21): 루트 설정에 `include("app")`, `project(":app").projectDir = file("modules/application")`, `includeBuild("lib")`를 두고, 품은 빌드 lib(`rootProject.name = "libroot"`)에 하위 프로젝트 core를 두었다.
+    - **폴더를 바꾼 프로젝트**: 보고서는 `modules/application/build/test-results/test`에 남는다. 폴더 이름으로 센 `:modules:application:test`는 "project 'modules' not found"로 실패하고 `:app:test`가 맞다.
+    - **품은 빌드**: 루트의 `gradle test`는 품은 빌드의 테스트를 돌리지 않는다. 루트에서 `:lib:core:test --tests …`로 돌릴 수 있고, 작업 옵션 `--tests`도 먹는다. 빌드 이름은 폴더 이름(`lib`)이다(`:libroot:core:test`는 찾지 못한다). 고치기 전에는 가장 가까운 설정(lib)에서 세어 `:core:test`였다.
+    - 부모 폴더를 바꾸기 전에 `include`한 하위 프로젝트(`include("app", "app:web")` 뒤에 `:app`의 폴더를 바꿈)는 옛 폴더(`app/web`)를 기본값으로 가진다(없으면 Gradle이 멈춘다). Gradle은 `include`한 때의 부모 폴더로 정한다.
+  - 고침(`test_report::gradle_project_path`)
+    - 보고서의 프로젝트 폴더가 설정이 적은 폴더(`project(":app").projectDir = file("…")`, `new File(settingsDir, '…')`, `rootDir`·Kotlin의 `File(…)`도)와 같으면 그 경로를 쓴다. 폴더는 `canonicalize`로 견준다(`..`·Windows 대소문자).
+    - 그 빌드의 루트를 바깥 빌드의 설정이 `includeBuild("…")`(Groovy의 `includeBuild '…'`도)로 품으면 앞에 `:<폴더 이름>`을 붙인다.
+    - 설정의 블록 주석과 줄 전체가 주석인 줄은 뺀다. 설정은 MS949 주석이 있어도 읽는다(예전에는 UTF-8이 아닌 설정은 그냥 있는지만 보았다).
+    - 글로만 읽으므로 반복문으로 정한 폴더, 이름을 바꾼 프로젝트(`.name = …`)·품은 빌드(`includeBuild(…) { name = … }`), 위의 순서를 타는 하위 프로젝트는 예전처럼 폴더 이름으로 센다(Gradle이 작업을 찾지 못한다고 알린다).
+  - 검증
+    - 단위: Kotlin 설정의 폴더, 품은 빌드(Groovy, MS949 주석)의 하위 프로젝트·`settingsDir`의 `..`, 품은 빌드의 루트 프로젝트(`:lib:test`), 주석으로 막은 폴더·품은 빌드는 보지 않는다.
+    - 실제 도구(`test_tools`): 위 꼴로 `gradle test :lib:core:test --continue` → 넷을 `:app:test`·`:lib:core:test`와 함께 읽고, 실패만 다시는 두 작업에서 틀린 것 하나씩만 돈다.
+  - 확인하지 못한 것: 앱 화면으로는 보지 않았다(실제 도구 시험이 앱과 같은 `read_report`·`rerun`을 부른다).
 
 - 살폈지만 넣지 않은 것: 임베디드(MCU 플래시·시리얼 모니터·장비 설정 파일), 프레임워크별 지원(React·Vue·Angular 등, JS·TS 언어 서버로 기본은 된다), 린터 개별 연동(언어 서버나 저장 시 작업으로 된다), 원격 개발·컨테이너·SFTP 배포, 로컬 AI 완성 모델, 계정 기반 설정 동기화. egov 개발과 거리가 멀거나 크기에 비해 쓰임이 적다.
 
