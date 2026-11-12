@@ -1994,6 +1994,7 @@
   - 검증
     - 단위: 보고서 폴더로 작업 경로 읽기(하위 프로젝트·루트 프로젝트·Maven 보고서는 없음), `check`의 옵션을 두고 작업마다 다시 돌리는 명령, 통합 테스트만(`-p`의 값은 둔다), 작업을 모르는 것이 섞이면 예전대로, 명령 알아보기(`integrationTest`·`:app:test`·`check`는 맞고 `build`·`assemble -x test`는 아니다).
     - 실제 도구(`test_tools`, CI의 3개 OS): JVM Test Suite로 만든 `integrationTest`와 `test`에 하나씩 실패를 두고 `gradle check` → 넷을 작업과 함께 읽고, 실패만 다시는 두 작업에서 실패한 하나씩만 돌고, 통합 테스트만 다시 돌리면 그것만 돈다.
+    - 작업마다 다시 돌리면 돌지 않은 작업의 보고서는 그대로 남는다. 보고서는 고친 시각으로 고르고 2초 앞당겨 보므로(FAT) 바로 앞 실행이 끝 무렵 남긴 다른 작업의 보고서가 섞여, 실제 도구 시험(새 시험은 로컬에서, Kotlin·Scala 시험은 CI의 macOS·Windows에서)이 흔들렸다. 시험은 다시 돌리기 전에 보고서 폴더를 지운다. 앱은 다시 돌린 결과를 이름으로 앞 결과에 덮어 쓰므로 섞여도 결과가 같다.
     - 실제 앱(Windows, 릴리스 빌드, Gradle 9.2.0, JDK 21): 같은 예제에 실행 구성 `gradle check`를 두고 [실행 > 테스트]에서 돌려 "통과 2 · 실패 2 · 종료 코드 1"(BoardIT·CalcTest), [실패만 다시]의 출력 첫 줄이 `gradle :app:integrationTest --tests "com.example.board.BoardIT.savesWrong" :app:test --tests "com.example.board.CalcTest.addsWrong" --continue`인 것을 화면으로 확인했다. 자동 감지한 `gradle build`는 테스트 창의 구성 목록에 없다.
   - 확인하지 못한 것: 설정에서 프로젝트 이름이나 폴더를 바꾼 빌드(`project(":x").projectDir = …`)와 포함된 빌드(`includeBuild`)는 폴더 이름으로 셈해 작업 경로가 틀릴 수 있다(그때는 Gradle이 작업을 찾지 못한다고 알린다). Groovy DSL의 `testSets` 같은 옛 플러그인도 보고서 폴더가 같으면 될 것으로 보지만 돌려 보지 않았다.
 

@@ -697,6 +697,11 @@ fn gradle_kotlin_scala_테스트의_줄과_실패만_다시() {
 
     // 실패만 다시(앱처럼 보고서 옵션을 붙인다). 빈칸 든 이름도 `--tests`로 걸러진다.
     let again = |cases: &[&Case]| {
+        // 보고서는 고친 시각으로 고르고 2초 앞당겨 보므로(FAT), 바로 앞 실행이 끝 무렵 남긴 다른 작업의
+        // 보고서가 섞인다. 돌지 않은 작업의 보고서가 남지 않게 지우고 돌린다.
+        for project in ["kt", "sc"] {
+            let _ = std::fs::remove_dir_all(root.join(project).join("build/test-results"));
+        }
         let since = SystemTime::now();
         let rerun = test_report::rerun(Tool::Gradle, command, cases).unwrap();
         let (ok, _) = run(
@@ -714,8 +719,7 @@ fn gradle_kotlin_scala_테스트의_줄과_실패만_다시() {
         ],
         "실패한 것만 다시"
     );
-    // 한 하위 프로젝트에만 실패가 있으면 `--tests`에 맞는 것이 없는 다른 작업(먼저 도는 `:kt:test`)은
-    // "No tests found"로 실패하지만, `--continue`라 `:sc:test`는 돈다.
+    // 한 하위 프로젝트에만 실패가 있으면 그 작업(`:sc:test`)만 돈다.
     let scala: Vec<&Case> = failed(&cases)
         .into_iter()
         .filter(|c| c.name == "addsWrong()")
