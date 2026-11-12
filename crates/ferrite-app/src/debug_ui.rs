@@ -745,8 +745,11 @@ impl Debugger {
                 None => return,
             },
             Request::Variables(reference) => Some(session.variables(*reference)),
+            // 멈춰 있으면 고른 프레임에서, 아니면 실행 중인 대상에서 계산한다(이어 간 뒤에 남은 프레임은 쓰지 않는다).
             Request::Evaluate(expression) => {
-                let frame = self.frames.get(self.frame).map(|f| f.id);
+                let frame = matches!(session.state(), State::Stopped(_))
+                    .then(|| self.frames.get(self.frame).map(|f| f.id))
+                    .flatten();
                 Some(session.evaluate(expression, frame))
             }
             Request::LoadedSources(owner) => session.request_in(*owner, "loadedSources", json!({})),
@@ -901,18 +904,26 @@ impl Debugger {
                     session,
                 } => {
                     let key = source_key(&source);
-                    if reason != "removed" && is_remote(&source) && key.contains('/') {
-                        let previous = self.owners.insert(key.clone(), session);
-                        // 다른 세션이 다시 알려 왔다(다른 사이트의 프레임이 품은 화면과 함께 새로 열렸다). 앞
-                        // 세션은 없어지므로 그 세션에 물은 글·다시 부르기는 버리고 새 세션으로 새로 본다.
-                        if previous.is_some_and(|previous| previous != session)
-                            && let Some(pages) = &mut self.pages
-                        {
-                            pages.reloads.remove(&key);
-                            pages.asking.remove(&key);
-                        }
-                        self.loaded(key, source);
+                    if reason == "removed" || !is_remote(&source) {
+                        continue;
                     }
+                    // 화면 주소가 없는 소스(디버그 출력의 식 `repl`, `eval` 등)도 알린 세션을 적는다. 그 세션 밖에서
+                    // 멈춘 스택에 나와도(워커에서 멈추면 그 워커를 부른 식이 비동기 스택으로 나온다) 내용은 그
+                    // 세션에 묻는다.
+                    if !key.contains('/') {
+                        self.owners.insert(key, session);
+                        continue;
+                    }
+                    let previous = self.owners.insert(key.clone(), session);
+                    // 다른 세션이 다시 알려 왔다(다른 사이트의 프레임이 품은 화면과 함께 새로 열렸다). 앞
+                    // 세션은 없어지므로 그 세션에 물은 글·다시 부르기는 버리고 새 세션으로 새로 본다.
+                    if previous.is_some_and(|previous| previous != session)
+                        && let Some(pages) = &mut self.pages
+                    {
+                        pages.reloads.remove(&key);
+                        pages.asking.remove(&key);
+                    }
+                    self.loaded(key, source);
                 }
                 DebugEvent::Terminated => {
                     self.end("[디버그를 마쳤습니다]");
@@ -1823,24 +1834,42 @@ impl Debugger {
         notice
     }
 
+    /// 디버그 출력에서 식을 계산할 수 있는지: 대상을 띄웠고 끝내는 중이 아니다(멈추지 않았어도 된다).
+    fn can_evaluate(&self) -> bool {
+        self.session.is_some() && self.started && self.stopping.is_none()
+    }
+
+    /// 디버그 출력의 식을 계산한다: 멈춰 있으면 그 자리에서, 아니면 실행 중인 대상(js-debug: 화면)에서.
+    fn evaluate_console(&mut self) {
+        if !self.can_evaluate() || self.expression.trim().is_empty() {
+            return;
+        }
+        let expression = std::mem::take(&mut self.expression);
+        self.send(Request::Evaluate(expression));
+    }
+
     /// "디버그 출력" 창: 대상의 출력과 식 계산.
     pub fn console_ui(&mut self, ui: &mut egui::Ui) {
         let mut evaluate = false;
+        let hint = if self.is_stopped() {
+            "멈춘 자리에서 계산할 식"
+        } else {
+            "실행 중인 대상(화면 등)에서 계산할 식"
+        };
         ui.horizontal(|ui| {
             let label = ui.label("식");
             let field = ui
                 .add_enabled(
-                    self.is_stopped(),
+                    self.can_evaluate(),
                     egui::TextEdit::singleline(&mut self.expression)
-                        .hint_text("멈춘 자리에서 계산할 식")
+                        .hint_text(hint)
                         .desired_width(f32::INFINITY),
                 )
                 .labelled_by(label.id);
             evaluate = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
         });
-        if evaluate && !self.expression.trim().is_empty() {
-            let expression = std::mem::take(&mut self.expression);
-            self.send(Request::Evaluate(expression));
+        if evaluate {
+            self.evaluate_console();
         }
         egui::ScrollArea::vertical()
             .id_salt("debug_console")
@@ -2346,6 +2375,20 @@ mod tests {
                     "requestCDPProxy" if cdp_port.is_some() => {
                         body = json!({ "host": "127.0.0.1", "port": cdp_port, "path": "/cdp" });
                     }
+                    // 디버그 출력의 식: 식을 그대로 돌려주고, (식, 받은 프레임 번호)를 알린다.
+                    "evaluate" if request["arguments"]["context"] == "repl" => {
+                        let expression = request["arguments"]["expression"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .to_owned();
+                        body =
+                            json!({ "result": format!("= {expression}"), "variablesReference": 0 });
+                        let frame = request["arguments"]["frameId"].as_i64();
+                        let _ = sent.send((
+                            format!("evaluate {expression}"),
+                            frame.into_iter().collect(),
+                        ));
+                    }
                     "evaluate" if request["arguments"]["context"] == "clipboard" => {
                         body =
                             json!({ "result": scripts, "type": "string", "variablesReference": 0 });
@@ -2489,6 +2532,86 @@ mod tests {
         }
         assert!(!debugger.breakpoint_state(&jsp_path, 0).unwrap().verified);
         assert!(debugger.breakpoint_state(&jsp_path, 1).unwrap().verified);
+        debugger.shutdown();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn 디버그_출력의_식은_실행_중에는_대상에서_멈췄으면_그_자리에서_계산한다() {
+        let root = std::env::temp_dir().join(format!("ferrite-repl-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let jsp = root.join("src/main/webapp/WEB-INF/jsp/board/list.jsp");
+        std::fs::create_dir_all(jsp.parent().unwrap()).unwrap();
+        std::fs::write(
+            &jsp,
+            "<script>\nfunction fn_egov_link_page(pageNo) {\n    alert(\"쪽 \" + pageNo);\n}\n</script>\n",
+        )
+        .unwrap();
+        // 화면 13줄의 `<script>` 뒤에서 시작하는 블록. JSP 3줄(`alert`)은 화면 15줄이다.
+        static SCRIPT: &str =
+            "\nfunction fn_egov_link_page(pageNo) {\n    alert(\"쪽 \" + pageNo);\n}\n";
+        let page = source("127.0.0.1\u{a789}8080/app/board/list.do\u{a789}13:9", 7);
+        let (address, received) = fake_js_debug(vec![(page, SCRIPT)], None, None, (0, 15));
+        let config = DebugConfig {
+            name: "식".into(),
+            adapter: "js-debug".into(),
+            request: "launch".into(),
+            arguments: serde_json::json!({}),
+            build: None,
+        };
+        let mut debugger = Debugger::default();
+        debugger
+            .start(
+                &config,
+                &root,
+                None,
+                BTreeMap::new(),
+                Adapter::Tcp(address),
+                &egui::Context::default(),
+            )
+            .unwrap();
+        debugger.sources = Some(root.join("sources"));
+        // 실행 중: 멈춘 자리가 없어도 계산한다(프레임 없이, 대상에서).
+        pump(&mut debugger, "대상을 띄우지 않음", Debugger::can_evaluate);
+        assert!(!debugger.is_stopped());
+        debugger.expression = "ask(21)".into();
+        debugger.evaluate_console();
+        pump(&mut debugger, "실행 중에 계산하지 않음", |d| {
+            d.console.contains("> ask(21)\n= ask(21)")
+        });
+        let sent: Vec<(String, Vec<i64>)> = received.try_iter().collect();
+        assert!(
+            sent.contains(&("evaluate ask(21)".to_owned(), Vec::new())),
+            "{sent:?}"
+        );
+        // 멈추면 고른 프레임에서 계산한다.
+        let jsp_path = crate::app::real_path(&jsp);
+        debugger.set_breakpoints(
+            &jsp_path,
+            vec![Breakpoint {
+                line: 3,
+                condition: None,
+            }],
+        );
+        pump(&mut debugger, "멈추지 않음", |d| {
+            d.is_stopped() && !d.frames.is_empty()
+        });
+        debugger.expression = "pageNo".into();
+        debugger.evaluate_console();
+        pump(
+            &mut debugger,
+            "멈춘 자리에서 계산하지 않음",
+            |d| d.console.contains("> pageNo\n= pageNo"),
+        );
+        let sent: Vec<(String, Vec<i64>)> = received.try_iter().collect();
+        assert!(
+            sent.contains(&("evaluate pageNo".to_owned(), vec![1])),
+            "{sent:?}"
+        );
+        // 빈 식은 보내지 않는다.
+        debugger.expression = "  ".into();
+        debugger.evaluate_console();
+        assert_eq!(debugger.expression, "  ");
         debugger.shutdown();
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -3135,11 +3258,21 @@ mod tests {
                                     .collect::<Vec<_>>() });
                             }
                             "source" => {
-                                let (source, text) = blocks.last().unwrap();
-                                let (_, line, column) =
-                                    page_lines::inline_script(source.name.as_deref().unwrap())
-                                        .unwrap();
-                                body = json!({ "content": page_lines::assemble(&[(line, column, *text)]) });
+                                let reference = request["arguments"]["sourceReference"].as_i64();
+                                let (source, text) = blocks
+                                    .iter()
+                                    .find(|(s, _)| Some(s.source_reference) == reference)
+                                    .or(blocks.last())
+                                    .expect("이 세션의 소스");
+                                let content = match page_lines::inline_script(
+                                    source.name.as_deref().unwrap_or_default(),
+                                ) {
+                                    Some((_, line, column)) => {
+                                        page_lines::assemble(&[(line, column, *text)])
+                                    }
+                                    None => (*text).to_owned(),
+                                };
+                                body = json!({ "content": content });
                             }
                             "requestCDPProxy" => {
                                 body = json!({ "host": "127.0.0.1", "port": cdp, "path": "/cdp" });
@@ -3449,6 +3582,7 @@ mod tests {
         .unwrap();
         const LIST: &str = "\nvar list = 1;\n";
         let page = source("127.0.0.1\u{a789}8080/app/list.do\u{a789}2:9", 5);
+        let repl = source("repl", 9);
         // 원래 HTML을 늦게 줘서 그 화면을 맞추기 전에 워커의 스택이 온다.
         let (top_cdp, _) = fake_cdp_with(|method, params| match method {
             "Page.getFrameTree" => json!({ "frameTree": { "frame": {
@@ -3473,10 +3607,12 @@ mod tests {
                 "name": "127.0.0.1\u{a789}8080/app/js/worker.js", "path": worker_js, "sourceReference": 0 } },
             { "id": 2, "name": "Worker.postMessage", "line": 0, "column": 0, "presentationHint": "label" },
             { "id": 3, "name": "ask", "line": 3, "column": 1, "source": page.to_json() },
+            // 그 함수를 부른 디버그 출력의 식(페이지 세션이 `repl`로 알린 스크립트).
+            { "id": 4, "name": "<anonymous>", "line": 1, "column": 1, "source": repl.to_json() },
         ]);
         let address = fake_js_debug_nested(
             vec![
-                (vec![(page, LIST)], top_cdp, None),
+                (vec![(page, LIST), (repl, "ask(21)")], top_cdp, None),
                 (Vec::new(), worker_cdp, Some(stack)),
             ],
             None,
@@ -3520,6 +3656,15 @@ mod tests {
         );
         let worker = debugger.stack_session.expect("워커 세션의 스택");
         assert_ne!(debugger.owners.get(KEY), Some(&worker));
+        // 화면 주소가 없는 식(`repl`)도 알린 세션(페이지)에 내용을 묻는다(워커 세션에 물으면 "Source not found").
+        pump(&mut debugger, "식의 글을 담지 않음", |d| {
+            d.stored.contains_key("repl")
+        });
+        assert_eq!(
+            std::fs::read_to_string(&debugger.stored["repl"]).unwrap(),
+            "ask(21)"
+        );
+        assert!(!debugger.console.contains("[오류]"), "{}", debugger.console);
         assert!(debugger.stored.contains_key(KEY));
         assert_eq!(worker_methods.try_iter().count(), 0);
         debugger.shutdown();
