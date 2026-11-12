@@ -587,12 +587,14 @@ impl DebugSession {
         self.request("variables", json!({ "variablesReference": reference }))
     }
 
-    /// 멈춘 자리(`frame_id`)에서 식을 계산한다.
+    /// 디버그 출력의 식을 계산한다(REPL: 함수를 부르는 등 부수 효과가 있어도 된다). `frame_id`가 있으면 그 멈춘
+    /// 자리에서, 없으면 실행 중인 대상(js-debug: 멈추지 않았으면 페이지)에서 계산한다.
     pub fn evaluate(&mut self, expression: &str, frame_id: Option<i64>) -> i64 {
-        self.request(
-            "evaluate",
-            json!({ "expression": expression, "frameId": frame_id, "context": "watch" }),
-        )
+        let mut arguments = json!({ "expression": expression, "context": "repl" });
+        if let Some(frame_id) = frame_id {
+            arguments["frameId"] = json!(frame_id);
+        }
+        self.request("evaluate", arguments)
     }
 
     /// 실행을 이어 가는 명령(continue·next·stepIn·stepOut). 어댑터가 `continued`를 보내지 않는
