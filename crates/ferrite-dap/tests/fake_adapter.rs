@@ -526,7 +526,7 @@ fn 거꾸로_요청한_자식_세션에서_멈추고_페이지_스크립트에_�
     let frame = types::stack_frames(&body).remove(0);
     let source = frame.source.unwrap();
     assert_eq!(source.source_reference, 5);
-    let id = session.source(&source);
+    let id = session.source(&source, None).unwrap();
     let body = response_body(
         wait_for(&mut session, &mut log, |e| {
             matches!(e, DebugEvent::Response { .. })
@@ -586,6 +586,213 @@ fn 거꾸로_요청한_자식_세션에서_멈추고_페이지_스크립트에_�
         matches!(e, DebugEvent::Terminated)
     });
     root.join().expect("부모 세션 각본이 어긋남");
+}
+
+/// 중단점 없이 시작 순서를 밟는다(launch 응답은 configurationDone 뒤에 준다).
+fn boot_plain(f: &mut Fake) {
+    let initialize = f.expect("initialize");
+    f.respond(
+        &initialize,
+        json!({ "supportsConfigurationDoneRequest": true }),
+    );
+    let launch = f.expect("launch");
+    f.event("initialized", json!({}));
+    let done = f.expect("configurationDone");
+    f.respond(&done, json!({}));
+    f.respond(&launch, json!({}));
+}
+
+/// 거꾸로 자식 세션을 요청한다(답은 자식 연결을 받은 뒤 `child_started`로 읽는다).
+fn ask_child(f: &mut Fake, target: &str) {
+    f.send(json!({
+        "type": "request", "command": "startDebugging",
+        "arguments": { "request": "launch", "configuration": { "type": "pwa-chrome", "__pendingTargetId": target } },
+    }));
+}
+
+fn child_started(f: &mut Fake) {
+    let reply = read_message(&mut f.reader).unwrap().unwrap();
+    let reply: Value = serde_json::from_slice(&reply).unwrap();
+    assert_eq!(
+        (&reply["command"], &reply["success"]),
+        (&json!("startDebugging"), &json!(true))
+    );
+}
+
+/// 끝내기를 받고 끝났다고 알린다. 품은 세션이 먼저 끝나면 클라이언트가 이 세션도 함께 버려 연결이 이미 닫혔을
+/// 수 있으므로 쓰기 실패는 넘긴다.
+fn finish(f: &mut Fake) {
+    let disconnect = f.expect("disconnect");
+    for message in [
+        json!({ "type": "response", "request_seq": disconnect["seq"], "success": true,
+            "command": "disconnect", "body": {} }),
+        json!({ "type": "event", "event": "terminated", "body": {} }),
+    ] {
+        let _ = write_message(
+            &mut f.reader.get_ref(),
+            &serde_json::to_vec(&message).unwrap(),
+        );
+    }
+}
+
+#[test]
+fn 다른_사이트_iframe_세션은_그_세션에_묻고_멈추지_않았으면_페이지_세션에_묻는다() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    // 브라우저 세션 → 페이지 세션 → 그 페이지 안 다른 사이트 `<iframe>`의 세션(실제 js-debug의 꼴).
+    let root = thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        let mut f = fake_on(stream);
+        boot_plain(&mut f);
+        ask_child(&mut f, "page");
+        let page = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut f = fake_on(stream);
+            boot_plain(&mut f);
+            f.event(
+                "loadedSource",
+                json!({ "reason": "new", "source": { "name": "127.0.0.1\u{a789}8080/app/list.do\u{a789}3:9",
+                    "path": "127.0.0.1\u{a789}8080/app/list.do\u{a789}3:9", "sourceReference": 1 } }),
+            );
+            ask_child(&mut f, "frame");
+            let frame = thread::spawn(move || {
+                let (stream, _) = listener.accept().unwrap();
+                let mut f = fake_on(stream);
+                boot_plain(&mut f);
+                // 소스 번호는 세션마다 따로라 페이지의 것과 겹친다.
+                f.event(
+                    "loadedSource",
+                    json!({ "reason": "new", "source": { "name": "localhost\u{a789}8080/app/frag.do\u{a789}4:9",
+                        "path": "localhost\u{a789}8080/app/frag.do\u{a789}4:9", "sourceReference": 1 } }),
+                );
+                let proxy = f.expect("requestCDPProxy");
+                f.respond(
+                    &proxy,
+                    json!({ "host": "127.0.0.1", "port": 1, "path": "/frame" }),
+                );
+                let source = f.expect("source");
+                assert_eq!(source["arguments"]["sourceReference"], 1);
+                f.respond(&source, json!({ "content": "frame" }));
+                f.event("stopped", json!({ "reason": "breakpoint", "threadId": 1 }));
+                let evaluate = f.expect("evaluate");
+                f.respond(
+                    &evaluate,
+                    json!({ "result": "frame", "variablesReference": 0 }),
+                );
+                // 페이지의 스크립트를 모른다.
+                let set = f.expect("setBreakpoints");
+                f.respond(&set, json!({ "breakpoints": [{ "verified": false }] }));
+                finish(&mut f);
+            });
+            child_started(&mut f);
+            let evaluate = f.expect("evaluate");
+            f.respond(
+                &evaluate,
+                json!({ "result": "page", "variablesReference": 0 }),
+            );
+            let set = f.expect("setBreakpoints");
+            f.respond(
+                &set,
+                json!({ "breakpoints": [{ "id": 4, "verified": true, "line": 3 }] }),
+            );
+            finish(&mut f);
+            frame.join().expect("iframe 세션 각본이 어긋남");
+        });
+        child_started(&mut f);
+        // 브라우저 세션은 화면이 없다.
+        let set = f.expect("setBreakpoints");
+        f.respond(&set, json!({ "breakpoints": [{ "verified": false }] }));
+        finish(&mut f);
+        page.join().expect("페이지 세션 각본이 어긋남");
+    });
+
+    let launch = Launch {
+        adapter_id: "js-debug".into(),
+        attach: false,
+        arguments: json!({ "type": "pwa-chrome" }),
+    };
+    let mut session =
+        DebugSession::start(&Adapter::Tcp(address), launch, BTreeMap::new(), || {}).unwrap();
+    let mut log = Log::default();
+    let mut loaded = Vec::new();
+    while loaded.len() < 2 {
+        if let DebugEvent::LoadedSource {
+            source, session, ..
+        } = wait_for(&mut session, &mut log, |e| {
+            matches!(e, DebugEvent::LoadedSource { .. })
+        }) {
+            loaded.push((source, session));
+        }
+    }
+    let of = |page: &str| {
+        loaded
+            .iter()
+            .find(|(source, _)| source.name.as_deref().is_some_and(|n| n.contains(page)))
+            .cloned()
+            .unwrap()
+    };
+    let ((_, page_id), (frame_source, frame_id)) = (of("list.do"), of("frag.do"));
+    assert_ne!(page_id, frame_id);
+    assert_eq!(session.parents(frame_id), [page_id]);
+    assert!(
+        session.parents(page_id).is_empty(),
+        "브라우저 세션은 화면이 없어 뺀다"
+    );
+    let answer = |session: &mut DebugSession, log: &mut Log, id: i64| {
+        response_body(
+            wait_for(session, log, |e| matches!(e, DebugEvent::Response { .. })),
+            id,
+        )
+    };
+    // 멈추지 않았으면 요청은 페이지 세션에 간다(iframe 세션이 나중에 열렸어도).
+    assert_eq!(session.focus_id(), page_id);
+    let id = session.request("evaluate", json!({ "expression": "location.href" }));
+    assert_eq!(answer(&mut session, &mut log, id)["result"], "page");
+    // iframe의 것은 iframe 세션에 묻는다.
+    let id = session
+        .request_in(frame_id, "requestCDPProxy", json!({}))
+        .unwrap();
+    assert_eq!(answer(&mut session, &mut log, id)["path"], "/frame");
+    let id = session.source(&frame_source, Some(frame_id)).unwrap();
+    assert_eq!(answer(&mut session, &mut log, id)["content"], "frame");
+    // 끝난(없는) 세션에는 보내지 않는다.
+    assert_eq!(session.request_in(u64::MAX, "source", json!({})), None);
+    // iframe이 멈추면 요청은 그리로 간다.
+    wait_for(&mut session, &mut log, |e| {
+        matches!(e, DebugEvent::Stopped(_))
+    });
+    assert_eq!(session.focus_id(), frame_id);
+    let id = session.request("evaluate", json!({ "expression": "location.href" }));
+    assert_eq!(answer(&mut session, &mut log, id)["result"], "frame");
+    // 중단점 확인은 세션들의 것을 합친다: 페이지 세션이 걸었으면 브라우저·iframe 세션의 "못 걸음"이 늦게 와도
+    // 걸린 것이다.
+    let page_js = std::env::temp_dir()
+        .join("ferrite-dap-nested")
+        .join("list.js");
+    session.set_breakpoints(
+        &page_js,
+        vec![Breakpoint {
+            line: 3,
+            condition: None,
+        }],
+    );
+    let (mut answers, mut last) = (0, Vec::new());
+    while answers < 3 {
+        if let DebugEvent::Breakpoints { states, .. } = wait_for(
+            &mut session,
+            &mut log,
+            |e| matches!(e, DebugEvent::Breakpoints { path, .. } if *path == page_js),
+        ) {
+            answers += 1;
+            last = states;
+        }
+    }
+    assert!(last[0].verified && last[0].line == Some(3), "{last:?}");
+    session.stop();
+    wait_for(&mut session, &mut log, |e| {
+        matches!(e, DebugEvent::Terminated)
+    });
+    root.join().expect("브라우저 세션 각본이 어긋남");
 }
 
 /// 잠깐 살아 있다 끝나는 프로그램(사용자 어댑터 대신 띄운다).

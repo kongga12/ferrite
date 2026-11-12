@@ -5,8 +5,9 @@
 //! (initialize → launch/attach → `initialized` 이벤트 → 중단점 → configurationDone)도 `poll`이
 //! 진행한다. 어댑터마다 다른 것(띄우는 명령, launch 인자)은 [`Adapter`]와 [`Launch`]로 받는다.
 //!
-//! 어댑터가 거꾸로 `startDebugging`을 요청하면(js-debug: 브라우저 페이지마다) 같은 주소로 자식 세션을
-//! 열어 이 세션 안에 둔다. 화면은 세션 하나만 다루고, 요청은 멈춘 자식에게 간다.
+//! 어댑터가 거꾸로 `startDebugging`을 요청하면(js-debug: 브라우저 페이지마다, 페이지 안의 다른 사이트
+//! `<iframe>`·워커는 그 페이지 세션 아래에) 같은 주소로 자식 세션을 열어 이 세션 안에 둔다. 화면은 세션
+//! 하나만 다루고, 요청은 멈춘 자식에게 간다. 그 세션의 것(소스 내용, 그 화면의 CDP)은 그 세션에 묻는다.
 
 pub mod adapters;
 pub mod cdp;
@@ -19,7 +20,7 @@ use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
@@ -132,12 +133,18 @@ pub enum DebugEvent {
     /// 어댑터와의 연결이 끊겼다. 프로세스 어댑터면 stderr 마지막 줄을 담는다.
     Closed(Option<String>),
     /// 대상이 스크립트를 불러왔다(`reason`: "new", "changed", "removed"). js-debug는 화면을 불러올 때마다
-    /// 인라인 스크립트를 새 번호로 알린다.
+    /// 인라인 스크립트를 새 번호로 알린다. `session`은 알린 세션이다(js-debug는 다른 사이트의 `<iframe>`을
+    /// 페이지 세션 아래의 자식 세션으로 따로 연다). 그 소스의 내용·그 화면의 CDP는 그 세션에 묻는다
+    /// ([`DebugSession::request_in`]).
     LoadedSource {
         reason: String,
         source: Source,
+        session: u64,
     },
 }
+
+/// 세션마다 다른 번호(자식 세션까지).
+static NEXT_SESSION: AtomicU64 = AtomicU64::new(1);
 
 /// 응답을 기다리는 요청.
 enum Pending {
@@ -190,6 +197,8 @@ pub struct DebugSession {
     address: Option<SocketAddr>,
     /// 어댑터가 거꾸로 요청한 자식 세션(js-debug의 브라우저 페이지).
     children: Vec<DebugSession>,
+    /// 이 세션의 번호([`DebugEvent::LoadedSource`]의 `session`).
+    id: u64,
     /// 어댑터가 확인한 중단점. `breakpoint` 이벤트가 번호로 바꾼 것을 고쳐 다시 알린다.
     states: HashMap<PathBuf, Vec<BreakpointState>>,
     /// 로컬 파일이 없는 스크립트를 담아 둔 파일 → 어댑터의 원래 소스. 그 파일의 중단점은 원래 소스로 건다.
@@ -371,6 +380,7 @@ impl DebugSession {
             wake,
             address,
             children: Vec::new(),
+            id: NEXT_SESSION.fetch_add(1, Ordering::Relaxed),
             states: HashMap::new(),
             sources: HashMap::new(),
             pending: HashMap::new(),
@@ -408,29 +418,63 @@ impl DebugSession {
         matches!(self.state, State::Stopped(_)) || self.children.iter().any(Self::stopped_somewhere)
     }
 
-    /// 사용자 요청을 받을 세션: 멈춘 자식 → 멈춘 자신 → 마지막 자식 → 자신. None이면 자신.
-    fn focus_index(&self) -> Option<usize> {
+    /// 사용자 요청을 받을 세션: 멈춘 자식 → 멈춘 자신 → (맨 위 세션이면) 마지막 자식 → 자신. None이면 자신.
+    /// 멈추지 않았으면 페이지 세션 아래(js-debug: 다른 사이트의 `<iframe>`, 워커)로 내려가지 않는다. 그래야
+    /// 콘솔의 식이 페이지에서 돈다.
+    fn focus_index(&self, top: bool) -> Option<usize> {
         if let Some(i) = self.children.iter().rposition(Self::stopped_somewhere) {
             return Some(i);
         }
-        if matches!(self.state, State::Stopped(_)) {
+        if matches!(self.state, State::Stopped(_)) || !top {
             return None;
         }
         self.children.len().checked_sub(1)
     }
 
     fn focus(&mut self) -> &mut Self {
-        match self.focus_index() {
-            Some(i) => self.children[i].focus(),
+        self.focus_at(true)
+    }
+
+    fn focus_at(&mut self, top: bool) -> &mut Self {
+        match self.focus_index(top) {
+            Some(i) => self.children[i].focus_at(false),
             None => self,
         }
     }
 
     fn focus_ref(&self) -> &Self {
-        match self.focus_index() {
-            Some(i) => self.children[i].focus_ref(),
+        self.focus_ref_at(true)
+    }
+
+    fn focus_ref_at(&self, top: bool) -> &Self {
+        match self.focus_index(top) {
+            Some(i) => self.children[i].focus_ref_at(false),
             None => self,
         }
+    }
+
+    /// 사용자 요청([`Self::request`])을 받는 세션의 번호.
+    pub fn focus_id(&self) -> u64 {
+        self.focus_ref().id
+    }
+
+    /// 그 세션을 품은 세션들의 번호(가까운 것부터). 맨 위 세션은 뺀다(js-debug의 맨 위 세션은 브라우저를 띄울
+    /// 뿐 화면이 없다).
+    pub fn parents(&self, id: u64) -> Vec<u64> {
+        fn walk(session: &DebugSession, id: u64, found: &mut Vec<u64>) -> bool {
+            if session.id == id {
+                return true;
+            }
+            if session.children.iter().any(|child| walk(child, id, found)) {
+                found.push(session.id);
+                return true;
+            }
+            false
+        }
+        let mut found = Vec::new();
+        walk(self, id, &mut found);
+        found.pop();
+        found
     }
 
     pub fn capabilities(&self) -> &Capabilities {
@@ -463,17 +507,34 @@ impl DebugSession {
             .send_request(command, arguments, Pending::User(command.to_owned()))
     }
 
+    /// 그 세션(`LoadedSource`의 `session`)에 요청을 보낸다. 그 세션이 끝났으면 None이다(다른 세션에 보내면
+    /// 그 세션의 소스 번호·화면으로 잘못 답한다).
+    pub fn request_in(&mut self, session: u64, command: &str, arguments: Value) -> Option<i64> {
+        let target = self.find(session)?;
+        Some(target.send_request(command, arguments, Pending::User(command.to_owned())))
+    }
+
+    fn find(&mut self, id: u64) -> Option<&mut Self> {
+        if self.id == id {
+            return Some(self);
+        }
+        self.children.iter_mut().find_map(|child| child.find(id))
+    }
+
     /// 불러온 스크립트 목록(`loadedSources`).
     pub fn loaded_sources(&mut self) -> i64 {
         self.request("loadedSources", json!({}))
     }
 
-    /// 로컬 파일이 없는 소스의 내용(`source`).
-    pub fn source(&mut self, source: &Source) -> i64 {
-        self.request(
-            "source",
-            json!({ "source": source.to_json(), "sourceReference": source.source_reference }),
-        )
+    /// 로컬 파일이 없는 소스의 내용(`source`). `session`이 있으면 그 소스를 알린 세션에 묻는다(소스 번호는
+    /// 세션마다 따로다). 그 세션이 끝났으면 None이다.
+    pub fn source(&mut self, source: &Source, session: Option<u64>) -> Option<i64> {
+        let arguments =
+            json!({ "source": source.to_json(), "sourceReference": source.source_reference });
+        match session {
+            Some(session) => self.request_in(session, "source", arguments),
+            None => Some(self.request("source", arguments)),
+        }
     }
 
     /// 어댑터의 소스를 로컬 파일 `local`에 담아 열었다. 그 파일의 중단점은 원래 소스로 건다.
@@ -616,12 +677,32 @@ impl DebugSession {
             }
             !ended
         });
-        // 자식(페이지)이 있으면 중단점 확인은 자식의 것을 쓴다(부모는 늘 "아직 걸지 못함"이다).
-        if !self.children.is_empty() {
-            events.retain(|e| !matches!(e, DebugEvent::Breakpoints { .. }));
-        }
         events.extend(from_children);
+        // 자식이 있으면 중단점 확인은 세션들의 것을 합친다: 어느 세션에서든 걸렸으면 걸린 것이다. js-debug의 브라우저
+        // 세션은 화면이 없어 늘 "아직 걸지 못함"이고, 다른 사이트 `<iframe>`의 세션은 페이지의 스크립트를 모른다.
+        if !self.children.is_empty() {
+            for event in &mut events {
+                if let DebugEvent::Breakpoints { path, states } = event {
+                    self.merge_states(path, states);
+                }
+            }
+        }
         events
+    }
+
+    /// 이 세션과 그 아래 세션들이 확인한 그 파일의 중단점을 `states`에 합친다: 보낸 것마다 어느 세션에서든 걸렸으면
+    /// 그 세션의 것을 쓴다(같은 수로 답한 세션만 본다. 수가 다르면 앞서 보낸 것의 답이다).
+    fn merge_states(&self, path: &Path, states: &mut [BreakpointState]) {
+        if let Some(known) = self.states.get(path).filter(|k| k.len() == states.len()) {
+            for (state, known) in states.iter_mut().zip(known) {
+                if known.verified && !state.verified {
+                    *state = known.clone();
+                }
+            }
+        }
+        for child in &self.children {
+            child.merge_states(path, states);
+        }
     }
 
     fn poll_own(&mut self, events: &mut Vec<DebugEvent>) {
@@ -842,6 +923,7 @@ impl DebugSession {
                     events.push(DebugEvent::LoadedSource {
                         reason: text("reason").unwrap_or_default(),
                         source,
+                        session: self.id,
                     });
                 }
             }

@@ -44,8 +44,8 @@ enum Request {
     /// 화면(열쇠)의 인라인 스크립트 글들. js-debug는 같은 화면의 스크립트를 하나만 남겨 내용을 다 줄 수
     /// 없으므로 화면에서 읽는다(CDP 프록시로 원래 HTML을 받지 못할 때).
     PageScripts(String),
-    /// js-debug의 CDP 프록시 주소(화면의 원래 HTML을 받는다).
-    CdpProxy,
+    /// 그 세션의 js-debug CDP 프록시 주소(그 세션의 화면을 다룬다: 원래 HTML, 다시 부르기).
+    CdpProxy(u64),
 }
 
 /// 로컬 파일이 없는 소스를 담아 두는 폴더(이 앱 프로세스의 것). 앱을 닫을 때 지운다.
@@ -124,8 +124,11 @@ struct Pages {
     asking: HashSet<String>,
     /// 화면(열쇠)마다 알려 온 인라인 스크립트.
     inline: HashMap<String, Inline>,
-    /// js-debug의 CDP 프록시(처음 쓸 때 묻는다).
-    proxy: ProxyState,
+    /// 세션마다의 js-debug CDP 프록시(처음 쓸 때 묻는다). 프록시는 그것을 준 세션의 대상(페이지나 다른 사이트의
+    /// `<iframe>`)만 다룬다.
+    proxies: HashMap<u64, ProxyState>,
+    /// 품은 세션의 CDP 프록시를 기다려 다시 불러도 되는지 아직 보지 않은 화면들(다른 사이트의 `<iframe>`).
+    checks: Vec<String>,
     /// CDP 프록시로 따로 한 일의 결과.
     events: (Sender<PageEvent>, Receiver<PageEvent>),
     /// 화면(열쇠)마다 처음 맞춘 뒤 다시 부르는 일.
@@ -134,6 +137,10 @@ struct Pages {
     deferred: Vec<String>,
     /// 사용자가 계속을 눌렀다(다음 `continued`에 미룬 다시 부르기를 한다).
     continuing: bool,
+    /// 다시 부를지 정한 뒤 다른 세션에서 다시 알려 온 화면(다른 사이트의 `<iframe>`은 품은 화면을 다시 부르면 새
+    /// 세션으로 열린다). 새 세션은 앞 세션의 소스 번호로 건 중단점을 화면이 돈 뒤에야 걸어 맨 위 코드를 지나치므로,
+    /// 품은 화면을 다시 불렀어도 그 세션에서 한 번 더 다시 연다.
+    recreated: HashSet<String>,
 }
 
 impl Default for Pages {
@@ -145,11 +152,13 @@ impl Default for Pages {
             sent: HashMap::new(),
             asking: HashSet::new(),
             inline: HashMap::new(),
-            proxy: ProxyState::default(),
+            proxies: HashMap::new(),
+            checks: Vec::new(),
             events: channel(),
             reloads: HashMap::new(),
             deferred: Vec::new(),
             continuing: false,
+            recreated: HashSet::new(),
         }
     }
 }
@@ -293,6 +302,11 @@ pub struct Debugger {
     root: Option<PathBuf>,
     /// js-debug 세션의 JSP 잇기. 다른 어댑터면 None.
     pages: Option<Pages>,
+    /// 소스(열쇠)를 알린 세션. js-debug는 다른 사이트의 `<iframe>`을 페이지 세션 아래의 세션으로 따로 열고, 소스
+    /// 번호와 CDP 프록시는 세션마다 따로다. 그 소스의 내용·그 화면은 그 세션에 묻는다.
+    owners: HashMap<String, u64>,
+    /// 호출 스택을 물은 세션(멈춘 세션). 스택의 소스는 그 세션의 것이다.
+    stack_session: Option<u64>,
 }
 
 /// 어댑터가 준 소스의 경로(없으면 이름, 그것도 없으면 번호).
@@ -716,29 +730,46 @@ impl Debugger {
             return;
         };
         let id = match &request {
-            Request::Threads => session.threads(),
+            Request::Threads => Some(session.threads()),
             Request::StackTrace => match self.thread_id {
-                Some(thread) => session.stack_trace(thread),
+                Some(thread) => {
+                    self.stack_session = Some(session.focus_id());
+                    Some(session.stack_trace(thread))
+                }
                 None => return,
             },
             Request::Scopes => match self.frames.get(self.frame) {
-                Some(frame) => session.scopes(frame.id),
+                Some(frame) => Some(session.scopes(frame.id)),
                 None => return,
             },
-            Request::Variables(reference) => session.variables(*reference),
+            Request::Variables(reference) => Some(session.variables(*reference)),
             Request::Evaluate(expression) => {
                 let frame = self.frames.get(self.frame).map(|f| f.id);
-                session.evaluate(expression, frame)
+                Some(session.evaluate(expression, frame))
             }
-            Request::LoadedSources => session.loaded_sources(),
-            Request::Source(source) => session.source(source),
-            Request::PageScripts(_) => session.request(
-                "evaluate",
-                json!({ "expression": page_lines::PAGE_SCRIPTS, "context": "clipboard" }),
-            ),
-            Request::CdpProxy => session.request("requestCDPProxy", json!({})),
+            Request::LoadedSources => Some(session.loaded_sources()),
+            Request::Source(source) => {
+                session.source(source, self.owners.get(&source_key(source)).copied())
+            }
+            Request::PageScripts(key) => {
+                let arguments =
+                    json!({ "expression": page_lines::PAGE_SCRIPTS, "context": "clipboard" });
+                match self.owners.get(key) {
+                    Some(&owner) => session.request_in(owner, "evaluate", arguments),
+                    None => Some(session.request("evaluate", arguments)),
+                }
+            }
+            Request::CdpProxy(owner) => session.request_in(*owner, "requestCDPProxy", json!({})),
         };
-        self.requests.insert(id, request);
+        match id {
+            Some(id) => {
+                self.requests.insert(id, request);
+            }
+            // 그 소스·화면을 알린 세션이 끝났다(그사이 화면을 다시 불러 새 세션이 열렸다 등).
+            None => {
+                let _ = self.on_response(request, Err("디버그 세션이 끝났습니다".into()));
+            }
+        }
     }
 
     fn reveal_frame(&self) -> Option<DebugNotice> {
@@ -857,9 +888,20 @@ impl Debugger {
                 }
                 // 화면을 불러오면 인라인 스크립트의 글을 받아 JSP를 찾는다(JSP 중단점을 걸려고). 화면
                 // 주소가 있는 소스만 묻는다(`eval`로 만든 스크립트 등은 뺀다).
-                DebugEvent::LoadedSource { reason, source } => {
+                DebugEvent::LoadedSource {
+                    reason,
+                    source,
+                    session,
+                } => {
                     let key = source_key(&source);
                     if reason != "removed" && is_remote(&source) && key.contains('/') {
+                        let previous = self.owners.insert(key.clone(), session);
+                        if previous.is_some_and(|previous| previous != session)
+                            && let Some(pages) = &mut self.pages
+                            && pages.reloads.remove(&key).is_some()
+                        {
+                            pages.recreated.insert(key.clone());
+                        }
                         self.loaded(key, source);
                     }
                 }
@@ -920,8 +962,10 @@ impl Debugger {
                 return None;
             }
             // CDP 프록시가 없으면 화면에서 글을 읽는다.
-            Err(_) if matches!(request, Request::CdpProxy) => {
-                self.proxy_answered(None);
+            Err(_) if matches!(request, Request::CdpProxy(_)) => {
+                if let Request::CdpProxy(session) = request {
+                    self.proxy_answered(session, None);
+                }
                 return None;
             }
             Err(e) => {
@@ -970,6 +1014,9 @@ impl Debugger {
                 }
                 for source in fetch {
                     let key = source_key(&source);
+                    if let Some(owner) = self.stack_session {
+                        self.owners.insert(key.clone(), owner);
+                    }
                     // 인라인 스크립트는 화면의 글로 맞춘다(지워진 블록은 내용을 물을 수 없다).
                     if self.pages.is_some()
                         && page_lines::inline_script(&source_text(&source)).is_some()
@@ -1065,8 +1112,8 @@ impl Debugger {
                     }
                 }
             }
-            Request::CdpProxy => {
-                self.proxy_answered(Proxy::from_json(&body));
+            Request::CdpProxy(session) => {
+                self.proxy_answered(session, Proxy::from_json(&body));
                 None
             }
         }
@@ -1095,18 +1142,22 @@ impl Debugger {
         }
     }
 
-    /// 화면의 블록 글을 묻는다: CDP 프록시가 있으면 따로 받고(처음이면 프록시부터 묻는다), 없으면 화면에서
-    /// 읽는다.
+    /// 화면의 블록 글을 묻는다: 그 화면을 알린 세션의 CDP 프록시가 있으면 따로 받고(처음이면 프록시부터
+    /// 묻는다), 없으면 화면에서 읽는다.
     fn ask_page(&mut self, key: String) {
+        let owner = self.owners.get(&key).copied();
         let Some(pages) = self.pages.as_mut() else {
             return;
         };
-        let proxy = match &mut pages.proxy {
+        let Some(owner) = owner else {
+            return self.send(Request::PageScripts(key));
+        };
+        let proxy = match pages.proxies.entry(owner).or_default() {
             ProxyState::Ready(proxy) => proxy.clone(),
             ProxyState::Asking(waiting) => return waiting.push(key),
-            ProxyState::Unknown => {
-                pages.proxy = ProxyState::Asking(vec![key]);
-                return self.send(Request::CdpProxy);
+            state @ ProxyState::Unknown => {
+                *state = ProxyState::Asking(vec![key]);
+                return self.send(Request::CdpProxy(owner));
             }
             ProxyState::Missing => return self.send(Request::PageScripts(key)),
         };
@@ -1204,16 +1255,45 @@ impl Debugger {
             .is_some_and(|origins| !origins.is_empty())
     }
 
-    /// 화면(`key`)을 처음 맞췄다: 화면을 다 읽기를 기다려 다시 불러도 되는지 본다(화면마다 한 번).
+    /// 화면(`key`)을 처음 맞췄다: 화면을 다 읽기를 기다려 다시 불러도 되는지 본다(화면마다 한 번). 다른 사이트의
+    /// `<iframe>`이면 품은 세션들의 CDP 프록시도 쓴다(없으면 물어 둔 뒤 다시 본다).
     fn check_reload(&mut self, key: &str) {
         let has_breakpoints = self.has_page_breakpoints(key);
+        let owner = self.owners.get(key).copied();
+        let parents = match (&self.session, owner) {
+            (Some(session), Some(owner)) => session.parents(owner),
+            _ => Vec::new(),
+        };
         let Some(pages) = self.pages.as_mut() else {
             return;
         };
         if !pages.inline.contains_key(key) || pages.reloads.contains_key(key) {
             return;
         }
-        let ProxyState::Ready(proxy) = &pages.proxy else {
+        let mut outer = Vec::new();
+        let mut ask = Vec::new();
+        for parent in parents {
+            match pages.proxies.entry(parent).or_default() {
+                ProxyState::Ready(proxy) => outer.push(proxy.clone()),
+                ProxyState::Missing => {}
+                ProxyState::Asking(_) => ask.push(None),
+                state @ ProxyState::Unknown => {
+                    *state = ProxyState::Asking(Vec::new());
+                    ask.push(Some(parent));
+                }
+            }
+        }
+        if !ask.is_empty() {
+            if !pages.checks.iter().any(|k| k == key) {
+                pages.checks.push(key.to_owned());
+            }
+            for parent in ask.into_iter().flatten() {
+                self.send(Request::CdpProxy(parent));
+            }
+            return;
+        }
+        let Some(ProxyState::Ready(proxy)) = owner.and_then(|owner| pages.proxies.get(&owner))
+        else {
             // 옛 js-debug(CDP 프록시 없음): 폼을 보내 연 화면인지 알 수 없어 다시 부르지 않는다.
             self.settle(key.to_owned(), Reload::Done);
             if has_breakpoints {
@@ -1228,7 +1308,7 @@ impl Debugger {
         let (proxy, page, key) = (proxy.clone(), shown(key), key.to_owned());
         pages.reloads.insert(key.clone(), Reload::Checking);
         self.spawn_cdp(move || {
-            let loaded = cdp::page_loaded(&proxy, &page, LOAD_WAIT);
+            let loaded = cdp::page_loaded(&proxy, &page, LOAD_WAIT, &outer);
             PageEvent::Loaded(key, loaded)
         });
     }
@@ -1236,6 +1316,10 @@ impl Debugger {
     /// 화면을 다 읽었다: 다시 불러도 되면 맞춘 중단점을 다시 보내 그 답을 받은 뒤 부른다(프레임 안 화면은 그
     /// 프레임만). 폼을 보내 연 화면, 처음 주소에서 다른 화면으로 간 프레임은 부르지 않고 알린다.
     fn on_page_loaded(&mut self, key: String, loaded: Result<cdp::Loaded, String>) {
+        // 그사이 다른 세션에서 다시 알려 와 새로 본다(앞 세션의 프레임은 없다).
+        if self.pages.as_ref().and_then(|p| p.reloads.get(&key)) != Some(&Reload::Checking) {
+            return;
+        }
         let target = match loaded {
             Ok(cdp::Loaded::Reload(target)) => Ok(target),
             Ok(cdp::Loaded::FormSubmit) => {
@@ -1324,7 +1408,7 @@ impl Debugger {
                     .any(|(other, reload)| shown(other) == *page && state(reload))
             })
         };
-        if ancestor(|reload| *reload == Reload::Reloaded) {
+        if !pages.recreated.contains(&key) && ancestor(|reload| *reload == Reload::Reloaded) {
             self.settle(key, Reload::Done);
         } else if ancestor(Reload::pending) {
             self.settle(key, Reload::Waiting(target));
@@ -1367,7 +1451,10 @@ impl Debugger {
 
     /// 화면을 다시 부른다(맨 위 화면이나 그 프레임, 한 번).
     fn reload_page(&mut self, key: String, target: cdp::Target) {
-        let Some(ProxyState::Ready(proxy)) = self.pages.as_ref().map(|p| &p.proxy) else {
+        let owner = self.owners.get(&key).copied();
+        let Some(ProxyState::Ready(proxy)) =
+            owner.and_then(|owner| self.pages.as_ref().and_then(|p| p.proxies.get(&owner)))
+        else {
             return;
         };
         let (proxy, reloading) = (proxy.clone(), key.clone());
@@ -1378,18 +1465,23 @@ impl Debugger {
         self.settle(key, Reload::Reloaded);
     }
 
-    /// CDP 프록시 답을 받았다: 기다리던 화면들의 글을 묻는다.
-    fn proxy_answered(&mut self, proxy: Option<Proxy>) {
+    /// 세션(`session`)의 CDP 프록시 답을 받았다: 기다리던 화면들의 글을 묻고, 품은 세션의 프록시를 기다리던
+    /// 화면들을 다시 본다.
+    fn proxy_answered(&mut self, session: u64, proxy: Option<Proxy>) {
         let Some(pages) = self.pages.as_mut() else {
             return;
         };
         let state = proxy.map_or(ProxyState::Missing, ProxyState::Ready);
-        let waiting = match std::mem::replace(&mut pages.proxy, state) {
-            ProxyState::Asking(waiting) => waiting,
+        let waiting = match pages.proxies.insert(session, state) {
+            Some(ProxyState::Asking(waiting)) => waiting,
             _ => Vec::new(),
         };
+        let checks = std::mem::take(&mut pages.checks);
         for key in waiting {
             self.ask_page(key);
+        }
+        for key in checks {
+            self.check_reload(&key);
         }
     }
 
@@ -2015,14 +2107,61 @@ mod tests {
         frame_blocks: &'static [(u64, &'static str)],
         from_src: bool,
     ) -> (u16, std::sync::mpsc::Receiver<String>) {
+        fake_cdp_with(move |method, params| match method {
+            "Page.getFrameTree" => json!({ "frameTree": {
+                                "frame": { "id": "top", "url": "http://127.0.0.1:8080/app/list.do" },
+                                "childFrames": [{
+                                    "frame": { "id": "child", "url": "http://127.0.0.1:8080/app/detail.do" },
+                                    "childFrames": [{ "frame": {
+                                        "id": "grand", "url": "http://127.0.0.1:8080/app/inner.do" } }] }] } }),
+            "Runtime.evaluate" if params["expression"] == "document.readyState" => {
+                json!({ "result": { "type": "string", "value": "complete" } })
+            }
+            "Runtime.evaluate" => {
+                json!({ "result": { "type": "boolean", "value": from_src } })
+            }
+            "Page.createIsolatedWorld" => json!({ "executionContextId": 7 }),
+            "Page.getNavigationHistory" => json!({ "currentIndex": 0, "entries": [
+                                { "id": 1, "url": "http://127.0.0.1:8080/app/list.do",
+                                  "transitionType": transition }] }),
+            "Page.reload" => json!({}),
+            "Page.navigate" => json!({ "frameId": params["frameId"] }),
+            "Debugger.setBreakpointByUrl" => {
+                let line = params["lineNumber"].as_u64().unwrap_or_default() + 1;
+                json!({ "breakpointId": format!("bp{line}"), "locations": [
+                                    { "scriptId": format!("{line}"), "lineNumber": line, "columnNumber": 0 }] })
+            }
+            "Debugger.getScriptSource" => {
+                let line: u64 = params["scriptId"].as_str().unwrap().parse().unwrap();
+                let text = frame_blocks
+                    .iter()
+                    .find(|(l, _)| *l == line)
+                    .map(|(_, t)| *t);
+                json!({ "scriptSource": text })
+            }
+            "Debugger.removeBreakpoint" => json!({}),
+            _ if params["frameId"] == "child" || params["frameId"] == "grand" => {
+                json!(null)
+            }
+            _ => json!({ "content": html, "base64Encoded": false }),
+        })
+    }
+
+    /// 가짜 CDP 프록시(웹소켓)의 틀: 손짓에 101로 답하고, 명령마다 `answer`(이름, 인자)의 결과로 답한다. 결과가
+    /// null이면 실제 브라우저처럼 원래 HTML이 없다는 오류로 답한다. 받은 명령 이름을 돌려준다(프레임을 다시 열면
+    /// 그 프레임도).
+    fn fake_cdp_with(
+        answer: impl Fn(&str, &Value) -> Value + Send + Sync + 'static,
+    ) -> (u16, std::sync::mpsc::Receiver<String>) {
         use std::io::{BufRead, Read, Write};
 
+        let answer = std::sync::Arc::new(answer);
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let (seen, methods) = channel();
         thread::spawn(move || {
             for mut stream in listener.incoming().flatten() {
-                let seen = seen.clone();
+                let (seen, answer) = (seen.clone(), answer.clone());
                 thread::spawn(move || {
                     let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
                     let mut line = String::new();
@@ -2054,45 +2193,7 @@ mod tests {
                         let request: Value = serde_json::from_slice(&payload).unwrap();
                         let method = request["method"].as_str().unwrap_or_default().to_owned();
                         let params = &request["params"];
-                        let result = match method.as_str() {
-                            "Page.getFrameTree" => json!({ "frameTree": {
-                                "frame": { "id": "top", "url": "http://127.0.0.1:8080/app/list.do" },
-                                "childFrames": [{
-                                    "frame": { "id": "child", "url": "http://127.0.0.1:8080/app/detail.do" },
-                                    "childFrames": [{ "frame": {
-                                        "id": "grand", "url": "http://127.0.0.1:8080/app/inner.do" } }] }] } }),
-                            "Runtime.evaluate" if params["expression"] == "document.readyState" => {
-                                json!({ "result": { "type": "string", "value": "complete" } })
-                            }
-                            "Runtime.evaluate" => {
-                                json!({ "result": { "type": "boolean", "value": from_src } })
-                            }
-                            "Page.createIsolatedWorld" => json!({ "executionContextId": 7 }),
-                            "Page.getNavigationHistory" => json!({ "currentIndex": 0, "entries": [
-                                { "id": 1, "url": "http://127.0.0.1:8080/app/list.do",
-                                  "transitionType": transition }] }),
-                            "Page.reload" => json!({}),
-                            "Page.navigate" => json!({ "frameId": params["frameId"] }),
-                            "Debugger.setBreakpointByUrl" => {
-                                let line = params["lineNumber"].as_u64().unwrap_or_default() + 1;
-                                json!({ "breakpointId": format!("bp{line}"), "locations": [
-                                    { "scriptId": format!("{line}"), "lineNumber": line, "columnNumber": 0 }] })
-                            }
-                            "Debugger.getScriptSource" => {
-                                let line: u64 =
-                                    params["scriptId"].as_str().unwrap().parse().unwrap();
-                                let text = frame_blocks
-                                    .iter()
-                                    .find(|(l, _)| *l == line)
-                                    .map(|(_, t)| *t);
-                                json!({ "scriptSource": text })
-                            }
-                            "Debugger.removeBreakpoint" => json!({}),
-                            _ if params["frameId"] == "child" || params["frameId"] == "grand" => {
-                                json!(null)
-                            }
-                            _ => json!({ "content": html, "base64Encoded": false }),
-                        };
+                        let result = answer(&method, params);
                         // 프레임을 다시 열면 어느 프레임인지도 남긴다.
                         let _ = seen.send(match params["frameId"].as_str() {
                             Some(frame) if method == "Page.navigate" => format!("{method} {frame}"),
@@ -2888,6 +2989,335 @@ mod tests {
             .filter(|m| m.starts_with("Page.navigate"))
             .collect();
         assert_eq!(navigated, ["Page.navigate child"], "{seen:?}");
+        debugger.shutdown();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 한 화면 세션: 알릴 블록들과 그 세션의 CDP 프록시 포트.
+    type FakePage = (Vec<(Source, &'static str)>, u16);
+
+    /// 세션이 겹친 가짜 js-debug: 브라우저 세션이 첫 화면의 세션을, 각 화면 세션이 다음 화면의 세션을 거꾸로
+    /// 요청한다(페이지 안 다른 사이트의 `<iframe>`처럼). 화면 세션마다 그 블록들을 알리고 그 세션의 CDP 프록시
+    /// (포트)를 준다. 소스 번호는 세션마다 따로라 겹쳐도 된다. `respawn`의 신호가 오면 마지막 화면을 품은 세션이
+    /// 그 화면의 새 세션(`respawn`의 화면)을 다시 요청한다(품은 화면을 다시 불러 다른 사이트의 프레임이 새로
+    /// 열린 것처럼).
+    fn fake_js_debug_nested(
+        pages: Vec<FakePage>,
+        respawn: Option<(std::sync::mpsc::Receiver<()>, FakePage)>,
+    ) -> std::net::SocketAddr {
+        use ferrite_lsp::transport::{read_message, write_message};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        thread::spawn(move || {
+            let last = pages.len();
+            let (mut signal, again) = match respawn {
+                Some((signal, page)) => (Some(signal), Some(page)),
+                None => (None, None),
+            };
+            let roles = std::iter::once(None)
+                .chain(pages.into_iter().map(Some))
+                .chain(again.map(Some));
+            for (index, role) in roles.enumerate() {
+                let (stream, _) = listener.accept().unwrap();
+                // 마지막 화면을 품은 세션: 신호가 오면 그 화면의 새 세션을 요청한다.
+                if index + 1 == last
+                    && let Some(signal) = signal.take()
+                {
+                    let mut writer = stream.try_clone().unwrap();
+                    thread::spawn(move || {
+                        if signal.recv().is_ok() {
+                            let request = json!({ "seq": 1000, "type": "request",
+                                "command": "startDebugging",
+                                "arguments": { "request": "launch", "configuration": {} } });
+                            let _ =
+                                write_message(&mut writer, &serde_json::to_vec(&request).unwrap());
+                        }
+                    });
+                }
+                thread::spawn(move || {
+                    let (blocks, cdp) = role.unwrap_or_default();
+                    let mut reader = std::io::BufReader::new(&stream);
+                    let mut writer = &stream;
+                    let mut seq = 0;
+                    let mut send = |message: Value| {
+                        seq += 1;
+                        let mut message = message;
+                        message["seq"] = json!(seq);
+                        write_message(&mut writer, &serde_json::to_vec(&message).unwrap()).unwrap();
+                    };
+                    while let Ok(Some(body)) = read_message(&mut reader) {
+                        let request: Value = serde_json::from_slice(&body).unwrap();
+                        // 거꾸로 보낸 요청(startDebugging)의 답.
+                        if request["type"] == "response" {
+                            continue;
+                        }
+                        let command = request["command"].as_str().unwrap_or_default().to_owned();
+                        let mut body = json!({});
+                        let mut after = Vec::new();
+                        match command.as_str() {
+                            "initialize" => {
+                                body = json!({ "supportsConfigurationDoneRequest": true });
+                                after.push(
+                                    json!({ "type": "event", "event": "initialized", "body": {} }),
+                                );
+                            }
+                            "setBreakpoints" => {
+                                let lines = &request["arguments"]["breakpoints"];
+                                body = json!({ "breakpoints": lines.as_array().unwrap().iter()
+                                    .map(|b| json!({ "verified": true, "line": b["line"] }))
+                                    .collect::<Vec<_>>() });
+                            }
+                            "configurationDone" => {
+                                for (source, _) in &blocks {
+                                    after.push(json!({ "type": "event", "event": "loadedSource",
+                                        "body": { "reason": "new", "source": source.to_json() } }));
+                                }
+                                if index < last {
+                                    after.push(json!({ "type": "request", "command": "startDebugging",
+                                        "arguments": { "request": "launch", "configuration": {} } }));
+                                }
+                            }
+                            "source" => {
+                                let (source, text) = blocks.last().unwrap();
+                                let (_, line, column) =
+                                    page_lines::inline_script(source.name.as_deref().unwrap())
+                                        .unwrap();
+                                body = json!({ "content": page_lines::assemble(&[(line, column, *text)]) });
+                            }
+                            "requestCDPProxy" => {
+                                body = json!({ "host": "127.0.0.1", "port": cdp, "path": "/cdp" });
+                            }
+                            "threads" => body = json!({ "threads": [{ "id": 1, "name": "main" }] }),
+                            _ => {}
+                        }
+                        send(json!({ "type": "response", "request_seq": request["seq"],
+                            "success": true, "command": command, "body": body }));
+                        for message in after {
+                            send(message);
+                        }
+                        if command == "disconnect" {
+                            break;
+                        }
+                    }
+                });
+            }
+        });
+        address
+    }
+
+    /// 다른 사이트 프레임 시험: (디버거, 프로젝트, 맨 위 화면의 CDP 명령, 프레임의 CDP 명령, 다시 열린 프레임의
+    /// CDP 명령).
+    type CrossSite = (
+        Debugger,
+        PathBuf,
+        std::sync::mpsc::Receiver<String>,
+        std::sync::mpsc::Receiver<String>,
+        std::sync::mpsc::Receiver<String>,
+    );
+
+    /// 다른 사이트 프레임 세션의 가짜 CDP: 트리는 그 프레임(`frame`)에서 시작하고 품은 프레임(top)을 `parentId`로
+    /// 안다. 원래 HTML은 주지 않아 블록 글(`text`)은 디버거에서 준다.
+    fn cross_frame_cdp(
+        frame: &'static str,
+        text: &'static str,
+    ) -> (u16, std::sync::mpsc::Receiver<String>) {
+        fake_cdp_with(move |method, params| match method {
+            "Page.getFrameTree" => json!({ "frameTree": { "frame": {
+                "id": frame, "parentId": "top", "url": "http://localhost:8080/app/frag.do" } } }),
+            "Runtime.evaluate" if params["expression"] == "document.readyState" => {
+                json!({ "result": { "type": "string", "value": "complete" } })
+            }
+            "Page.createIsolatedWorld" => json!({ "executionContextId": 9 }),
+            "Page.getResourceContent" => json!(null),
+            "Debugger.setBreakpointByUrl" => json!({ "breakpointId": "bp", "locations": [
+                { "scriptId": "s2", "lineNumber": 1, "columnNumber": 8 }] }),
+            "Debugger.getScriptSource" => json!({ "scriptSource": text }),
+            "Debugger.removeBreakpoint" => json!({}),
+            "Page.navigate" => json!({ "frameId": params["frameId"] }),
+            // 다른 사이트의 프레임은 맨 위 대상이 아니다(`Page.reload`·탐색 기록을 받지 않는다).
+            other => panic!("프레임 세션에 물음: {other}"),
+        })
+    }
+
+    /// 맨 위 화면(list.do, 페이지 세션)이 다른 사이트의 화면(localhost의 frag.do)을 `<iframe>`으로 보이는 시험.
+    /// 두 화면 모두 블록 하나(화면 2줄)를 JSP에서 받았고, `breakpoints`로 고른 JSP(화면 3줄 = JSP 3줄)에 중단점을
+    /// 건다. 맨 위 화면을 다시 부르면 프레임이 새 세션(프레임 far2)으로 다시 열린다.
+    fn start_cross_site(name: &str, breakpoints: &[&str]) -> CrossSite {
+        let root = std::env::temp_dir().join(format!("ferrite-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let jsp = root.join("src/main/webapp/WEB-INF/jsp/board");
+        std::fs::create_dir_all(&jsp).unwrap();
+        std::fs::write(
+            jsp.join("list.jsp"),
+            "<p>목록</p>\n<script>\nvar list = 1;\n</script>\n",
+        )
+        .unwrap();
+        std::fs::write(
+            jsp.join("frag.jsp"),
+            "<p>조각</p>\n<script>\nvar frag = 2;\n</script>\n",
+        )
+        .unwrap();
+        const LIST: &str = "\nvar list = 1;\n";
+        const FRAG: &str = "\nvar frag = 2;\n";
+        // 페이지 세션의 CDP: 그 트리에는 다른 사이트의 프레임이 없다. 품은 프레임에서 `src`를 물으면 frag.do다.
+        // 다시 부르면 프레임이 새 세션으로 열린다.
+        let (respawn, reloaded) = channel();
+        let respawn = std::sync::Mutex::new(respawn);
+        let (top_cdp, top_methods) = fake_cdp_with(move |method, params| match method {
+            "Page.getFrameTree" => json!({ "frameTree": { "frame": {
+                "id": "top", "url": "http://127.0.0.1:8080/app/list.do" } } }),
+            "Runtime.evaluate" if params["expression"] == "document.readyState" => {
+                json!({ "result": { "type": "string", "value": "complete" } })
+            }
+            "Runtime.evaluate" => json!({ "result": { "type": "boolean", "value": true } }),
+            "Page.createIsolatedWorld" => json!({ "executionContextId": 7 }),
+            "Page.getNavigationHistory" => json!({ "currentIndex": 0, "entries": [
+                { "id": 1, "url": "http://127.0.0.1:8080/app/list.do", "transitionType": "link" }] }),
+            "Page.reload" => {
+                let _ = respawn.lock().unwrap().send(());
+                json!({})
+            }
+            "Page.getResourceContent" => json!({ "content":
+                "<p>목록</p>\n<script>\nvar list = 1;\n</script>\n<iframe src=\"http://localhost:8080/app/frag.do\"></iframe>\n",
+                "base64Encoded": false }),
+            // 페이지 세션은 다른 사이트 프레임의 블록을 모른다(여기로 물으면 틀린 것이다).
+            other => panic!("페이지 세션에 물음: {other}"),
+        });
+        let (frame_cdp, frame_methods) = cross_frame_cdp("far", FRAG);
+        let (again_cdp, again_methods) = cross_frame_cdp("far2", FRAG);
+        let frame_block = || {
+            vec![(
+                source("localhost\u{a789}8080/app/frag.do\u{a789}2:9", 5),
+                FRAG,
+            )]
+        };
+        let address = fake_js_debug_nested(
+            vec![
+                (
+                    vec![(
+                        source("127.0.0.1\u{a789}8080/app/list.do\u{a789}2:9", 5),
+                        LIST,
+                    )],
+                    top_cdp,
+                ),
+                (frame_block(), frame_cdp),
+            ],
+            Some((reloaded, (frame_block(), again_cdp))),
+        );
+        let config = DebugConfig {
+            name: "다른 사이트 프레임".into(),
+            adapter: "js-debug".into(),
+            request: "launch".into(),
+            arguments: serde_json::json!({}),
+            build: None,
+        };
+        let breakpoints = breakpoints
+            .iter()
+            .map(|name| {
+                (
+                    jsp.join(name),
+                    vec![Breakpoint {
+                        line: 3,
+                        condition: None,
+                    }],
+                )
+            })
+            .collect();
+        let mut debugger = Debugger::default();
+        debugger
+            .start(
+                &config,
+                &root,
+                None,
+                breakpoints,
+                Adapter::Tcp(address),
+                &egui::Context::default(),
+            )
+            .unwrap();
+        debugger.sources = Some(root.join("sources"));
+        (debugger, root, top_methods, frame_methods, again_methods)
+    }
+
+    const CROSS_TOP: &str = "127.0.0.1\u{a789}8080/app/list.do";
+    const CROSS_FRAME: &str = "localhost\u{a789}8080/app/frag.do";
+
+    #[test]
+    fn js_debug에서_다른_사이트_iframe은_그_세션의_cdp로_맞추고_그_프레임만_다시_연다() {
+        let (mut debugger, root, top_methods, frame_methods, _) =
+            start_cross_site("cross-frame", &["frag.jsp"]);
+        let (mut top_seen, mut frame_seen) = (Vec::new(), Vec::new());
+        pump(&mut debugger, "프레임을 다시 열지 않음", |_| {
+            top_seen.extend(top_methods.try_iter());
+            frame_seen.extend(frame_methods.try_iter());
+            frame_seen.iter().any(|m| m == "Page.navigate far")
+        });
+        // 두 화면 모두 알린 세션의 CDP로 맞췄다: 맨 위 화면은 원래 HTML에서, 프레임은 그 세션의 디버거에서.
+        assert!(
+            top_seen.iter().any(|m| m == "Page.getResourceContent"),
+            "{top_seen:?}"
+        );
+        assert!(
+            frame_seen.iter().any(|m| m == "Debugger.getScriptSource"),
+            "{frame_seen:?}"
+        );
+        let local = |key: &str| debugger.stored.get(key).cloned();
+        assert!(local(CROSS_TOP).is_some() && local(CROSS_FRAME).is_some());
+        // 중단점이 없는 맨 위 화면은 다시 부르지 않는다. 프레임이 처음 주소인지는 페이지 세션의 품은 프레임에서 봤다.
+        assert!(!top_seen.iter().any(|m| m == "Page.reload"), "{top_seen:?}");
+        pump(&mut debugger, "다시 연 것을 알리지 않음", |d| {
+            d.console
+                .contains("[화면을 다시 불렀습니다: localhost:8080/app/frag.do]")
+        });
+        debugger.shutdown();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn js_debug에서_다른_사이트_iframe을_품은_화면을_다시_부르면_새_세션에서_그_프레임을_한_번_더_연다()
+     {
+        let (mut debugger, root, top_methods, frame_methods, again_methods) =
+            start_cross_site("cross-both", &["list.jsp", "frag.jsp"]);
+        let (mut top_seen, mut again_seen) = (Vec::new(), Vec::new());
+        // 맨 위 화면을 다시 부르면 그 안의 프레임도 다시 열리므로, 앞 세션의 프레임은 따로 열지 않는다.
+        pump(
+            &mut debugger,
+            "맨 위 화면을 다시 부르지 않음",
+            |d| {
+                top_seen.extend(top_methods.try_iter());
+                top_seen.iter().any(|m| m == "Page.reload")
+                    && d.pages
+                        .as_ref()
+                        .is_some_and(|p| p.reloads.get(CROSS_TOP) == Some(&Reload::Reloaded))
+            },
+        );
+        // 다시 열린 프레임은 새 세션이라 앞 세션의 소스 번호로 건 중단점이 늦게 걸려 맨 위 코드를 지나친다. 새
+        // 세션의 CDP로 다시 맞추고 그 세션에서 한 번 더 연다.
+        pump(
+            &mut debugger,
+            "새 세션에서 프레임을 다시 열지 않음",
+            |_| {
+                again_seen.extend(again_methods.try_iter());
+                again_seen.iter().any(|m| m == "Page.navigate far2")
+            },
+        );
+        let frame_seen: Vec<String> = frame_methods.try_iter().collect();
+        assert!(
+            !frame_seen.iter().any(|m| m.starts_with("Page.navigate")),
+            "{frame_seen:?}"
+        );
+        // 한 번만 연다.
+        let until = Instant::now() + Duration::from_millis(300);
+        while Instant::now() < until {
+            debugger.poll();
+            again_seen.extend(again_methods.try_iter());
+            thread::sleep(Duration::from_millis(10));
+        }
+        let navigated = again_seen
+            .iter()
+            .filter(|m| m.starts_with("Page.navigate"))
+            .count();
+        assert_eq!(navigated, 1, "{again_seen:?}");
         debugger.shutdown();
         let _ = std::fs::remove_dir_all(&root);
     }

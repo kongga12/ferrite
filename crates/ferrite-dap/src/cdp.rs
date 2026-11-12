@@ -8,6 +8,11 @@
 //!   스크립트를 찾아 그 글을 받는다.
 //! - 다시 부르기: 맨 위 화면은 `Page.reload`, 프레임 안 화면은 그 프레임만 같은 주소로 다시 연다.
 //!
+//! 프록시는 그것을 준 세션의 대상(페이지나 프레임)만 다룬다. 다른 사이트의 `<iframe>`은 브라우저가 다른
+//! 프로세스로 띄워 js-debug가 페이지 세션 아래의 세션으로 따로 붙으므로, 그 화면은 그 세션의 프록시로 다룬다.
+//! 그 세션의 프레임 트리는 그 프레임에서 시작하고(`parentId`가 품은 프레임), 페이지 세션의 트리에는 그
+//! 프레임이 없다.
+//!
 //! 로컬 프록시와 글 틀만 주고받는 가장 작은 웹소켓 클라이언트다.
 
 use std::io::{BufRead, BufReader, Read, Write};
@@ -169,17 +174,26 @@ pub enum Loaded {
 
 /// `page`를 연 프레임이 화면을 다 읽을 때까지(`document.readyState`가 "loading"이 아닐 때까지, 넉넉히 `wait`)
 /// 기다린 뒤 다시 불러도 되는지 알린다. 다 읽은 뒤면 화면의 인라인 스크립트가 모두 돌아 js-debug가 블록을 다
-/// 알렸다.
+/// 알렸다. `proxy`는 그 화면을 알린 세션의 것, `parents`는 그 세션을 품은 세션들의 것이다(가까운 것부터).
 /// - 맨 위 화면: 폼을 보내 열었으면(`Page.getNavigationHistory`의 지금 항목이 "form_submit") 다시 부르지 않는다.
 /// - 프레임 안 화면: 프레임이 처음 주소(`frameElement.src`)를 그대로 보이면(그 주소를 GET으로 열었다) 그
 ///   프레임만 다시 연다. 그 프레임의 문서에서 묻는다(격리된 세계라 화면의 스크립트와 섞이지 않는다).
-pub fn page_loaded(proxy: &Proxy, page: &str, wait: Duration) -> Result<Loaded, String> {
+/// - 다른 사이트의 `<iframe>`: `frameElement`를 읽을 수 없어 품은 프레임에 `src`가 지금 주소인 `<iframe>`·
+///   `<frame>`이 있는지 본다. 품은 화면들은 `parents`의 프레임 트리에서 찾는다.
+pub fn page_loaded(
+    proxy: &Proxy,
+    page: &str,
+    wait: Duration,
+    parents: &[Proxy],
+) -> Result<Loaded, String> {
     let mut socket = Socket::connect(proxy)?;
     let tree = socket.call(1, "Page.getFrameTree", json!({}))?;
     let path = find_path(&tree["frameTree"], page).ok_or(NOT_OPEN)?;
-    let (frame, ancestors) = path.split_last().ok_or("화면 프레임이 없습니다")?;
+    let (frame, inner) = path.split_last().ok_or("화면 프레임이 없습니다")?;
+    // 이 세션의 맨 위 프레임이 다른 프로세스의 프레임 안에 있다(다른 사이트의 `<iframe>`).
+    let outer = path[0]["parentId"].as_str();
     let mut id = 2;
-    if ancestors.is_empty() {
+    if inner.is_empty() && outer.is_none() {
         if !socket.wait_loaded(&mut id, wait, None)? {
             return Err("화면을 다 읽지 못했습니다".into());
         }
@@ -198,6 +212,15 @@ pub fn page_loaded(proxy: &Proxy, page: &str, wait: Duration) -> Result<Loaded, 
     let (Some(frame_id), Some(url)) = (frame["id"].as_str(), frame["url"].as_str()) else {
         return Err("화면 프레임이 없습니다".into());
     };
+    let mut ancestors = match outer {
+        Some(parent) => outer_pages(parents, parent)?,
+        None => Vec::new(),
+    };
+    ancestors.extend(
+        inner
+            .iter()
+            .map(|frame| bare(frame["url"].as_str().unwrap_or_default()).to_owned()),
+    );
     let world = socket.call(
         id,
         "Page.createIsolatedWorld",
@@ -210,24 +233,91 @@ pub fn page_loaded(proxy: &Proxy, page: &str, wait: Duration) -> Result<Loaded, 
     if !socket.wait_loaded(&mut id, wait, Some(context))? {
         return Err("화면을 다 읽지 못했습니다".into());
     }
-    let from_src = socket.call(
-        id,
-        "Runtime.evaluate",
-        json!({ "contextId": context, "returnByValue": true,
-                "expression": "!!window.frameElement && window.frameElement.src.split('#')[0] === location.href.split('#')[0]" }),
-    )?;
-    Ok(if from_src["result"]["value"] == true {
+    let from_src = match outer {
+        Some(parent) if inner.is_empty() => parent_shows(parents, parent, url)?,
+        _ => {
+            socket.call(
+                id,
+                "Runtime.evaluate",
+                json!({ "contextId": context, "returnByValue": true,
+                        "expression": "!!window.frameElement && window.frameElement.src.split('#')[0] === location.href.split('#')[0]" }),
+            )?["result"]["value"]
+                == true
+        }
+    };
+    Ok(if from_src {
         Loaded::Reload(Target::Frame {
             id: frame_id.to_owned(),
             url: url.to_owned(),
-            ancestors: ancestors
-                .iter()
-                .map(|frame| bare(frame["url"].as_str().unwrap_or_default()).to_owned())
-                .collect(),
+            ancestors,
         })
     } else {
         Loaded::FrameMoved
     })
+}
+
+/// 품은 세션들(`parents`)에서 프레임 `frame`을 찾는다: (그 세션의 프록시, 그 세션의 맨 위 프레임부터 그
+/// 프레임까지의 주소들, 그 세션의 맨 위 프레임을 품은 프레임).
+fn locate<'a>(
+    parents: &'a [Proxy],
+    frame: &str,
+) -> Result<(&'a Proxy, Vec<String>, Option<String>), String> {
+    for proxy in parents {
+        let tree = Socket::connect(proxy)?.call(1, "Page.getFrameTree", json!({}))?;
+        if let Some(path) = find_path_by(&tree["frameTree"], &|f| f["id"] == frame) {
+            let pages = path
+                .iter()
+                .map(|f| bare(f["url"].as_str().unwrap_or_default()).to_owned())
+                .collect();
+            return Ok((
+                proxy,
+                pages,
+                path[0]["parentId"].as_str().map(str::to_owned),
+            ));
+        }
+    }
+    Err(NOT_OPEN.into())
+}
+
+/// 다른 사이트의 `<iframe>`을 품은 화면들(맨 위 화면부터): 품은 프레임(`frame`)에서 맨 위 화면까지 세션을
+/// 거슬러 오른다.
+fn outer_pages(parents: &[Proxy], frame: &str) -> Result<Vec<String>, String> {
+    let mut pages = Vec::new();
+    let mut frame = frame.to_owned();
+    // 세션마다 한 번 오르면 맨 위에 닿는다(더 오르면 트리가 어긋난 것이다).
+    for _ in 0..parents.len() {
+        let (_, mut outer, parent) = locate(parents, &frame)?;
+        outer.append(&mut pages);
+        pages = outer;
+        match parent {
+            Some(parent) => frame = parent,
+            None => return Ok(pages),
+        }
+    }
+    Err(NOT_OPEN.into())
+}
+
+/// 품은 프레임(`frame`)에 `src`가 `url`(`#` 뒤를 뺀 것)인 `<iframe>`·`<frame>`이 있는지(처음 주소를 그대로
+/// 보이는지). 그 프레임의 격리된 세계에서 묻는다.
+fn parent_shows(parents: &[Proxy], frame: &str, url: &str) -> Result<bool, String> {
+    let (proxy, ..) = locate(parents, frame)?;
+    let mut socket = Socket::connect(proxy)?;
+    let world = socket.call(
+        1,
+        "Page.createIsolatedWorld",
+        json!({ "frameId": frame, "worldName": "ferrite" }),
+    )?;
+    let context = world["executionContextId"]
+        .as_i64()
+        .ok_or("품은 프레임에서 물을 곳이 없습니다")?;
+    let url = Value::from(url.split('#').next().unwrap_or(url)).to_string();
+    let shown = socket.call(
+        2,
+        "Runtime.evaluate",
+        json!({ "contextId": context, "returnByValue": true,
+                "expression": format!("Array.prototype.some.call(document.querySelectorAll('iframe,frame'), function (f) {{ return f.src.split('#')[0] === {url}; }})") }),
+    )?;
+    Ok(shown["result"]["value"] == true)
 }
 
 /// 맨 위 화면을 다 읽을 때까지(`document.readyState`가 "loading"이 아닐 때까지, 넉넉히 `wait`) 기다린다. 다
@@ -265,14 +355,21 @@ fn find_frame<'a>(node: &'a Value, page: &str) -> Option<&'a Value> {
 
 /// 맨 위 프레임부터 주소가 `page`인 프레임까지의 프레임들.
 fn find_path<'a>(node: &'a Value, page: &str) -> Option<Vec<&'a Value>> {
+    find_path_by(node, &|frame| {
+        bare(frame["url"].as_str().unwrap_or_default()) == page
+    })
+}
+
+/// 맨 위 프레임부터 `wanted`인 프레임까지의 프레임들.
+fn find_path_by<'a>(node: &'a Value, wanted: &dyn Fn(&Value) -> bool) -> Option<Vec<&'a Value>> {
     let frame = &node["frame"];
-    if bare(frame["url"].as_str().unwrap_or_default()) == page {
+    if wanted(frame) {
         return Some(vec![frame]);
     }
     let mut path = node["childFrames"]
         .as_array()?
         .iter()
-        .find_map(|child| find_path(child, page))?;
+        .find_map(|child| find_path_by(child, wanted))?;
     path.insert(0, frame);
     Some(path)
 }

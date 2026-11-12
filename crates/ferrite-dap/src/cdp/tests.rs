@@ -237,7 +237,7 @@ fn 화면을_다_읽기를_기다려_다시_불러도_되는지_알리고_다시
     // 맨 위 화면: 읽는 중이던 화면이 다 읽히면 탐색 기록을 본다. 링크로 연 화면은 다시 불러도 된다.
     let (proxy, received) = page_proxy(&["loading", "loading", "interactive"], "link", true);
     assert_eq!(
-        page_loaded(&proxy, LIST, wait).unwrap(),
+        page_loaded(&proxy, LIST, wait, &[]).unwrap(),
         Loaded::Reload(Target::Top)
     );
     let names: Vec<String> = requests(&received).into_iter().map(|(m, _)| m).collect();
@@ -255,7 +255,10 @@ fn 화면을_다_읽기를_기다려_다시_불러도_되는지_알리고_다시
     wait_method(&received, "Page.reload");
     // 폼을 보내 연 맨 위 화면.
     let (proxy, _) = page_proxy(&["complete"], "form_submit", true);
-    assert_eq!(page_loaded(&proxy, LIST, wait).unwrap(), Loaded::FormSubmit);
+    assert_eq!(
+        page_loaded(&proxy, LIST, wait, &[]).unwrap(),
+        Loaded::FormSubmit
+    );
 
     // 프레임 안 화면: 그 프레임의 문서(격리된 세계)에서 다 읽기를 기다리고, 처음 주소를 보이면 그 프레임만
     // 같은 주소로 다시 연다.
@@ -266,7 +269,7 @@ fn 화면을_다_읽기를_기다려_다시_불러도_되는지_알리고_다시
         ancestors: vec![LIST.into()],
     };
     assert_eq!(
-        page_loaded(&proxy, DETAIL, wait).unwrap(),
+        page_loaded(&proxy, DETAIL, wait, &[]).unwrap(),
         Loaded::Reload(target.clone()),
         "맨 위 화면을 연 방식과는 상관없다"
     );
@@ -289,7 +292,7 @@ fn 화면을_다_읽기를_기다려_다시_불러도_되는지_알리고_다시
     // 프레임 안의 프레임은 품은 화면들(맨 위 화면부터)을 함께 알린다.
     let (proxy, _) = page_proxy(&["complete"], "link", true);
     assert_eq!(
-        page_loaded(&proxy, "127.0.0.1:8080/app/inner.do", wait).unwrap(),
+        page_loaded(&proxy, "127.0.0.1:8080/app/inner.do", wait, &[]).unwrap(),
         Loaded::Reload(Target::Frame {
             id: "grand".into(),
             url: "http://127.0.0.1:8080/app/inner.do".into(),
@@ -299,7 +302,7 @@ fn 화면을_다_읽기를_기다려_다시_불러도_되는지_알리고_다시
     // 처음 주소에서 다른 화면으로 간 프레임.
     let (proxy, _) = page_proxy(&["complete"], "link", false);
     assert_eq!(
-        page_loaded(&proxy, DETAIL, wait).unwrap(),
+        page_loaded(&proxy, DETAIL, wait, &[]).unwrap(),
         Loaded::FrameMoved
     );
 
@@ -308,13 +311,13 @@ fn 화면을_다_읽기를_기다려_다시_불러도_되는지_알리고_다시
     let short = Duration::from_millis(250);
     assert!(!wait_loaded(&proxy, short).unwrap());
     assert!(
-        page_loaded(&proxy, LIST, short)
+        page_loaded(&proxy, LIST, short, &[])
             .unwrap_err()
             .contains("다 읽지 못했습니다")
     );
     // 없는 화면은 알리고, 그 화면의 HTML·블록 글도 다른 화면의 것으로 주지 않는다.
     let gone = "127.0.0.1:8080/app/gone.do";
-    assert_eq!(page_loaded(&proxy, gone, short).unwrap_err(), NOT_OPEN);
+    assert_eq!(page_loaded(&proxy, gone, short, &[]).unwrap_err(), NOT_OPEN);
     assert_eq!(page_html(&proxy, gone).unwrap_err(), NOT_OPEN);
     assert_eq!(
         script_blocks(&proxy, gone, &[(3, 9)]).unwrap_err(),
@@ -359,6 +362,120 @@ fn 블록_자리에_멈추지_않는_중단점을_걸어_블록의_글을_받고
             .count();
         assert_eq!(removed, 2);
     }
+}
+
+/// 가짜 프록시, 받은 틀, 품은 프레임에서 받은 `src` 물음(식).
+type SessionProxy = (Proxy, Receiver<(u8, Vec<u8>)>, Receiver<String>);
+
+/// 한 세션의 가짜 프록시: 프레임 트리는 `tree`, 화면은 다 읽었고, 품은 프레임에서 `src`를 물으면 `shown`이다.
+fn session_proxy(tree: Value, shown: bool) -> SessionProxy {
+    let (asked, questions) = channel();
+    let asked = std::sync::Mutex::new(asked);
+    let (proxy, received) = fake_proxy(move |request| {
+        let id = request["id"].as_u64().unwrap();
+        let params = &request["params"];
+        let result = match request["method"].as_str().unwrap() {
+            "Page.getFrameTree" => json!({ "frameTree": tree }),
+            "Page.createIsolatedWorld" => json!({ "executionContextId": 9 }),
+            "Runtime.evaluate" if params["expression"] == "document.readyState" => {
+                json!({ "result": { "type": "string", "value": "complete" } })
+            }
+            "Runtime.evaluate" => {
+                let expression = params["expression"].as_str().unwrap();
+                // 다른 사이트의 프레임에서는 `frameElement`를 읽을 수 없다.
+                assert!(!expression.contains("frameElement"), "{expression}");
+                assert_eq!(params["contextId"], 9);
+                let _ = asked.lock().unwrap().send(expression.to_owned());
+                json!({ "result": { "type": "boolean", "value": shown } })
+            }
+            "Page.navigate" => json!({ "frameId": params["frameId"], "loaderId": "L2" }),
+            // 다른 사이트의 프레임은 맨 위 대상이 아니다(`Page.reload`·`Page.getNavigationHistory`를 받지 않는다).
+            other => panic!("{other}"),
+        };
+        vec![frame(
+            0x1,
+            true,
+            json!({ "id": id, "result": result }).to_string().as_bytes(),
+        )]
+    });
+    (proxy, received, questions)
+}
+
+#[test]
+fn 다른_사이트의_프레임은_품은_세션들에서_품은_화면을_찾고_품은_프레임의_src로_가린다() {
+    const LIST: &str = "127.0.0.1:8080/app/list.do";
+    const DETAIL: &str = "127.0.0.1:8080/app/detail.do";
+    const FRAG: &str = "localhost:8080/app/frag.do";
+    let wait = Duration::from_secs(5);
+    // 페이지 세션: list.do 안에 같은 사이트의 프레임 detail.do. 다른 사이트의 프레임은 이 트리에 없다.
+    let page_tree = json!({
+        "frame": { "id": "top", "url": "http://127.0.0.1:8080/app/list.do" },
+        "childFrames": [{ "frame": { "id": "child", "url": "http://127.0.0.1:8080/app/detail.do" } }]
+    });
+    // 다른 사이트의 프레임 세션: 트리는 그 프레임에서 시작하고, 품은 프레임(detail.do)을 `parentId`로 안다.
+    let far_tree = json!({ "frame": { "id": "far", "parentId": "child",
+        "url": "http://localhost:8080/app/frag.do#top" } });
+    let (page, _, questions) = session_proxy(page_tree.clone(), true);
+    let (far, received, _) = session_proxy(far_tree.clone(), true);
+    let target = Target::Frame {
+        id: "far".into(),
+        url: "http://localhost:8080/app/frag.do#top".into(),
+        ancestors: vec![LIST.into(), DETAIL.into()],
+    };
+    assert_eq!(
+        page_loaded(&far, FRAG, wait, std::slice::from_ref(&page)).unwrap(),
+        Loaded::Reload(target.clone())
+    );
+    // 처음 주소인지는 품은 프레임에서 지금 주소(`#` 뒤를 뺀 것)로 묻는다.
+    let question = questions.try_recv().unwrap();
+    assert!(
+        question.contains("querySelectorAll('iframe,frame')")
+            && question.contains("\"http://localhost:8080/app/frag.do\""),
+        "{question}"
+    );
+    // 그 프레임만 그 세션에서 다시 연다.
+    reload(&far, &target).unwrap();
+    let navigate = wait_method(&received, "Page.navigate");
+    assert_eq!(
+        (&navigate["frameId"], &navigate["url"]),
+        (
+            &json!("far"),
+            &json!("http://localhost:8080/app/frag.do#top")
+        )
+    );
+    // 품은 프레임의 `src`가 지금 주소가 아니면(프레임 안에서 다른 화면으로 갔다) 다시 열지 않는다.
+    let (page, ..) = session_proxy(page_tree.clone(), false);
+    let (far, ..) = session_proxy(far_tree.clone(), true);
+    assert_eq!(
+        page_loaded(&far, FRAG, wait, &[page]).unwrap(),
+        Loaded::FrameMoved
+    );
+    // 품은 세션을 모르면(트리에 품은 프레임이 없으면) 알린다.
+    let (far, ..) = session_proxy(far_tree, true);
+    assert_eq!(page_loaded(&far, FRAG, wait, &[]).unwrap_err(), NOT_OPEN);
+
+    // 다른 사이트의 프레임 안의 다른 사이트 프레임: 세션을 둘 거슬러 오른다. 처음 주소는 가까운 품은 세션에서 본다.
+    let mid_tree = json!({ "frame": { "id": "mid", "parentId": "child",
+        "url": "http://10.0.0.2:8080/app/mid.do" } });
+    let inner_tree = json!({ "frame": { "id": "inner", "parentId": "mid",
+        "url": "http://localhost:8080/app/frag.do" } });
+    let (page, _, page_questions) = session_proxy(page_tree, true);
+    let (mid, _, mid_questions) = session_proxy(mid_tree, true);
+    let (inner, ..) = session_proxy(inner_tree, true);
+    assert_eq!(
+        page_loaded(&inner, FRAG, wait, &[mid, page]).unwrap(),
+        Loaded::Reload(Target::Frame {
+            id: "inner".into(),
+            url: "http://localhost:8080/app/frag.do".into(),
+            ancestors: vec![
+                LIST.into(),
+                DETAIL.into(),
+                "10.0.0.2:8080/app/mid.do".into()
+            ],
+        })
+    );
+    assert!(mid_questions.try_recv().is_ok());
+    assert!(page_questions.try_recv().is_err());
 }
 
 #[test]
