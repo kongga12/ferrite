@@ -543,6 +543,107 @@ fn gradle_test_보고서와_실패만_다시() {
 }
 
 #[test]
+#[ignore = "Gradle로 단위 테스트와 통합 테스트 작업(JVM Test Suite)을 돌린다(의존성을 받는다). Java 17 이상과 gradle이 필요하다"]
+fn gradle_통합_테스트_작업도_돌리고_작업마다_실패만_다시() {
+    if !require("gradle --version") {
+        return;
+    }
+    // `check`가 단위 테스트(`test`)와 통합 테스트(`integrationTest`) 작업을 다 돌린다.
+    let root = gradle_project(
+        "gradle-it",
+        &[(
+            "app",
+            "plugins {\n    java\n}\n\nrepositories {\n    mavenCentral()\n}\n\ntesting {\n    suites {\n        val test by getting(JvmTestSuite::class) {\n            useJUnitJupiter(\"5.11.4\")\n        }\n        register<JvmTestSuite>(\"integrationTest\") {\n            useJUnitJupiter(\"5.11.4\")\n            dependencies {\n                implementation(project())\n            }\n        }\n    }\n}\n\ntasks.named(\"check\") {\n    dependsOn(testing.suites.named(\"integrationTest\"))\n}\n",
+        )],
+    );
+    let write = |dir: &str, class: &str, body: &str| {
+        let java = root.join(dir).join("com/example/board");
+        std::fs::create_dir_all(&java).unwrap();
+        std::fs::write(
+            java.join(format!("{class}.java")),
+            format!("package com.example.board;\n\nimport static org.junit.jupiter.api.Assertions.assertEquals;\n\nimport org.junit.jupiter.api.Test;\n\nclass {class} {{\n{body}}}\n"),
+        )
+        .unwrap();
+    };
+    write(
+        "app/src/test/java",
+        "CalcTest",
+        "    @Test\n    void adds() {\n        assertEquals(3, 1 + 2);\n    }\n\n    @Test\n    void addsWrong() {\n        assertEquals(4, 1 + 2, \"더하기\");\n    }\n",
+    );
+    write(
+        "app/src/integrationTest/java",
+        "BoardIT",
+        "    @Test\n    void lists() {\n        assertEquals(2, 1 + 1);\n    }\n\n    @Test\n    void savesWrong() {\n        assertEquals(\"저장\", \"삭제\", \"게시글 저장\");\n    }\n",
+    );
+    let command = "gradle check";
+    assert_eq!(Tool::of(command), Some(Tool::Gradle));
+    let since = SystemTime::now();
+    let (ok, _) = run(
+        &root,
+        &test_report::with_report(Tool::Gradle, command, &root),
+    );
+    assert!(!ok);
+    let cases = junit(Tool::Gradle, &root, &root, since);
+    let tasks = |cases: &[Case]| {
+        let mut found: Vec<(String, Outcome, String)> = cases
+            .iter()
+            .map(|c| {
+                (
+                    c.name.clone(),
+                    c.outcome,
+                    c.task.clone().unwrap_or_default(),
+                )
+            })
+            .collect();
+        found.sort_by(|a, b| a.0.cmp(&b.0));
+        found
+    };
+    let task = |name: &str, outcome, task: &str| (name.to_owned(), outcome, task.to_owned());
+    assert_eq!(
+        tasks(&cases),
+        [
+            task("adds()", Outcome::Passed, ":app:test"),
+            task("addsWrong()", Outcome::Failed, ":app:test"),
+            task("lists()", Outcome::Passed, ":app:integrationTest"),
+            task("savesWrong()", Outcome::Failed, ":app:integrationTest"),
+        ]
+    );
+
+    // `check`에는 `--tests`를 붙이지 못한다. 실패한 작업마다 그 작업의 실패만 다시 돌린다.
+    let rerun_failed = |failed: &[&Case]| {
+        // 보고서는 고친 시각으로 고르고 2초 앞당겨 보므로(FAT), 바로 앞 실행이 끝 무렵 남긴 보고서가 섞인다.
+        // 돌지 않은 작업의 보고서가 남지 않게 지우고 돌린다.
+        std::fs::remove_dir_all(root.join("app/build/test-results")).unwrap();
+        let since = SystemTime::now();
+        let line = test_report::rerun(Tool::Gradle, command, failed).unwrap();
+        let (ok, output) = run(&root, &test_report::with_report(Tool::Gradle, &line, &root));
+        assert!(!ok, "{line}\n{output}");
+        tasks(&junit(Tool::Gradle, &root, &root, since))
+    };
+    assert_eq!(
+        rerun_failed(&failed(&cases)),
+        [
+            task("addsWrong()", Outcome::Failed, ":app:test"),
+            task("savesWrong()", Outcome::Failed, ":app:integrationTest"),
+        ]
+    );
+    // 통합 테스트만 실패: 단위 테스트 작업은 돌지 않는다.
+    let only_it: Vec<&Case> = failed(&cases)
+        .into_iter()
+        .filter(|c| c.task.as_deref() == Some(":app:integrationTest"))
+        .collect();
+    assert_eq!(
+        rerun_failed(&only_it),
+        [task(
+            "savesWrong()",
+            Outcome::Failed,
+            ":app:integrationTest"
+        )]
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
 #[ignore = "Gradle로 Kotlin·Scala의 JUnit 5 테스트를 돌린다(컴파일러와 의존성을 받는다). Java 17 이상과 gradle이 필요하다"]
 fn gradle_kotlin_scala_테스트의_줄과_실패만_다시() {
     if !require("gradle --version") {
@@ -596,6 +697,11 @@ fn gradle_kotlin_scala_테스트의_줄과_실패만_다시() {
 
     // 실패만 다시(앱처럼 보고서 옵션을 붙인다). 빈칸 든 이름도 `--tests`로 걸러진다.
     let again = |cases: &[&Case]| {
+        // 보고서는 고친 시각으로 고르고 2초 앞당겨 보므로(FAT), 바로 앞 실행이 끝 무렵 남긴 다른 작업의
+        // 보고서가 섞인다. 돌지 않은 작업의 보고서가 남지 않게 지우고 돌린다.
+        for project in ["kt", "sc"] {
+            let _ = std::fs::remove_dir_all(root.join(project).join("build/test-results"));
+        }
         let since = SystemTime::now();
         let rerun = test_report::rerun(Tool::Gradle, command, cases).unwrap();
         let (ok, _) = run(
@@ -613,8 +719,7 @@ fn gradle_kotlin_scala_테스트의_줄과_실패만_다시() {
         ],
         "실패한 것만 다시"
     );
-    // 한 하위 프로젝트에만 실패가 있으면 `--tests`에 맞는 것이 없는 다른 작업(먼저 도는 `:kt:test`)은
-    // "No tests found"로 실패하지만, `--continue`라 `:sc:test`는 돈다.
+    // 한 하위 프로젝트에만 실패가 있으면 그 작업(`:sc:test`)만 돈다.
     let scala: Vec<&Case> = failed(&cases)
         .into_iter()
         .filter(|c| c.name == "addsWrong()")

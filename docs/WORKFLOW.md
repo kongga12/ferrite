@@ -1980,6 +1980,23 @@
     - 실제 도구(`test_tools`, CI의 3개 OS): 영문 경로의 프로젝트를 한글 경로의 Gradle 홈으로 `gradle test` → Windows는 홈 문제로 알아보고, 그 밖은 테스트가 돈다. 로컬 Windows(코드 페이지 949)와 CI의 Windows(1252)에서 통과했다.
     - 실제 앱(Windows, 릴리스 빌드, JDK 21): `GRADLE_USER_HOME`을 한글 경로로 둔 채 앱을 띄워(한글 사용자 이름처럼) 영문 경로의 `gradle-board`에서 [실행 > 테스트]의 `gradle test` → "통과 0 · 실패 1 · 종료 코드 1" 아래에 그 홈 경로가 든 안내가 주황색으로 보였다. 같은 프로젝트의 `.ferrite/run.toml`에 `env = { GRADLE_USER_HOME = "C:/Users/…/.gradle" }`을 둔 실행 구성으로 돌리면 테스트가 돌고("통과 1 · 실패 1") 안내가 없다.
   - 확인하지 못한 것: 실제로 한글 이름의 Windows 사용자로는 돌리지 않았다(`GRADLE_USER_HOME`으로 같은 경로를 만들었다). 명령 줄의 `-g`·`--gradle-user-home`과 `gradle.properties`의 홈 설정은 보지 않는다.
+- [x] Gradle 통합 테스트 작업(2026-11-12) — 작음
+  - 까닭: 위 "Maven Failsafe 통합 테스트"에서 Gradle의 통합 테스트 작업(`integrationTest`)은 따로 다루지 않았다.
+  - 찾기(실제 Gradle 9.2.0, JDK 21, JVM Test Suite 플러그인으로 `integrationTest`를 만들고 `check`에 걸었다)
+    - 보고서는 작업마다 `<프로젝트>/build/test-results/<작업>/TEST-*.xml`에 남는다(이미 `build/test-results` 아래를 모두 읽고 있었다).
+    - **`gradle check`에서 실패만 다시가 깨졌다**: `--tests`는 그 앞의 테스트 작업에 붙는 작업 옵션이라 `check`(테스트 작업이 아니다)에 붙이면 "Unknown command-line option '--tests'"로 빌드가 멈춘다.
+    - `gradle test` 뒤에 붙여도 통합 테스트의 실패는 걸러지지 않는다(`test` 작업만 돈다). 작업마다 `:app:test --tests A :app:integrationTest --tests B`로 주면 작업마다 그것만 돈다(`--continue`로 한 작업이 실패해도 다음 작업이 돈다).
+    - `gradle integrationTest`·`gradlew :app:test`는 테스트 명령으로 알아보지 못했다(`test`·`check`라는 낱말만 보았다).
+  - 고침
+    - 보고서를 읽을 때(`test_report::read_report`) Gradle의 보고서면 그것을 돌린 작업 경로를 적는다(`Case::task`, `:app:integrationTest`). 빌드 루트는 위로 가장 가까운 `settings.gradle(.kts)`가 있는 폴더(없으면 그 프로젝트, 작업은 `:test`)이고, 프로젝트 경로는 루트에서 그 폴더까지의 폴더 이름이다.
+    - Gradle 실패만 다시: 실패한 테스트마다 작업을 알면 명령에서 작업 이름과 옛 `--tests`(값까지)를 빼고 옵션(`--offline`, `-x lint`, `-p backend` 등 값을 받는 옵션은 값까지)은 둔 채 작업마다 `작업 --tests "클래스.메서드"`를 붙인다. 작업을 모르는 테스트가 섞이면 예전대로 명령 뒤에 붙인다.
+    - 테스트 명령 알아보기: Gradle은 작업 이름(옵션과 그 값은 빼고)이 `check`이거나 마지막 `:` 뒤가 `test`로 끝나면(`integrationTest`, `:app:test`) 테스트 명령이다. `-x test`는 아니다. `build`는 테스트를 거치기만 하므로 Maven의 `install`처럼 보지 않는다(처음에 넣었더니 자동 감지한 `gradle build`가 테스트 창의 첫 구성이 되어 `gradle test` 대신 기본으로 골라졌다).
+  - 검증
+    - 단위: 보고서 폴더로 작업 경로 읽기(하위 프로젝트·루트 프로젝트·Maven 보고서는 없음), `check`의 옵션을 두고 작업마다 다시 돌리는 명령, 통합 테스트만(`-p`의 값은 둔다), 작업을 모르는 것이 섞이면 예전대로, 명령 알아보기(`integrationTest`·`:app:test`·`check`는 맞고 `build`·`assemble -x test`는 아니다).
+    - 실제 도구(`test_tools`, CI의 3개 OS): JVM Test Suite로 만든 `integrationTest`와 `test`에 하나씩 실패를 두고 `gradle check` → 넷을 작업과 함께 읽고, 실패만 다시는 두 작업에서 실패한 하나씩만 돌고, 통합 테스트만 다시 돌리면 그것만 돈다.
+    - 작업마다 다시 돌리면 돌지 않은 작업의 보고서는 그대로 남는다. 보고서는 고친 시각으로 고르고 2초 앞당겨 보므로(FAT) 바로 앞 실행이 끝 무렵 남긴 다른 작업의 보고서가 섞여, 실제 도구 시험(새 시험은 로컬에서, Kotlin·Scala 시험은 CI의 macOS·Windows에서)이 흔들렸다. 시험은 다시 돌리기 전에 보고서 폴더를 지운다. 앱은 다시 돌린 결과를 이름으로 앞 결과에 덮어 쓰므로 섞여도 결과가 같다.
+    - 실제 앱(Windows, 릴리스 빌드, Gradle 9.2.0, JDK 21): 같은 예제에 실행 구성 `gradle check`를 두고 [실행 > 테스트]에서 돌려 "통과 2 · 실패 2 · 종료 코드 1"(BoardIT·CalcTest), [실패만 다시]의 출력 첫 줄이 `gradle :app:integrationTest --tests "com.example.board.BoardIT.savesWrong" :app:test --tests "com.example.board.CalcTest.addsWrong" --continue`인 것을 화면으로 확인했다. 자동 감지한 `gradle build`는 테스트 창의 구성 목록에 없다.
+  - 확인하지 못한 것: 설정에서 프로젝트 이름이나 폴더를 바꾼 빌드(`project(":x").projectDir = …`)와 포함된 빌드(`includeBuild`)는 폴더 이름으로 셈해 작업 경로가 틀릴 수 있다(그때는 Gradle이 작업을 찾지 못한다고 알린다). Groovy DSL의 `testSets` 같은 옛 플러그인도 보고서 폴더가 같으면 될 것으로 보지만 돌려 보지 않았다.
 
 - 살폈지만 넣지 않은 것: 임베디드(MCU 플래시·시리얼 모니터·장비 설정 파일), 프레임워크별 지원(React·Vue·Angular 등, JS·TS 언어 서버로 기본은 된다), 린터 개별 연동(언어 서버나 저장 시 작업으로 된다), 원격 개발·컨테이너·SFTP 배포, 로컬 AI 완성 모델, 계정 기반 설정 동기화. egov 개발과 거리가 멀거나 크기에 비해 쓰임이 적다.
 
