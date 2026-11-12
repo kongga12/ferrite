@@ -140,23 +140,46 @@ fn locals_at_breakpoint(
         &mut session,
         &|e| matches!(e, DebugEvent::Response { command, .. } if command == "variables"),
     )));
-    // 끝날 때까지 이어 간다. 한 줄에 걸 자리가 여럿이면(Rust의 println! 펼침) 다시 멈출 수 있다.
+    // 이어 가고, 프로그램이 도는 동안(예제는 끝에서 몇 초 쉰다) 프레임 없이 식을 보내 본다(탐색: 실행 중 식).
+    // 한 줄에 걸 자리가 여럿이면(Rust의 println! 펼침) 다시 멈출 수 있어 그때마다 이어 간다.
     session.resume(thread);
-    for _ in 0..10 {
-        let event = wait(&mut session, &|e| {
-            matches!(
-                e,
-                DebugEvent::Stopped(_)
-                    | DebugEvent::Terminated
-                    | DebugEvent::Exited { .. }
-                    | DebugEvent::Closed(_)
-            )
-        });
-        match event {
-            DebugEvent::Stopped(again) => session.resume(again.thread_id.unwrap_or(thread)),
-            _ => break,
+    let mut ended = false;
+    let step = |session: &mut DebugSession, ended: &mut bool| -> Vec<DebugEvent> {
+        let mut rest = Vec::new();
+        for event in session.poll() {
+            match event {
+                DebugEvent::Stopped(again) => session.resume(again.thread_id.unwrap_or(thread)),
+                DebugEvent::Terminated | DebugEvent::Exited { .. } | DebugEvent::Closed(_) => {
+                    *ended = true
+                }
+                other => rest.push(other),
+            }
+        }
+        std::thread::sleep(Duration::from_millis(20));
+        rest
+    };
+    let settle = Instant::now() + Duration::from_millis(1500);
+    while !ended && Instant::now() < settle {
+        step(&mut session, &mut ended);
+    }
+    let probe = session.evaluate("1 + 2", None);
+    let mut running = None;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while running.is_none() && !ended && Instant::now() < deadline {
+        for event in step(&mut session, &mut ended) {
+            if let DebugEvent::Response { id, result, .. } = event
+                && id == probe
+            {
+                running = Some(result);
+            }
         }
     }
+    eprintln!("[{adapter_id}] 실행 중 식(1 + 2): {running:?} (끝남: {ended})");
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !ended && Instant::now() < deadline {
+        step(&mut session, &mut ended);
+    }
+    assert!(ended, "끝나지 않음");
     variables
         .into_iter()
         .map(|v| (v.name.trim_start_matches('$').to_owned(), v.value))
@@ -189,7 +212,7 @@ fn debugpy를_설치해_python을_디버그한다() {
     let source = project.join("main.py");
     std::fs::write(
         &source,
-        "def add(a, b):\n    total = a + b\n    return total\n\n\ny = add(41, 1)\nprint(\"결과\", y)\n",
+        "def add(a, b):\n    total = a + b\n    return total\n\n\ny = add(41, 1)\nprint(\"결과\", y)\nimport time\ntime.sleep(4)\n",
     )
     .unwrap();
     let adapter = install_adapter(&servers, "debugpy", &project);
@@ -213,7 +236,7 @@ fn codelldb를_설치해_rust를_디버그한다() {
     // println! 줄(3번)에 멈춘다.
     std::fs::write(
         &source,
-        "fn add(a: i32, b: i32) -> i32 {\n    let total = a + b;\n    println!(\"합 {total}\");\n    total\n}\n\nfn main() {\n    let y = add(41, 1);\n    println!(\"결과 {y}\");\n}\n",
+        "fn add(a: i32, b: i32) -> i32 {\n    let total = a + b;\n    println!(\"합 {total}\");\n    total\n}\n\nfn main() {\n    let y = add(41, 1);\n    println!(\"결과 {y}\");\n    std::thread::sleep(std::time::Duration::from_secs(4));\n}\n",
     )
     .unwrap();
     let program = project.join(format!("main{}", std::env::consts::EXE_SUFFIX));
@@ -253,13 +276,13 @@ fn delve를_설치해_go를_디버그한다() {
     let source = project.join("main.go");
     std::fs::write(
         &source,
-        "package main\n\nimport \"fmt\"\n\nfunc add(a, b int) int {\n\ttotal := a + b\n\treturn total\n}\n\nfunc main() {\n\ty := add(41, 1)\n\tfmt.Println(\"결과\", y)\n}\n",
+        "package main\n\nimport (\n\t\"fmt\"\n\t\"time\"\n)\n\nfunc add(a, b int) int {\n\ttotal := a + b\n\treturn total\n}\n\nfunc main() {\n\ty := add(41, 1)\n\tfmt.Println(\"결과\", y)\n\ttime.Sleep(4 * time.Second)\n}\n",
     )
     .unwrap();
     let adapter = install_adapter(&servers, "delve", &project);
     let arguments = json!({ "mode": "debug", "program": project });
     assert_locals(&locals_at_breakpoint(
-        &adapter, "delve", arguments, &source, 7,
+        &adapter, "delve", arguments, &source, 10,
     ));
     let _ = std::fs::remove_dir_all(&servers);
     let _ = std::fs::remove_dir_all(&project);
@@ -285,7 +308,7 @@ fn php_debug를_설치해_php를_디버그한다() {
     let source = project.join("index.php");
     std::fs::write(
         &source,
-        "<?php\nfunction add($a, $b) {\n    $total = $a + $b;\n    return $total;\n}\n\n$y = add(41, 1);\necho \"결과 $y\\n\";\n",
+        "<?php\nfunction add($a, $b) {\n    $total = $a + $b;\n    return $total;\n}\n\n$y = add(41, 1);\necho \"결과 $y\\n\";\nsleep(4);\n",
     )
     .unwrap();
     let adapter = install_adapter(&servers, "php-debug", &project);
@@ -360,7 +383,7 @@ fn java_debug를_jdtls에_실어_java를_디버그한다() {
     .unwrap();
     std::fs::create_dir_all(project.join("src/demo")).unwrap();
     let source = project.join("src/demo/Main.java");
-    let text = "package demo;\n\npublic class Main {\n    static int add(int a, int b) {\n        int total = a + b;\n        return total;\n    }\n\n    public static void main(String[] args) {\n        int y = add(41, 1);\n        System.out.println(\"결과 \" + y);\n    }\n}\n";
+    let text = "package demo;\n\npublic class Main {\n    static int add(int a, int b) {\n        int total = a + b;\n        return total;\n    }\n\n    public static void main(String[] args) {\n        int y = add(41, 1);\n        System.out.println(\"결과 \" + y);\n        try {\n            Thread.sleep(4000);\n        } catch (InterruptedException e) {\n        }\n    }\n}\n";
     std::fs::write(&source, text).unwrap();
 
     let jdtls = ferrite_lsp::catalog::SERVERS
