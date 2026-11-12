@@ -199,7 +199,12 @@ fn locals_at_breakpoint(
             "{adapter_id}"
         );
     } else {
-        assert!(running.is_err(), "{adapter_id}: {running:?}");
+        // 오류로 답하거나(delve·java-debug·php-debug), 값 대신 오류 글을 준다(codelldb: "<error: invalid value
+        // object>"). 어느 쪽이든 계산하지 못한다.
+        assert!(
+            running.as_ref().is_ok_and(|v| v["result"] != "3") || running.is_err(),
+            "{adapter_id}: {running:?}"
+        );
     }
     let deadline = Instant::now() + Duration::from_secs(60);
     while !ended && Instant::now() < deadline {
