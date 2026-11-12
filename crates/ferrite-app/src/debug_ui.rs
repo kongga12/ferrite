@@ -38,7 +38,8 @@ enum Request {
     Scopes,
     Variables(i64),
     Evaluate(String),
-    LoadedSources,
+    /// 그 세션이 불러온 스크립트 목록("화면 스크립트").
+    LoadedSources(u64),
     /// 로컬 파일이 없는 소스의 내용.
     Source(Source),
     /// 화면(열쇠)의 인라인 스크립트 글들. js-debug는 같은 화면의 스크립트를 하나만 남겨 내용을 다 줄 수
@@ -748,7 +749,7 @@ impl Debugger {
                 let frame = self.frames.get(self.frame).map(|f| f.id);
                 Some(session.evaluate(expression, frame))
             }
-            Request::LoadedSources => Some(session.loaded_sources()),
+            Request::LoadedSources(owner) => session.request_in(*owner, "loadedSources", json!({})),
             Request::Source(source) => {
                 session.source(source, self.owners.get(&source_key(source)).copied())
             }
@@ -1063,11 +1064,15 @@ impl Debugger {
                 self.push_console(&format!("> {expression}\n{value}\n"));
                 None
             }
-            Request::LoadedSources => {
-                self.scripts = types::sources(&body)
-                    .into_iter()
-                    .filter(is_remote)
-                    .collect();
+            // 세션마다 온 목록을 모은다. 연 스크립트의 내용은 그 스크립트를 알린 세션에 묻는다.
+            Request::LoadedSources(owner) => {
+                for source in types::sources(&body).into_iter().filter(is_remote) {
+                    let key = source_key(&source);
+                    self.owners.entry(key.clone()).or_insert(owner);
+                    if !self.scripts.iter().any(|s| source_key(s) == key) {
+                        self.scripts.push(source);
+                    }
+                }
                 self.scripts.sort_by_key(source_key);
                 None
             }
@@ -1149,6 +1154,19 @@ impl Debugger {
             self.ask_page(key);
         } else {
             inline.again = true;
+        }
+    }
+
+    /// "화면 스크립트" 목록을 다시 묻는다: 화면이 있는 세션마다(다른 사이트의 `<iframe>`, 워커도) 묻고 모은다.
+    /// 멈추지 않았을 때 요청을 받는 세션(페이지)만 물으면 그 아래 세션의 스크립트는 목록에 없어 열 수 없다.
+    fn ask_scripts(&mut self) {
+        let Some(session) = &self.session else {
+            return;
+        };
+        let sessions = session.target_sessions();
+        self.scripts.clear();
+        for owner in sessions {
+            self.send(Request::LoadedSources(owner));
         }
     }
 
@@ -1713,11 +1731,11 @@ impl Debugger {
                     }
                     ui.separator();
                     if ui.button("새로 고침").clicked() {
-                        self.send(Request::LoadedSources);
+                        self.ask_scripts();
                     }
                 });
                 if menu.response.clicked() {
-                    self.send(Request::LoadedSources);
+                    self.ask_scripts();
                 }
                 menu.response.on_hover_text(
                     "브라우저가 불러온 스크립트 중 프로젝트 파일이 없는 것. 열어서 중단점을 건다",
@@ -3111,6 +3129,11 @@ mod tests {
                                 body = json!({ "stackFrames": stack.clone().unwrap_or_default() });
                             }
                             "scopes" => body = json!({ "scopes": [] }),
+                            "loadedSources" => {
+                                body = json!({ "sources": blocks.iter()
+                                    .map(|(source, _)| source.to_json())
+                                    .collect::<Vec<_>>() });
+                            }
                             "source" => {
                                 let (source, text) = blocks.last().unwrap();
                                 let (_, line, column) =
@@ -3499,6 +3522,93 @@ mod tests {
         assert_ne!(debugger.owners.get(KEY), Some(&worker));
         assert!(debugger.stored.contains_key(KEY));
         assert_eq!(worker_methods.try_iter().count(), 0);
+        debugger.shutdown();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn js_debug에서_화면_스크립트_목록은_세션마다_모으고_연_스크립트는_그_세션에_묻는다() {
+        // 맞출 JSP가 없는 다른 사이트 프레임의 스크립트도 목록에 나와야 열어서 중단점을 건다.
+        let root = std::env::temp_dir().join(format!("ferrite-scripts-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        const LIST: &str = "\nvar list = 1;\n";
+        const FRAG: &str = "\nvar frag = 2;\n";
+        // 화면 글을 읽을 CDP 프록시는 없다(옛 js-debug처럼, 화면에서 읽는다).
+        let address = fake_js_debug_nested(
+            vec![
+                (
+                    vec![(
+                        source("127.0.0.1\u{a789}8080/app/list.do\u{a789}2:9", 5),
+                        LIST,
+                    )],
+                    0,
+                    None,
+                ),
+                (
+                    vec![(
+                        source("localhost\u{a789}8080/app/frag.do\u{a789}2:9", 5),
+                        FRAG,
+                    )],
+                    0,
+                    None,
+                ),
+            ],
+            None,
+        );
+        let config = DebugConfig {
+            name: "화면 스크립트".into(),
+            adapter: "js-debug".into(),
+            request: "launch".into(),
+            arguments: serde_json::json!({}),
+            build: None,
+        };
+        let mut debugger = Debugger::default();
+        debugger
+            .start(
+                &config,
+                &root,
+                None,
+                BTreeMap::new(),
+                Adapter::Tcp(address),
+                &egui::Context::default(),
+            )
+            .unwrap();
+        debugger.sources = Some(root.join("sources"));
+        const FRAME: &str = "localhost\u{a789}8080/app/frag.do";
+        pump(
+            &mut debugger,
+            "두 세션이 화면을 알리지 않음",
+            |d| d.owners.len() == 2,
+        );
+        debugger.ask_scripts();
+        pump(
+            &mut debugger,
+            "두 세션의 스크립트를 모으지 않음",
+            |d| d.scripts.len() == 2,
+        );
+        let keys: Vec<String> = debugger.scripts.iter().map(source_key).collect();
+        assert_eq!(
+            keys,
+            ["127.0.0.1\u{a789}8080/app/list.do", FRAME],
+            "{keys:?}"
+        );
+        // 소스 번호가 같아도 프레임의 스크립트는 프레임 세션에 묻는다(페이지 세션에 물으면 목록 화면의 글이 온다).
+        let frame = debugger.scripts[1].clone();
+        debugger.open_after = Some(FRAME.to_owned());
+        debugger.send(Request::Source(frame));
+        pump(
+            &mut debugger,
+            "프레임 스크립트를 담지 않음",
+            |d| d.stored.contains_key(FRAME),
+        );
+        let stored = std::fs::read_to_string(&debugger.stored[FRAME]).unwrap();
+        assert!(stored.contains("var frag = 2;"), "{stored}");
+        // 다시 물으면 목록을 새로 모은다(같은 스크립트를 두 번 보이지 않는다).
+        debugger.ask_scripts();
+        pump(&mut debugger, "다시 모으지 않음", |d| {
+            d.scripts.len() == 2
+        });
         debugger.shutdown();
         let _ = std::fs::remove_dir_all(&root);
     }
