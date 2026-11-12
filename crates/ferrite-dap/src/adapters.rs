@@ -116,6 +116,20 @@ pub fn complete_arguments(name: &str, arguments: &mut Value) {
     }
 }
 
+/// 디버그 출력의 식을 보낼 DAP 문맥. 보통은 REPL(`repl`: 함수를 부르는 등 부수 효과가 있는 식)이다. codelldb는
+/// REPL 문맥이면 입력을 LLDB 명령으로 읽어(`1 + 2` → "'1' is not a valid command") 식은 감시 식 문맥(`watch`)으로
+/// 보낸다(실제 어댑터 시험으로 확인).
+pub fn console_context(name: &str) -> &'static str {
+    if name == "codelldb" { "watch" } else { "repl" }
+}
+
+/// 멈추지 않았을 때도(프레임 없이) 식을 계산하는 어댑터(실제 어댑터 시험으로 확인). js-debug는 화면(페이지)에서,
+/// debugpy는 프로그램에서 계산한다. delve("debuggee is running")·java-debug("thread is not suspended")·
+/// codelldb·php-debug("without a connection")는 멈춰 있어야 계산한다.
+pub fn evaluates_while_running(name: &str) -> bool {
+    matches!(name, "js-debug" | "debugpy")
+}
+
 /// 어댑터가 곧바로 끝났을 때 stderr로 이유를 짐작해 고칠 방법을 덧붙인다.
 pub fn hint(name: &str, stderr: &str) -> Option<&'static str> {
     (name == "debugpy" && stderr.contains("No module named debugpy"))
@@ -134,6 +148,17 @@ fn python() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn 어댑터마다_식을_보낼_문맥과_실행_중_계산을_가린다() {
+        assert_eq!(console_context("codelldb"), "watch");
+        assert_eq!(console_context("debugpy"), "repl");
+        assert_eq!(console_context("js-debug"), "repl");
+        assert!(evaluates_while_running("js-debug") && evaluates_while_running("debugpy"));
+        for name in ["delve", "java", "codelldb", "php-debug"] {
+            assert!(!evaluates_while_running(name), "{name}");
+        }
+    }
 
     #[test]
     fn 모르는_어댑터와_없는_어댑터를_알린다() {

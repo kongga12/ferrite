@@ -1834,9 +1834,13 @@ impl Debugger {
         notice
     }
 
-    /// 디버그 출력에서 식을 계산할 수 있는지: 대상을 띄웠고 끝내는 중이 아니다(멈추지 않았어도 된다).
+    /// 디버그 출력에서 식을 계산할 수 있는지: 대상을 띄웠고 끝내는 중이 아니며, 멈춰 있거나 멈추지 않아도 계산하는
+    /// 어댑터다(js-debug·debugpy. 나머지는 멈춰 있어야 한다는 오류로 답한다).
     fn can_evaluate(&self) -> bool {
-        self.session.is_some() && self.started && self.stopping.is_none()
+        self.session.is_some()
+            && self.started
+            && self.stopping.is_none()
+            && (self.is_stopped() || adapters::evaluates_while_running(&self.adapter))
     }
 
     /// 디버그 출력의 식을 계산한다: 멈춰 있으면 그 자리에서, 아니면 실행 중인 대상(js-debug: 화면)에서.
@@ -1851,7 +1855,7 @@ impl Debugger {
     /// "디버그 출력" 창: 대상의 출력과 식 계산.
     pub fn console_ui(&mut self, ui: &mut egui::Ui) {
         let mut evaluate = false;
-        let hint = if self.is_stopped() {
+        let hint = if self.is_stopped() || !adapters::evaluates_while_running(&self.adapter) {
             "멈춘 자리에서 계산할 식"
         } else {
             "실행 중인 대상(화면 등)에서 계산할 식"
@@ -2612,6 +2616,54 @@ mod tests {
         debugger.expression = "  ".into();
         debugger.evaluate_console();
         assert_eq!(debugger.expression, "  ");
+        debugger.shutdown();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn 실행_중_식을_계산하지_못하는_어댑터는_멈췄을_때만_식을_보낸다() {
+        // delve·java-debug·codelldb·php-debug는 실행 중에 식을 보내면 멈춰 있어야 한다는 오류로 답한다.
+        let root = std::env::temp_dir().join(format!("ferrite-repl-delve-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let page = source("127.0.0.1\u{a789}8080/app/x.do\u{a789}1:9", 3);
+        let (address, received) =
+            fake_js_debug(vec![(page, "\nvar x = 1;\n")], None, None, (0, 999));
+        let config = DebugConfig {
+            name: "Go".into(),
+            adapter: "delve".into(),
+            request: "launch".into(),
+            arguments: serde_json::json!({}),
+            build: None,
+        };
+        let mut debugger = Debugger::default();
+        debugger
+            .start(
+                &config,
+                &root,
+                None,
+                BTreeMap::new(),
+                Adapter::Tcp(address),
+                &egui::Context::default(),
+            )
+            .unwrap();
+        pump(&mut debugger, "대상을 띄우지 않음", |d| d.started);
+        assert!(!debugger.is_stopped());
+        assert!(!debugger.can_evaluate());
+        debugger.expression = "1 + 2".into();
+        debugger.evaluate_console();
+        let until = Instant::now() + Duration::from_millis(200);
+        while Instant::now() < until {
+            debugger.poll();
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(debugger.expression, "1 + 2", "보내지 않고 남겨 둔다");
+        assert!(
+            !received
+                .try_iter()
+                .any(|(name, _)| name.starts_with("evaluate")),
+            "실행 중에 식을 보냈다"
+        );
         debugger.shutdown();
         let _ = std::fs::remove_dir_all(&root);
     }

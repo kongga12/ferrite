@@ -587,10 +587,11 @@ impl DebugSession {
         self.request("variables", json!({ "variablesReference": reference }))
     }
 
-    /// 디버그 출력의 식을 계산한다(REPL: 함수를 부르는 등 부수 효과가 있어도 된다). `frame_id`가 있으면 그 멈춘
+    /// 디버그 출력의 식을 계산한다(어댑터마다의 문맥, [`adapters::console_context`]). `frame_id`가 있으면 그 멈춘
     /// 자리에서, 없으면 실행 중인 대상(js-debug: 멈추지 않았으면 페이지)에서 계산한다.
     pub fn evaluate(&mut self, expression: &str, frame_id: Option<i64>) -> i64 {
-        let mut arguments = json!({ "expression": expression, "context": "repl" });
+        let context = adapters::console_context(&self.launch.adapter_id);
+        let mut arguments = json!({ "expression": expression, "context": context });
         if let Some(frame_id) = frame_id {
             arguments["frameId"] = json!(frame_id);
         }
