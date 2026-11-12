@@ -671,6 +671,26 @@ fn jquery() -> &'static str {
     })
 }
 
+/// 전용 워커(Web Worker)를 띄우고 메시지를 주고받는 화면.
+const WORKER_PAGE: &str = "<!doctype html>
+<html><body>
+<script>
+var worker = new Worker('/app/js/worker.js');
+worker.onmessage = function (e) { window.workerAnswer = e.data; };
+function ask(n) { worker.postMessage(n); return n; }
+</script>
+</body></html>
+";
+
+/// 워커 스크립트: 맨 위 코드(1줄)와 메시지를 받아 두 배로 돌려주는 함수(3줄).
+const WORKER_JS: &str = "var seen = 0;
+self.onmessage = function (e) {
+  var doubled = e.data * 2;
+  seen = seen + 1;
+  self.postMessage(doubled);
+};
+";
+
 const APP_JS: &str = "function add(a, b) {
   var total = a + b;
   return total;
@@ -706,6 +726,10 @@ fn web_server() -> u16 {
                     ("text/html; charset=UTF-8", PAGE)
                 } else if line.starts_with("GET /app/main.do ") {
                     ("text/html; charset=UTF-8", MAIN_PAGE)
+                } else if line.starts_with("GET /app/worker.do ") {
+                    ("text/html; charset=UTF-8", WORKER_PAGE)
+                } else if line.starts_with("GET /app/js/worker.js ") {
+                    ("application/javascript", WORKER_JS)
                 } else if line.starts_with("GET /app/cross.do ") {
                     ("text/html; charset=UTF-8", cross)
                 } else if line.starts_with("GET /app/frameset.do ") {
@@ -2032,6 +2056,179 @@ fn js_debug로_다른_사이트_iframe은_그_세션의_cdp로_블록을_받고_
     wait(&mut session, &|e| {
         matches!(e, DebugEvent::Terminated | DebugEvent::Closed(_))
     });
+    drop(session);
+    for dir in [servers, project, adapters::scratch_dir()] {
+        for _ in 0..40 {
+            if !dir.exists() || std::fs::remove_dir_all(&dir).is_ok() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        }
+        assert!(!dir.exists(), "폴더가 남음: {}", dir.display());
+    }
+}
+
+#[test]
+#[ignore = "GitHub에서 vscode-js-debug(약 1.2MB)를 받는다. node와 Chrome(Windows는 Edge도 된다)이 필요하다"]
+fn js_debug로_워커_스크립트의_중단점에서_멈추고_멈추지_않았으면_화면에서_식을_돈다() {
+    let Some(kind) = browser() else {
+        require("Chrome", false);
+        return;
+    };
+    if !require("node", find_program("node").is_some()) {
+        return;
+    }
+    let (servers, project) = (temp_dir("js-worker-servers"), temp_dir("js-worker"));
+    let web_root = project.join("src/main/webapp");
+    std::fs::create_dir_all(web_root.join("js")).unwrap();
+    let worker_js = web_root.join("js/worker.js");
+    std::fs::write(&worker_js, WORKER_JS).unwrap();
+    let port = web_server();
+    let adapter = install_adapter(&servers, "js-debug", &project);
+    let mut runtime_args = vec!["--headless=new", "--disable-gpu"];
+    if cfg!(target_os = "linux") {
+        runtime_args.extend(["--no-sandbox", "--disable-dev-shm-usage"]);
+    }
+    let trace = project.join("js-debug.log");
+    let _dump = DumpOnPanic(trace.clone());
+    let launch = Launch {
+        adapter_id: "js-debug".into(),
+        attach: false,
+        arguments: json!({
+            "type": kind,
+            "url": format!("http://127.0.0.1:{port}/app/worker.do"),
+            "webRoot": web_root,
+            "pathMapping": { "/app/": format!("{}/", web_root.display()) },
+            "runtimeArgs": runtime_args,
+            "timeout": 60000,
+            "trace": { "logFile": trace },
+        }),
+    };
+    // 워커 스크립트(로컬 파일)의 메시지 함수(3줄)에 건다.
+    let breakpoints = BTreeMap::from([(
+        worker_js.clone(),
+        vec![Breakpoint {
+            line: 3,
+            condition: None,
+        }],
+    )]);
+    let mut session = DebugSession::start(&adapter, launch, breakpoints, || {}).unwrap();
+    let (mut seen, mut next) = (Vec::new(), 0);
+    let mut wait = |session: &mut DebugSession, done: &dyn Fn(&DebugEvent) -> bool| {
+        wait_for(session, &mut seen, &mut next, done)
+    };
+    // 1) 워커는 페이지 세션 아래의 세션으로 열린다. 로컬 파일에 건 중단점은 걸린다.
+    let DebugEvent::LoadedSource { session: page, .. } = wait(&mut session, &|e| {
+        matches!(e, DebugEvent::LoadedSource { source, .. }
+            if source.name.as_deref().is_some_and(|n| n.contains("worker.do")))
+    }) else {
+        unreachable!()
+    };
+    let DebugEvent::LoadedSource {
+        session: worker, ..
+    } = wait(&mut session, &|e| {
+        matches!(e, DebugEvent::LoadedSource { source, .. }
+            if source.name.as_deref().is_some_and(|n| n.ends_with("worker.js")))
+    })
+    else {
+        unreachable!()
+    };
+    assert_eq!(session.parents(worker), [page]);
+    wait(
+        &mut session,
+        &|e| matches!(e, DebugEvent::Breakpoints { path, states } if *path == worker_js && states[0].verified),
+    );
+    // 2) 멈추지 않았으면 콘솔의 식은 화면에서 돈다(워커 세션이 나중에 열렸어도). 화면이 워커에 메시지를 보내면
+    // 워커 스크립트의 중단점에서 멈추고, 그때 요청은 워커 세션에 간다.
+    assert_eq!(session.focus_id(), page);
+    session.request(
+        "evaluate",
+        json!({ "expression": "ask(21)", "context": "repl" }),
+    );
+    let (thread, frame) = top_frame(&mut session, &mut wait);
+    assert_eq!(frame.line, 3);
+    assert_eq!(
+        std::fs::canonicalize(frame.source.as_ref().and_then(|s| s.path.clone()).unwrap()).unwrap(),
+        std::fs::canonicalize(&worker_js).unwrap()
+    );
+    assert_eq!(session.focus_id(), worker);
+    session.evaluate("e.data", Some(frame.id));
+    let data = response(wait(
+        &mut session,
+        &|e| matches!(e, DebugEvent::Response { command, .. } if command == "evaluate"),
+    ));
+    assert_eq!(data["result"], "21");
+    session.resume(thread);
+    // 3) 이어 가면 다시 화면에서 돈다: 워커가 돌려준 답을 화면이 받았다.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        session.request(
+            "evaluate",
+            json!({ "expression": "String(window.workerAnswer)", "context": "repl" }),
+        );
+        let answer = response(wait(
+            &mut session,
+            &|e| matches!(e, DebugEvent::Response { command, .. } if command == "evaluate"),
+        ));
+        if answer["result"] == "'42'" || answer["result"] == "42" {
+            break;
+        }
+        assert!(Instant::now() < deadline, "워커의 답: {answer}");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    assert_eq!(session.focus_id(), page);
+    // 4) 워커의 맨 위 코드(1줄): 화면을 다시 부르면 워커가 새 세션으로 열리는데, 로컬 파일에 건 중단점은 그 세션에도
+    // 걸려 거기서 멈춘다.
+    session.set_breakpoints(
+        &worker_js,
+        vec![
+            Breakpoint {
+                line: 1,
+                condition: None,
+            },
+            Breakpoint {
+                line: 3,
+                condition: None,
+            },
+        ],
+    );
+    wait(
+        &mut session,
+        &|e| matches!(e, DebugEvent::Breakpoints { path, states } if *path == worker_js && states.len() == 2),
+    );
+    session
+        .request_in(page, "requestCDPProxy", json!({}))
+        .unwrap();
+    let proxy = response(wait(
+        &mut session,
+        &|e| matches!(e, DebugEvent::Response { command, .. } if command == "requestCDPProxy"),
+    ));
+    let proxy = cdp::Proxy::from_json(&proxy).expect("프록시 주소");
+    cdp::reload(&proxy, &cdp::Target::Top).unwrap();
+    let (thread, frame) = top_frame(&mut session, &mut wait);
+    assert_eq!(frame.line, 1, "{frame:?}");
+    assert!(session.focus_id() > worker, "새 워커 세션");
+    session.set_breakpoints(&worker_js, Vec::new());
+    wait(
+        &mut session,
+        &|e| matches!(e, DebugEvent::Breakpoints { path, .. } if *path == worker_js),
+    );
+    session.resume(thread);
+    wait(&mut session, &|e| matches!(e, DebugEvent::Continued));
+
+    // 화면을 다시 불러 새 워커의 맨 위 코드에서 멈췄다 이어 간 뒤에는, js-debug가 끝내기에 페이지·워커 세션은
+    // 끝났다고 알리지만 맨 위 세션은 알리지 않을 때가 있다(브라우저는 이미 끝났다). 앱은 멈춤을 누르고
+    // `STOP_GRACE` 뒤에 어댑터를 끝내므로, 여기서도 조금 기다린 뒤 세션을 버린다(어댑터를 끝낸다).
+    session.stop();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while Instant::now() < deadline
+        && !session
+            .poll()
+            .iter()
+            .any(|e| matches!(e, DebugEvent::Terminated | DebugEvent::Closed(_)))
+    {
+        std::thread::sleep(Duration::from_millis(20));
+    }
     drop(session);
     for dir in [servers, project, adapters::scratch_dir()] {
         for _ in 0..40 {
