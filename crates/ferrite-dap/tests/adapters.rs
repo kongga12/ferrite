@@ -2206,6 +2206,139 @@ fn js_debug로_다른_사이트_iframe은_그_세션의_cdp로_블록을_받고_
 }
 
 #[test]
+#[ignore = "js-debug와 Chrome·Edge로 웹 루트 밖의 TS를 소스 맵으로 찾아 멈춘다(어댑터를 받는다). node가 필요하다"]
+fn js_debug로_웹_루트_밖의_ts도_자동_구성으로_webpack과_상대_경로의_맵을_따라_멈춘다() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::sync::{Arc, Mutex};
+    let Some(kind) = browser() else {
+        require("Chrome", false);
+        return;
+    };
+    if !require("node", find_program("node").is_some()) {
+        return;
+    }
+    // 소스 맵을 바꿔 가며 주는 웹 서버(화면·번들은 위의 TS 시험과 같다).
+    let map = Arc::new(Mutex::new(String::new()));
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let served = map.clone();
+    std::thread::spawn(move || {
+        for mut stream in listener.incoming().flatten() {
+            let map = served.lock().unwrap().clone();
+            std::thread::spawn(move || {
+                let mut line = String::new();
+                let mut reader = BufReader::new(&stream);
+                let _ = reader.read_line(&mut line);
+                loop {
+                    let mut header = String::new();
+                    if reader.read_line(&mut header).unwrap_or(0) == 0 || header.trim().is_empty() {
+                        break;
+                    }
+                }
+                let (kind, body) = if line.starts_with("GET /app/ts.do ") {
+                    ("text/html; charset=UTF-8", TS_PAGE.to_owned())
+                } else if line.starts_with("GET /app/js/bundle.js ") {
+                    ("application/javascript", TS_BUNDLE.to_owned())
+                } else if line.starts_with("GET /app/js/bundle.js.map ") {
+                    ("application/json", map)
+                } else {
+                    ("text/plain", String::new())
+                };
+                let status = if body.is_empty() {
+                    "404 Not Found"
+                } else {
+                    "200 OK"
+                };
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 {status}\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            });
+        }
+    });
+    let (servers, project) = (temp_dir("js-ts-out-servers"), temp_dir("js-ts-out"));
+    // egov 꼴: webapp 폴더와 화면 주소(컨텍스트 경로 /app). 원래 TS는 웹 루트 밖(src/main/ts)에 있다.
+    std::fs::create_dir_all(project.join("src/main/webapp")).unwrap();
+    std::fs::create_dir_all(project.join("http")).unwrap();
+    std::fs::write(
+        project.join("http/http-client.env.json"),
+        format!("{{\"dev\": {{\"baseUrl\": \"http://127.0.0.1:{port}/app/\"}}}}"),
+    )
+    .unwrap();
+    let source = project.join("src/main/ts/app.ts");
+    std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+    std::fs::write(&source, TS_SOURCE).unwrap();
+    let adapter = install_adapter(&servers, "js-debug", &project);
+    // 앱이 .ts 파일로 자동으로 만드는 브라우저 구성(띄우기) 그대로. 화면 주소와 헤드리스만 바꾼다.
+    let configs = ferrite_core::debug_config::detect(Some(&source), &project);
+    let mut arguments = configs[0].resolved_arguments(&project, None).unwrap();
+    arguments["url"] = json!(format!("http://127.0.0.1:{port}/app/ts.do"));
+    let mut runtime_args = vec!["--headless=new", "--disable-gpu"];
+    if cfg!(target_os = "linux") {
+        runtime_args.extend(["--no-sandbox", "--disable-dev-shm-usage"]);
+    }
+    arguments["runtimeArgs"] = json!(runtime_args);
+    arguments["timeout"] = json!(60000);
+    assert_eq!(arguments["type"], kind, "{arguments}");
+    // webpack(이름이 있는 꼴과 없는 꼴)은 webpack을 돌린 프로젝트 루트 기준, tsc·Vite는 번들 파일에서 본 상대 경로다.
+    for sources in [
+        "webpack://board/./src/main/ts/app.ts",
+        "webpack:///./src/main/ts/app.ts",
+        "../../ts/app.ts",
+    ] {
+        *map.lock().unwrap() = TS_MAP.replace("../ts/app.ts", sources);
+        let launch = Launch {
+            adapter_id: "js-debug".into(),
+            attach: false,
+            arguments: arguments.clone(),
+        };
+        let breakpoints = BTreeMap::from([(
+            source.clone(),
+            vec![Breakpoint {
+                line: 5,
+                condition: None,
+            }],
+        )]);
+        let mut session = DebugSession::start(&adapter, launch, breakpoints, || {}).unwrap();
+        let (mut seen, mut next) = (Vec::new(), 0);
+        let mut wait = |session: &mut DebugSession, done: &dyn Fn(&DebugEvent) -> bool| {
+            wait_for(session, &mut seen, &mut next, done)
+        };
+        wait(
+            &mut session,
+            &|e| matches!(e, DebugEvent::Breakpoints { path, states } if *path == source && states[0].verified),
+        );
+        session.request(
+            "evaluate",
+            json!({ "expression": "shout({ title: 'board' })", "context": "repl" }),
+        );
+        let (thread, frame) = top_frame(&mut session, &mut wait);
+        assert_eq!(frame.line, 5, "{sources}: {frame:?}");
+        assert_eq!(
+            std::fs::canonicalize(frame.source.as_ref().and_then(|s| s.path.clone()).unwrap())
+                .unwrap(),
+            std::fs::canonicalize(&source).unwrap(),
+            "{sources}"
+        );
+        session.resume(thread);
+        session.stop();
+        wait(&mut session, &|e| {
+            matches!(e, DebugEvent::Terminated | DebugEvent::Closed(_))
+        });
+    }
+    for dir in [servers, project, adapters::scratch_dir()] {
+        for _ in 0..40 {
+            if !dir.exists() || std::fs::remove_dir_all(&dir).is_ok() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        }
+        assert!(!dir.exists(), "폴더가 남음: {}", dir.display());
+    }
+}
+
+#[test]
 #[ignore = "js-debug와 Chrome·Edge로 번들된 TS의 소스 맵을 따라 멈춘다(어댑터를 받는다). node가 필요하다"]
 fn js_debug로_번들의_소스_맵을_따라_원래_ts_파일의_중단점에서_멈춘다() {
     let Some(kind) = browser() else {

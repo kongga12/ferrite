@@ -2150,7 +2150,19 @@
     - 화면이 그 함수를 부르면 TS 5줄에서 멈추고 프레임은 로컬 TS 파일이다. TS의 이름(`board.title`)도 읽고, 한 줄씩 가면 TS의 다음 줄(6줄)로 간다.
     - 앱은 중단점을 확장자로 거르지 않고 로컬 경로를 그대로 보내므로 `.ts`도 같은 길로 간다. 고칠 것이 없었다.
   - 검증: 실제 어댑터(`adapters`, CI의 3개 OS): 위 꼴로 걸림·멈춤·변수·한 줄씩.
-  - 확인하지 못한 것: 앱 화면으로는 보지 않았다. 원래 TS가 웹 루트 밖(`src/main/ts` 등)에 있어 맵의 주소가 `pathMapping`에 들지 않는 프로젝트(그때는 `sourceMapPathOverrides`나 `pathMapping`을 디버그 구성에 더 적어야 할 것으로 본다), webpack(`webpack:///…`)·Vite의 맵, 맵 안에 원래 글만 있고 로컬 파일이 없는 경우.
+  - 확인하지 못한 것: 앱 화면으로는 보지 않았다. 원래 TS가 웹 루트 밖(`src/main/ts` 등)에 있어 맵의 주소가 `pathMapping`에 들지 않는 프로젝트(그때는 `sourceMapPathOverrides`나 `pathMapping`을 디버그 구성에 더 적어야 할 것으로 본다), webpack(`webpack:///…`)·Vite의 맵(뒤의 둘은 백로그 "웹 루트 밖 TS 소스 맵"(2026-11-13)에서 보고 고쳤다), 맵 안에 원래 글만 있고 로컬 파일이 없는 경우.
+
+- [x] 웹 루트 밖 TS 소스 맵(2026-11-13) — 작음
+  - 까닭: 위 "번들 TS 소스 맵 확인"은 원래 TS가 웹 루트 안에 있고 맵이 상대 경로인 꼴만 보았다.
+  - 찾기(실제 js-debug 1.140.0, 헤드리스 Chrome, egov 자동 구성: `webRoot` = `src/main/webapp`, `pathMapping` = `/app/` → webapp). 원래 TS는 `src/main/ts/app.ts`.
+    - **상대 경로(`../../ts/app.ts`, tsc가 webapp/js에 내보낸 꼴·Vite)는 이미 된다**: 주소로 풀면 컨텍스트 경로 위(`/ts/app.ts`)로 올라가 버리지만, js-debug는 상대 경로를 번들의 로컬 파일(`webapp/js/bundle.js`) 기준으로 풀어 `src/main/ts/app.ts`를 찾는다.
+    - **webpack(`webpack:///./src/main/ts/app.ts`, `webpack://board/./src/main/ts/app.ts`)은 걸리지 않았다**: js-debug의 기본 `sourceMapPathOverrides`가 `webRoot` 기준이라 `src/main/webapp/src/main/ts/app.ts`로 풀었다. webpack의 경로는 webpack을 돌린 폴더(보통 프로젝트 루트) 기준이다.
+    - `sourceMapPathOverrides`를 주면 js-debug의 기본값이 통째로 바뀐다(합치지 않는다). 기본값(js-debug 1.140.0 `dapDebugServer.js`): `webpack:///./~/*`·`webpack:////*`·`webpack://@?:*/?:*/*`·`webpack://?:*/*`·`webpack:///([a-z]):/(.+)`·`meteor://💻app/*`·`turbopack://[project]/*`·`turbopack:///[project]/*`.
+  - 고침(`debug_config::browser_configs`): webRoot가 프로젝트 루트가 아니면(webapp 폴더) 위 기본값과 같은 항목을 `webRoot` 대신 `${workspaceFolder}` 기준으로 넣는다.
+  - 검증
+    - 단위: egov 구성의 `sourceMapPathOverrides`가 프로젝트 루트 기준이고, webRoot가 루트면 넣지 않는다.
+    - 실제 어댑터(`adapters`, CI의 3개 OS): 앱이 `.ts` 파일로 자동으로 만드는 구성(`debug_config::detect`, 그래서 ferrite-dap의 개발 의존에 ferrite-core를 더했다) 그대로 webpack 두 꼴과 상대 경로의 맵에서 `src/main/ts/app.ts` 5줄에 걸고 멈춘다. 넣은 값을 빼면 webpack 꼴에서 걸리지 않아 깨지는 것을 로컬에서 보았다.
+  - 확인하지 못한 것: webpack을 프로젝트 루트가 아닌 폴더(`frontend/` 등)에서 돌린 프로젝트(그때는 디버그 구성의 `sourceMapPathOverrides`를 그 폴더로 고쳐야 한다), 맵 안에 원래 글만 있고 로컬 파일이 없는 경우, 앱 화면.
 
 - 살폈지만 넣지 않은 것: 임베디드(MCU 플래시·시리얼 모니터·장비 설정 파일), 프레임워크별 지원(React·Vue·Angular 등, JS·TS 언어 서버로 기본은 된다), 린터 개별 연동(언어 서버나 저장 시 작업으로 된다), 원격 개발·컨테이너·SFTP 배포, 로컬 AI 완성 모델, 계정 기반 설정 동기화. egov 개발과 거리가 멀거나 크기에 비해 쓰임이 적다.
 
