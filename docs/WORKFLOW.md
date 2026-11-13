@@ -2141,7 +2141,7 @@
     - **Failsafe가 `<includes>`로 `**/*IntegrationTest.java`를 맡고 Surefire가 `<excludes>`로 뺀 pom**: `BoardIntegrationTest`(기본 `*Test`에도 걸리는 이름)는 `failsafe-reports`에 남아 통합 테스트로 읽힌다. 실패만 다시는 `-Dit.test=…`로 Failsafe가 그것만, `-Dtest=…`로 Surefire가 단위 테스트만 돌린다.
     - 둘 다 고칠 것이 없었다. 단위·통합은 클래스 이름이 아니라 어느 플러그인이 돌렸는지(보고서 폴더)로 가리고, `-Dtest`·`-Dit.test`는 pom의 includes·excludes보다 앞선다.
   - 검증: 실제 도구(`test_tools`, 로컬과 CI의 3개 OS): 두 pom 모두 넷을 단위·통합으로 읽고, 실패만 다시는 실패한 둘만, 통합(또는 단위로 돈) 테스트만 다시 돌리면 그것만 돈다.
-  - 확인하지 못한 것: 통합 테스트를 Surefire와 Failsafe가 둘 다 돌리게 한 pom(같은 테스트가 두 보고서에 남아 둘로 보일 것으로 본다), JUnit 4의 `@Category`·`<groups>`로 가른 pom.
+  - 확인하지 못한 것: 통합 테스트를 Surefire와 Failsafe가 둘 다 돌리게 한 pom(같은 테스트가 두 보고서에 남아 둘로 보일 것으로 본다. 뒤에 백로그 "Surefire·Failsafe 둘 다 돈 통합 테스트"(2026-11-13)에서 보고 고쳤다), JUnit 4의 `@Category`·`<groups>`로 가른 pom.
 
 - [x] 번들 TS 소스 맵 확인(2026-11-13) — 작음
   - 까닭: 소스 맵(번들된 TS 등)은 js-debug가 하는 대로 두고 확인하지 않았다. Ferrite는 중단점을 로컬 파일 경로로만 보내므로, 원래 `.ts`에 건 중단점이 번들에서 걸리는지는 js-debug가 소스 맵을 로컬 파일로 이어 주느냐에 달렸다.
@@ -2206,6 +2206,20 @@
     - **브라우저 프로필 공유**: 아니다. Ferrite는 js-debug 세션마다 따로 임시 폴더를 주고, js-debug(`dapDebugServer`)는 그 안에 새 폴더를 만들어 헤드리스 프로필(`.headless-profile`)을 둔다.
     - **앞 시험이 남긴 프로세스·메모리**: codelldb·debugpy·delve·java-debug·php-debug 시험 뒤에 어댑터가 띄운 프로세스는 남지 않았고(러너 자체의 php-fpm 등만), 메모리는 넉넉했다(ubuntu 16GB 중 약 14.9GB 남음). 이어 돈 js-debug 시험 10개도 죽지 않았다.
   - 결론: 원인을 알지 못했다. 실험에서는 한 번도 일어나지 않아(js-debug 시험 약 300회) 드문 Chrome 쪽 일로 본다. 위 "브라우저 죽음에 견디는 시험"의 다시 돌리기를 그대로 둔다. 같은 시험이 다시 돌기를 되풀이하면(경고 `::warning::`) 다시 본다.
+
+- [x] Surefire·Failsafe 둘 다 돈 통합 테스트(2026-11-13) — 작음
+  - 까닭: 위 "pom의 테스트 includes 변경"에서 통합 테스트를 Surefire의 `<includes>`에 넣고 Failsafe도 그대로 둔 pom(같은 테스트가 두 번 돈다)은 보지 않았다.
+  - 찾기(실제 Maven 3.10, Surefire·Failsafe 3.5.4, `mvn -B -q verify`)
+    - 통합 테스트(`BoardIT`)는 `surefire-reports`와 `failsafe-reports`에 하나씩 남아 둘로 읽힌다(단위 테스트 단계에서 돈 것, 통합 테스트 단계에서 돈 것). 실패만 다시는 `-Dtest`·`-Dit.test` 둘 다에 넣어 두 플러그인이 각자 그것만 다시 돌린다(맞다).
+    - **앱의 결과 트리**: 같은 클래스·이름이 두 줄로 보이지만 구분이 없었다.
+    - **앱이 다시 돌린 결과를 합칠 때**: 클래스·이름만으로 앞 결과를 찾아, 두 번 돈 결과가 같은 한 줄에 차례로 덮이고 다른 줄은 앞 결과로 남았다. Gradle에서 같은 테스트가 작업 둘(`test`·`integrationTest`)에서 돌 때도 같다.
+  - 고침(`test_ui`)
+    - `merge_rerun`: 다시 돌린 결과는 클래스·이름에 통합 테스트 여부와 Gradle 작업까지 같은 것에만 덮어 쓴다.
+    - 결과 트리와 자세히 보기에서 통합 테스트 단계(Failsafe)에서 돈 것은 이름 뒤에 "(통합)"을 붙인다.
+  - 검증
+    - 실제 도구(`test_tools`, 로컬과 CI의 3개 OS): 위 pom으로 여섯(통합 테스트 둘씩)을 단위·통합으로 읽고, 실패만 다시는 실패한 셋(통합 테스트는 두 단계에서)만 돈다.
+    - 앱 단위 시험: Failsafe의 다시 돌린 결과는 Failsafe의 줄에만, Gradle은 작업이 같은 줄에만 덮이고 다른 작업의 것은 더한다(고치기 전 코드로는 깨진다).
+  - 확인하지 못한 것: 앱 화면.
 
 - 살폈지만 넣지 않은 것: 임베디드(MCU 플래시·시리얼 모니터·장비 설정 파일), 프레임워크별 지원(React·Vue·Angular 등, JS·TS 언어 서버로 기본은 된다), 린터 개별 연동(언어 서버나 저장 시 작업으로 된다), 원격 개발·컨테이너·SFTP 배포, 로컬 AI 완성 모델, 계정 기반 설정 동기화. egov 개발과 거리가 멀거나 크기에 비해 쓰임이 적다.
 
