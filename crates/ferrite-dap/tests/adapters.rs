@@ -2296,23 +2296,35 @@ fn js_debug로_웹_루트_밖의_ts도_자동_구성으로_webpack과_상대_경
     std::fs::create_dir_all(source.parent().unwrap()).unwrap();
     std::fs::write(&source, TS_SOURCE).unwrap();
     let adapter = install_adapter(&servers, "js-debug", &project);
-    // 앱이 .ts 파일로 자동으로 만드는 브라우저 구성(띄우기) 그대로. 화면 주소와 헤드리스만 바꾼다.
-    let configs = ferrite_core::debug_config::detect(Some(&source), &project);
-    let mut arguments = configs[0].resolved_arguments(&project, None).unwrap();
-    arguments["url"] = json!(format!("http://127.0.0.1:{port}/app/ts.do"));
     let mut runtime_args = vec!["--headless=new", "--disable-gpu"];
     if cfg!(target_os = "linux") {
         runtime_args.extend(["--no-sandbox", "--disable-dev-shm-usage"]);
     }
-    arguments["runtimeArgs"] = json!(runtime_args);
-    arguments["timeout"] = json!(60000);
-    assert_eq!(arguments["type"], kind, "{arguments}");
-    // webpack(이름이 있는 꼴과 없는 꼴)은 webpack을 돌린 프로젝트 루트 기준, tsc·Vite는 번들 파일에서 본 상대 경로다.
-    for sources in [
-        "webpack://board/./src/main/ts/app.ts",
-        "webpack:///./src/main/ts/app.ts",
-        "../../ts/app.ts",
+    // webpack(이름이 있는 꼴과 없는 꼴)은 webpack을 돌린 폴더 기준, tsc·Vite는 번들 파일에서 본 상대 경로다. 마지막은
+    // webpack을 하위 폴더(frontend, 설정 파일이 거기 있다)에서 돌린 프로젝트다.
+    let frontend = project.join("frontend/src/app.ts");
+    for (sources, source) in [
+        ("webpack://board/./src/main/ts/app.ts", &source),
+        ("webpack:///./src/main/ts/app.ts", &source),
+        ("../../ts/app.ts", &source),
+        ("webpack://board/./src/app.ts", &frontend),
     ] {
+        if *source == frontend {
+            std::fs::create_dir_all(frontend.parent().unwrap()).unwrap();
+            std::fs::write(&frontend, TS_SOURCE).unwrap();
+            std::fs::write(
+                project.join("frontend/webpack.config.js"),
+                "module.exports = {};\n",
+            )
+            .unwrap();
+        }
+        // 앱이 .ts 파일로 자동으로 만드는 브라우저 구성(띄우기) 그대로. 화면 주소와 헤드리스만 바꾼다.
+        let configs = ferrite_core::debug_config::detect(Some(source), &project);
+        let mut arguments = configs[0].resolved_arguments(&project, None).unwrap();
+        arguments["url"] = json!(format!("http://127.0.0.1:{port}/app/ts.do"));
+        arguments["runtimeArgs"] = json!(runtime_args);
+        arguments["timeout"] = json!(60000);
+        assert_eq!(arguments["type"], kind, "{arguments}");
         *map.lock().unwrap() = TS_MAP.replace("../ts/app.ts", sources);
         let launch = Launch {
             adapter_id: "js-debug".into(),
@@ -2333,7 +2345,7 @@ fn js_debug로_웹_루트_밖의_ts도_자동_구성으로_webpack과_상대_경
         };
         wait(
             &mut session,
-            &|e| matches!(e, DebugEvent::Breakpoints { path, states } if *path == source && states[0].verified),
+            &|e| matches!(e, DebugEvent::Breakpoints { path, states } if path == source && states[0].verified),
         );
         session.request(
             "evaluate",
@@ -2344,7 +2356,7 @@ fn js_debug로_웹_루트_밖의_ts도_자동_구성으로_webpack과_상대_경
         assert_eq!(
             std::fs::canonicalize(frame.source.as_ref().and_then(|s| s.path.clone()).unwrap())
                 .unwrap(),
-            std::fs::canonicalize(&source).unwrap(),
+            std::fs::canonicalize(source).unwrap(),
             "{sources}"
         );
         session.resume(thread);
