@@ -897,9 +897,18 @@ impl Drop for DumpOnPanic {
                 self.0.display(),
                 lines[lines.len().saturating_sub(60)..].join("\n")
             );
+            // 헤드리스 Chrome의 화면 프로세스가 죽으면(CI 러너에서 가끔) js-debug는 DAP로 알리지 않고 중단점만
+            // 풀려, 멈춤을 기다리다 시간 초과로 깨진다. 워크플로(adapters.yml)는 이 줄이 있을 때만 깨진 시험을 한
+            // 번 다시 돌린다.
+            if text.contains("Target.targetCrashed") {
+                eprintln!("{BROWSER_CRASHED}");
+            }
         }
     }
 }
+
+/// 브라우저 화면 프로세스가 죽어 깨진 시험의 표시(워크플로가 찾는다).
+const BROWSER_CRASHED: &str = "[브라우저 화면 프로세스가 죽음: Target.targetCrashed]";
 
 /// 다음 멈춤을 기다려 (스레드, 맨 위 프레임)을 돌려준다.
 fn top_frame(
@@ -2295,6 +2304,8 @@ fn js_debug로_웹_루트_밖의_ts도_자동_구성으로_webpack과_상대_경
     let source = project.join("src/main/ts/app.ts");
     std::fs::create_dir_all(source.parent().unwrap()).unwrap();
     std::fs::write(&source, TS_SOURCE).unwrap();
+    let trace = project.join("js-debug.log");
+    let _dump = DumpOnPanic(trace.clone());
     let adapter = install_adapter(&servers, "js-debug", &project);
     let mut runtime_args = vec!["--headless=new", "--disable-gpu"];
     if cfg!(target_os = "linux") {
@@ -2324,6 +2335,7 @@ fn js_debug로_웹_루트_밖의_ts도_자동_구성으로_webpack과_상대_경
         arguments["url"] = json!(format!("http://127.0.0.1:{port}/app/ts.do"));
         arguments["runtimeArgs"] = json!(runtime_args);
         arguments["timeout"] = json!(60000);
+        arguments["trace"] = json!({ "logFile": trace });
         assert_eq!(arguments["type"], kind, "{arguments}");
         *map.lock().unwrap() = TS_MAP.replace("../ts/app.ts", sources);
         let launch = Launch {
