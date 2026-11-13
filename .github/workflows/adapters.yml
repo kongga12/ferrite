@@ -55,5 +55,25 @@ jobs:
           php-version: '8.3'
           extensions: xdebug
           coverage: xdebug
+      # 헤드리스 Chrome의 화면 프로세스가 가끔 죽는다(Target.targetCrashed, 러너의 자원 탓으로 본다). js-debug는
+      # 그것을 DAP로 알리지 않아 시험이 멈춤을 기다리다 시간 초과로 깨진다. 시험은 그때 js-debug 기록을 보고 표시
+      # 줄을 찍으므로, 표시가 있을 때만 깨진 시험을 이름으로 한 번 다시 돌린다(다른 까닭으로 깨지면 그대로 실패).
       - name: 어댑터 받아 설치하고 중단점에서 변수 읽기
-        run: cargo test -p ferrite-dap --test adapters -- --ignored --nocapture --test-threads=1
+        shell: bash
+        run: |
+          set -o pipefail
+          tests="cargo test -p ferrite-dap --test adapters -- --ignored --nocapture --test-threads=1"
+          $tests 2>&1 | tee adapters.log && exit 0
+          if ! grep -q "Target.targetCrashed]" adapters.log; then
+            exit 1
+          fi
+          # libtest가 끝에 내는 failures: 목록(들여 쓴 이름들)에서 깨진 시험을 읽는다.
+          failed=$(tr -d '\r' < adapters.log | awk '/^failures:$/{list=1; names=""; next} list && /^    [^ ]/{names=names" "$1; next} list && /^$/{list=0} END{print names}')
+          # 이름을 못 읽었으면(요약 전에 끊김 등) 다시 돌릴 것이 없으니 그대로 실패다.
+          if [ -z "$failed" ]; then
+            exit 1
+          fi
+          echo "::warning::브라우저 화면 프로세스가 죽어 깨진 시험을 한 번 다시 돌린다: $failed"
+          for name in $failed; do
+            $tests --exact "$name" || exit 1
+          done
