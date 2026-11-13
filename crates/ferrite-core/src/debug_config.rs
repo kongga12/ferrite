@@ -334,6 +334,22 @@ fn browser_configs(root: &Path) -> Vec<DebugConfig> {
     if let Some(context) = context {
         common["pathMapping"] = json!({ format!("/{context}/"): format!("{web_root}/") });
     }
+    // webpack의 소스 맵(`webpack:///./src/…`, `webpack://이름/./src/…`)은 webpack을 돌린 폴더(보통 프로젝트 루트)
+    // 기준이다. js-debug의 기본값은 그것을 webRoot 아래로 풀어, webRoot가 webapp 폴더면 원래 파일을 찾지 못한다
+    // (중단점이 걸리지 않는다). 기본값(js-debug 1.140.0)과 같은 항목을 프로젝트 루트 기준으로 둔다. 상대 경로의
+    // 맵(tsc·Vite)은 js-debug가 번들의 로컬 파일 기준으로 풀어 이것이 없어도 된다.
+    if web_root != "${workspaceFolder}" {
+        common["sourceMapPathOverrides"] = json!({
+            "webpack:///./~/*": "${workspaceFolder}/node_modules/*",
+            "webpack:////*": "/*",
+            "webpack://@?:*/?:*/*": "${workspaceFolder}/*",
+            "webpack://?:*/*": "${workspaceFolder}/*",
+            "webpack:///([a-z]):/(.+)": "$1:/$2",
+            "meteor://\u{1F4BB}app/*": "${workspaceFolder}/*",
+            "turbopack://[project]/*": "${workspaceFolder}/*",
+            "turbopack:///[project]/*": "${workspaceFolder}/*",
+        });
+    }
     let mut launch = common.clone();
     launch["url"] = json!(url);
     let mut attach = common;
@@ -500,6 +516,8 @@ mod tests {
         assert_eq!(launch["webRoot"], json!(root.to_string_lossy()));
         assert!(launch["type"].as_str().unwrap().starts_with("pwa-"));
         assert!(launch.get("pathMapping").is_none());
+        // webRoot가 루트면 js-debug의 기본값으로 된다.
+        assert!(launch.get("sourceMapPathOverrides").is_none());
 
         // egov: 환경 파일의 dev baseUrl(컨텍스트 경로 /app), src/main/webapp.
         std::fs::create_dir_all(root.join("http")).unwrap();
@@ -517,6 +535,16 @@ mod tests {
         assert_eq!(
             launch["pathMapping"],
             json!({ "/app/": format!("{web_root}/") })
+        );
+        // webpack의 맵은 webapp이 아니라 프로젝트 루트 기준으로 푼다.
+        let overrides = &launch["sourceMapPathOverrides"];
+        assert_eq!(
+            overrides["webpack://?:*/*"],
+            json!(format!("{}/*", root.display()))
+        );
+        assert_eq!(
+            overrides["webpack:///./~/*"],
+            json!(format!("{}/node_modules/*", root.display()))
         );
         let attach = configs[1].resolved_arguments(&root, None).unwrap();
         assert_eq!(
