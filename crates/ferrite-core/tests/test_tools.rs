@@ -310,6 +310,170 @@ fn maven_다중_모듈의_테스트를_모두_돌리고_실패만_다시() {
 
 #[test]
 #[ignore = "Maven으로 JUnit 5 단위·통합 테스트(Surefire·Failsafe)를 돌린다(의존성을 받는다). Java 17 이상과 mvn이 필요하다"]
+fn maven_includes를_바꾼_pom도_보고서_폴더로_가려_실패만_다시() {
+    if !require("mvn -v") {
+        return;
+    }
+    // (이름, 플러그인 설정, 통합 테스트 클래스, 그 클래스를 Failsafe가 돌리는지)
+    let layouts = [
+        // 통합 테스트도 Surefire의 `<includes>`에 넣어 단위 테스트 단계에서 돌린다(Failsafe 없음).
+        (
+            "maven-includes-surefire",
+            r#"      <plugin>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <version>3.5.4</version>
+        <configuration>
+          <includes>
+            <include>**/*Test.java</include>
+            <include>**/*IT.java</include>
+          </includes>
+        </configuration>
+      </plugin>"#,
+            "BoardIT",
+            false,
+        ),
+        // Failsafe가 `*IntegrationTest`를 맡고, Surefire는 그것을 뺀다(기본 `*Test`에 걸리므로).
+        (
+            "maven-includes-failsafe",
+            r#"      <plugin>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <version>3.5.4</version>
+        <configuration>
+          <excludes>
+            <exclude>**/*IntegrationTest.java</exclude>
+          </excludes>
+        </configuration>
+      </plugin>
+      <plugin>
+        <artifactId>maven-failsafe-plugin</artifactId>
+        <version>3.5.4</version>
+        <configuration>
+          <includes>
+            <include>**/*IntegrationTest.java</include>
+          </includes>
+        </configuration>
+        <executions>
+          <execution>
+            <goals>
+              <goal>integration-test</goal>
+              <goal>verify</goal>
+            </goals>
+          </execution>
+        </executions>
+      </plugin>"#,
+            "BoardIntegrationTest",
+            true,
+        ),
+    ];
+    for (name, plugins, board, integration) in layouts {
+        let root = temp_dir(name);
+        let java = root.join("src/test/java/com/example/board");
+        std::fs::create_dir_all(&java).unwrap();
+        std::fs::write(
+            root.join("pom.xml"),
+            format!(
+                r#"<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>com.example</groupId>
+  <artifactId>board</artifactId>
+  <version>1.0</version>
+  <properties>
+    <maven.compiler.release>17</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+  </properties>
+  <dependencies>
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <version>5.12.2</version>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+  <build>
+    <plugins>
+{plugins}
+    </plugins>
+  </build>
+</project>
+"#
+            ),
+        )
+        .unwrap();
+        for (class, ok, wrong) in [
+            ("CalcTest", "adds", "addsWrong"),
+            (board, "lists", "savesWrong"),
+        ] {
+            std::fs::write(
+                java.join(format!("{class}.java")),
+                format!("package com.example.board;\n\nimport static org.junit.jupiter.api.Assertions.assertEquals;\n\nimport org.junit.jupiter.api.Test;\n\nclass {class} {{\n    @Test\n    void {ok}() {{\n        assertEquals(3, 1 + 2);\n    }}\n\n    @Test\n    void {wrong}() {{\n        assertEquals(4, 1 + 2);\n    }}\n}}\n"),
+            )
+            .unwrap();
+        }
+        let report = root.join("reports");
+        let command = "mvn -B -q verify";
+        let since = SystemTime::now();
+        let (ok, output) = run(
+            &root,
+            &test_report::with_report(Tool::Maven, command, &report),
+        );
+        assert!(ok, "{name}: {output}");
+        let kinds = |cases: &[Case]| {
+            let mut kinds: Vec<(String, Outcome, bool)> = cases
+                .iter()
+                .map(|c| (c.name.clone(), c.outcome, c.integration))
+                .collect();
+            kinds.sort_by(|a, b| a.0.cmp(&b.0));
+            kinds
+        };
+        let kind = |name: &str, outcome, integration| (name.to_owned(), outcome, integration);
+        let cases = junit(Tool::Maven, &root, &report, since);
+        // 단위·통합은 어느 플러그인이 돌렸는지(보고서 폴더)로 가린다. 클래스 이름과는 상관없다.
+        assert_eq!(
+            kinds(&cases),
+            [
+                kind("adds", Outcome::Passed, false),
+                kind("addsWrong", Outcome::Failed, false),
+                kind("lists", Outcome::Passed, integration),
+                kind("savesWrong", Outcome::Failed, integration),
+            ],
+            "{name}"
+        );
+        // 실패만 다시: 그 플러그인으로 실패한 것만 돈다(`-Dtest`·`-Dit.test`는 pom의 includes·excludes보다 앞선다).
+        let rerun_failed = |failed: &[&Case]| {
+            // 보고서는 파일 시각이 `since`보다 2초 앞까지 이번 것으로 친다(거친 파일 시스템).
+            std::thread::sleep(std::time::Duration::from_secs(3));
+            let since = SystemTime::now();
+            let line = test_report::rerun(Tool::Maven, command, failed).unwrap();
+            let (ok, output) = run(
+                &root,
+                &test_report::with_report(Tool::Maven, &line, &report),
+            );
+            assert!(ok, "{name}: {line}\n{output}");
+            kinds(&junit(Tool::Maven, &root, &report, since))
+        };
+        assert_eq!(
+            rerun_failed(&failed(&cases)),
+            [
+                kind("addsWrong", Outcome::Failed, false),
+                kind("savesWrong", Outcome::Failed, integration),
+            ],
+            "{name}"
+        );
+        let only_board: Vec<&Case> = failed(&cases)
+            .into_iter()
+            .filter(|c| c.name == "savesWrong")
+            .collect();
+        assert_eq!(
+            rerun_failed(&only_board),
+            [kind("savesWrong", Outcome::Failed, integration)],
+            "{name}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+#[test]
+#[ignore = "Maven으로 JUnit 5 단위·통합 테스트(Surefire·Failsafe)를 돌린다(의존성을 받는다). Java 17 이상과 mvn이 필요하다"]
 fn maven_failsafe_통합_테스트도_돌리고_실패만_다시() {
     if !require("mvn -v") {
         return;
