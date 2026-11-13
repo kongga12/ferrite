@@ -858,6 +858,32 @@ fn web_server() -> u16 {
     port
 }
 
+/// 앱이 멈춤을 누르고 어댑터를 끝내기까지 기다리는 시간(`STOP_GRACE`)과 같다.
+const STOP_GRACE_SECS: u64 = 3;
+
+/// 명령 줄에 `text`가 든 프로세스들("번호 명령 줄"). js-debug가 띄운 브라우저는 세션 임시 폴더를 프로필로 쓴다.
+fn processes_with(text: &str) -> Vec<String> {
+    let output = if cfg!(windows) {
+        Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-Command",
+                "Get-CimInstance Win32_Process | ForEach-Object { \"$($_.ProcessId) $($_.CommandLine)\" }",
+            ])
+            .output()
+    } else {
+        Command::new("ps")
+            .args(["-axww", "-o", "pid=,args="])
+            .output()
+    };
+    let output = output.expect("프로세스 목록");
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|line| line.contains(text))
+        .map(|line| line.chars().take(300).collect())
+        .collect()
+}
+
 /// 시험이 실패해 풀릴 때 기록 파일의 끝을 출력한다.
 struct DumpOnPanic(PathBuf);
 
@@ -2543,11 +2569,72 @@ fn js_debug로_워커_스크립트의_중단점에서_멈추고_멈추지_않았
         std::thread::sleep(Duration::from_millis(200));
     }
     assert_eq!(session.focus_id(), page);
+    // 4) 워커의 맨 위 코드(1줄): 화면을 다시 부르면 워커가 새 세션으로 열리는데, 로컬 파일에 건 중단점은 그 세션에도
+    // 걸려 거기서 멈춘다.
+    session.set_breakpoints(
+        &worker_js,
+        vec![
+            Breakpoint {
+                line: 1,
+                condition: None,
+            },
+            Breakpoint {
+                line: 3,
+                condition: None,
+            },
+        ],
+    );
+    wait(
+        &mut session,
+        &|e| matches!(e, DebugEvent::Breakpoints { path, states } if *path == worker_js && states.len() == 2),
+    );
+    session
+        .request_in(page, "requestCDPProxy", json!({}))
+        .unwrap();
+    let proxy = response(wait(
+        &mut session,
+        &|e| matches!(e, DebugEvent::Response { command, .. } if command == "requestCDPProxy"),
+    ));
+    let proxy = cdp::Proxy::from_json(&proxy).expect("프록시 주소");
+    cdp::reload(&proxy, &cdp::Target::Top).unwrap();
+    let (thread, frame) = top_frame(&mut session, &mut wait);
+    assert_eq!(frame.line, 1, "{frame:?}");
+    assert!(session.focus_id() > worker, "새 워커 세션");
+    session.set_breakpoints(&worker_js, Vec::new());
+    wait(
+        &mut session,
+        &|e| matches!(e, DebugEvent::Breakpoints { path, .. } if *path == worker_js),
+    );
+    session.resume(thread);
+    wait(&mut session, &|e| matches!(e, DebugEvent::Continued));
+    // 5) 끝내기: 화면을 다시 불러 새 워커의 맨 위 코드에서 멈췄다 이어 간 뒤에는, js-debug가 자식 세션은 끝내고
+    // 브라우저도 닫지만 맨 위 세션은 `disconnect`에 답하지도 끝났다고 알리지도 않는다(js-debug 1.140.0, 기록으로
+    // 확인. 맨 위 세션에만 보내도 같다). 앱처럼 조금 기다린 뒤 세션을 버리고(어댑터를 끝낸다), 그 세션이 띄운
+    // 프로세스(브라우저·어댑터)가 남지 않았는지 본다. 남으면 다음 시험의 브라우저와 섞인다.
     session.stop();
-    wait(&mut session, &|e| {
-        matches!(e, DebugEvent::Terminated | DebugEvent::Closed(_))
-    });
+    let deadline = Instant::now() + Duration::from_secs(STOP_GRACE_SECS);
+    while Instant::now() < deadline
+        && !session
+            .poll()
+            .iter()
+            .any(|e| matches!(e, DebugEvent::Terminated | DebugEvent::Closed(_)))
+    {
+        std::thread::sleep(Duration::from_millis(20));
+    }
     drop(session);
+    let scratch = adapters::scratch_dir();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let left = processes_with(&scratch.to_string_lossy());
+        if left.is_empty() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "세션을 버린 뒤 남은 프로세스: {left:#?}"
+        );
+        std::thread::sleep(Duration::from_millis(250));
+    }
     for dir in [servers, project, adapters::scratch_dir()] {
         for _ in 0..40 {
             if !dir.exists() || std::fs::remove_dir_all(&dir).is_ok() {
