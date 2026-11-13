@@ -334,18 +334,22 @@ fn browser_configs(root: &Path) -> Vec<DebugConfig> {
     if let Some(context) = context {
         common["pathMapping"] = json!({ format!("/{context}/"): format!("{web_root}/") });
     }
-    // webpack의 소스 맵(`webpack:///./src/…`, `webpack://이름/./src/…`)은 webpack을 돌린 폴더(보통 프로젝트 루트)
-    // 기준이다. js-debug의 기본값은 그것을 webRoot 아래로 풀어, webRoot가 webapp 폴더면 원래 파일을 찾지 못한다
-    // (중단점이 걸리지 않는다). 기본값(js-debug 1.140.0)과 같은 항목을 프로젝트 루트 기준으로 둔다. 상대 경로의
-    // 맵(tsc·Vite)은 js-debug가 번들의 로컬 파일 기준으로 풀어 이것이 없어도 된다.
-    if web_root != "${workspaceFolder}" {
+    // webpack의 소스 맵(`webpack:///./src/…`, `webpack://이름/./src/…`)은 webpack을 돌린 폴더(설정 파일이 있는
+    // 폴더, 없으면 프로젝트 루트) 기준이다. js-debug의 기본값은 그것을 webRoot 아래로 풀어, webRoot가 그 폴더가
+    // 아니면 원래 파일을 찾지 못한다(중단점이 걸리지 않는다). 기본값(js-debug 1.140.0)과 같은 항목을 그 폴더
+    // 기준으로 둔다. 상대 경로의 맵(tsc·Vite)은 js-debug가 번들의 로컬 파일 기준으로 풀어 이것이 없어도 된다.
+    let webpack = match webpack_dir(root) {
+        Some(dir) if !dir.is_empty() => format!("${{workspaceFolder}}/{dir}"),
+        _ => "${workspaceFolder}".to_owned(),
+    };
+    if webpack != web_root {
         common["sourceMapPathOverrides"] = json!({
-            "webpack:///./~/*": "${workspaceFolder}/node_modules/*",
+            "webpack:///./~/*": format!("{webpack}/node_modules/*"),
             "webpack:////*": "/*",
-            "webpack://@?:*/?:*/*": "${workspaceFolder}/*",
-            "webpack://?:*/*": "${workspaceFolder}/*",
+            "webpack://@?:*/?:*/*": format!("{webpack}/*"),
+            "webpack://?:*/*": format!("{webpack}/*"),
             "webpack:///([a-z]):/(.+)": "$1:/$2",
-            "meteor://\u{1F4BB}app/*": "${workspaceFolder}/*",
+            "meteor://\u{1F4BB}app/*": format!("{webpack}/*"),
             "turbopack://[project]/*": "${workspaceFolder}/*",
             "turbopack:///[project]/*": "${workspaceFolder}/*",
         });
@@ -370,6 +374,33 @@ fn browser_configs(root: &Path) -> Vec<DebugConfig> {
             attach,
         ),
     ]
+}
+
+/// webpack을 돌리는 폴더: 가장 얕은 `webpack.config.*`(js·cjs·mjs·ts)가 있는 폴더의 루트 기준 경로(`/`로 잇고,
+/// 루트면 빈 글). 같은 깊이면 이름 차례로 앞의 것. 의존성 폴더는 보지 않는다.
+fn webpack_dir(root: &Path) -> Option<String> {
+    let mut found: Vec<Vec<String>> = Vec::new();
+    crate::files::walk(root, 4, &mut |path, is_dir| {
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+        if !is_dir
+            && name.starts_with("webpack.config.")
+            && let Some(dir) = path.parent().and_then(|dir| dir.strip_prefix(root).ok())
+        {
+            found.push(
+                dir.components()
+                    .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                    .collect(),
+            );
+        }
+        true
+    });
+    found
+        .into_iter()
+        .min_by(|a, b| a.len().cmp(&b.len()).then_with(|| a.cmp(b)))
+        .map(|parts| parts.join("/"))
 }
 
 /// 화면 주소: HTTP 요청의 환경 파일(루트나 `http/`의 `http-client.env.json`)에서 `dev`(없으면 첫) 환경의
@@ -545,6 +576,21 @@ mod tests {
         assert_eq!(
             overrides["webpack:///./~/*"],
             json!(format!("{}/node_modules/*", root.display()))
+        );
+        // webpack을 하위 폴더에서 돌리면(설정 파일이 거기 있다) 그 폴더 기준이다. 의존성 폴더의 것은 보지 않는다.
+        std::fs::create_dir_all(root.join("frontend/node_modules/x")).unwrap();
+        std::fs::write(root.join("frontend/webpack.config.js"), "").unwrap();
+        std::fs::write(root.join("frontend/node_modules/x/webpack.config.js"), "").unwrap();
+        let configs = detect(Some(&root.join("frontend/src/app.ts")), &root);
+        let launch = configs[0].resolved_arguments(&root, None).unwrap();
+        let overrides = &launch["sourceMapPathOverrides"];
+        assert_eq!(
+            overrides["webpack://?:*/*"],
+            json!(format!("{}/frontend/*", root.display()))
+        );
+        assert_eq!(
+            overrides["turbopack://[project]/*"],
+            json!(format!("{}/*", root.display()))
         );
         let attach = configs[1].resolved_arguments(&root, None).unwrap();
         assert_eq!(

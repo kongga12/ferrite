@@ -2162,7 +2162,7 @@
   - 검증
     - 단위: egov 구성의 `sourceMapPathOverrides`가 프로젝트 루트 기준이고, webRoot가 루트면 넣지 않는다.
     - 실제 어댑터(`adapters`, CI의 3개 OS): 앱이 `.ts` 파일로 자동으로 만드는 구성(`debug_config::detect`, 그래서 ferrite-dap의 개발 의존에 ferrite-core를 더했다) 그대로 webpack 두 꼴과 상대 경로의 맵에서 `src/main/ts/app.ts` 5줄에 걸고 멈춘다. 넣은 값을 빼면 webpack 꼴에서 걸리지 않아 깨지는 것을 로컬에서 보았다.
-  - 확인하지 못한 것: webpack을 프로젝트 루트가 아닌 폴더(`frontend/` 등)에서 돌린 프로젝트(그때는 디버그 구성의 `sourceMapPathOverrides`를 그 폴더로 고쳐야 한다), 맵 안에 원래 글만 있고 로컬 파일이 없는 경우, 앱 화면.
+  - 확인하지 못한 것: webpack을 프로젝트 루트가 아닌 폴더(`frontend/` 등)에서 돌린 프로젝트(그때는 디버그 구성의 `sourceMapPathOverrides`를 그 폴더로 고쳐야 한다. 뒤에 백로그 "webpack 하위 폴더 빌드"(2026-11-13)에서 고쳤다), 맵 안에 원래 글만 있고 로컬 파일이 없는 경우, 앱 화면.
 
 - [x] 화면 다시 불러 새 워커 멈춤 CI(2026-11-13) — 작음
   - 까닭: 위 "웹 워커 디버깅 확인"에서 화면을 다시 불러 새 워커의 맨 위 코드에서 멈추는 단계를 시험에서 뺐다. 끝낼 때 세션을 버려야 했고, CI의 Linux·macOS에서 다음 시험이 흔들려 버린 세션의 브라우저가 남은 것으로 보았다.
@@ -2172,6 +2172,14 @@
     - 세션을 버린 뒤 그 세션이 띄운 프로세스(세션 임시 폴더를 프로필로 쓰는 브라우저·어댑터)는 남지 않았다(로컬 Windows와 CI의 3개 OS).
   - 고침(시험만): 워커 시험에 4단계(화면을 다시 불러 새 워커 세션의 맨 위 코드 1줄에서 멈추고 이어 간다)를 되살리고, 끝낼 때 앱처럼 3초 기다린 뒤 세션을 버리고 그 세션이 띄운 프로세스가 남지 않았는지 OS마다 본다(`processes_with`: Windows는 CIM, 나머지는 `ps`).
   - 검증: 실제 어댑터(`adapters`, CI의 3개 OS, 두 번): 워커 시험과 그다음 시험(`js_debug를_설치해…`)이 모두 통과하고 남은 프로세스가 없다. 예전에 다음 시험이 흔들린 까닭은 다시 나타나지 않아 알지 못한다(버린 세션이 남긴 프로세스는 없었다).
+
+- [x] webpack 하위 폴더 빌드(2026-11-13) — 작음
+  - 까닭: 위 "웹 루트 밖 TS 소스 맵"은 webpack 맵을 프로젝트 루트 기준으로 풀었다. webpack을 하위 폴더(`frontend/` 등, `package.json`·`webpack.config.js`가 거기 있다)에서 돌리면 맵의 경로(`webpack://board/./src/app.ts`)는 그 폴더 기준이라 중단점이 걸리지 않는다.
+  - 고침(`debug_config::browser_configs`): 가장 얕은 `webpack.config.*`가 있는 폴더(깊이 4까지, 의존성 폴더 `node_modules` 등은 보지 않는다. 같은 깊이면 이름 차례)를 webpack의 기준으로 삼아 `sourceMapPathOverrides`의 webpack·meteor 항목을 그 폴더로 둔다. turbopack 항목은 js-debug 기본값대로 프로젝트 루트다. 기준이 webRoot와 같으면(웹 루트에서 webpack을 돌린다) 넣지 않는다(js-debug 기본값과 같다). 설정 파일이 없으면 예전처럼 프로젝트 루트.
+  - 검증
+    - 단위: `frontend/webpack.config.js`가 있으면 webpack 항목이 `<루트>/frontend/*`이고 turbopack 항목은 루트, `node_modules` 안의 설정 파일은 보지 않는다.
+    - 실제 어댑터(`adapters`, CI의 3개 OS): 위 "웹 루트 밖 TS 소스 맵" 시험에 `frontend/webpack.config.js`·`frontend/src/app.ts`와 맵 `webpack://board/./src/app.ts`를 더해, 앱이 만드는 구성 그대로 그 파일 5줄에서 멈춘다. 설정 파일 찾기를 끄면 그 꼴에서 걸리지 않아 깨지는 것을 로컬에서 보았다.
+  - 확인하지 못한 것: webpack 설정의 `context`를 바꾼 프로젝트, 설정 파일이 여럿인 저장소(가장 얕은 것 하나만 쓴다), 앱 화면.
 
 - 살폈지만 넣지 않은 것: 임베디드(MCU 플래시·시리얼 모니터·장비 설정 파일), 프레임워크별 지원(React·Vue·Angular 등, JS·TS 언어 서버로 기본은 된다), 린터 개별 연동(언어 서버나 저장 시 작업으로 된다), 원격 개발·컨테이너·SFTP 배포, 로컬 AI 완성 모델, 계정 기반 설정 동기화. egov 개발과 거리가 멀거나 크기에 비해 쓰임이 적다.
 
