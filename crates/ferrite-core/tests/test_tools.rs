@@ -310,6 +310,126 @@ fn maven_다중_모듈의_테스트를_모두_돌리고_실패만_다시() {
 
 #[test]
 #[ignore = "Maven으로 JUnit 5 단위·통합 테스트(Surefire·Failsafe)를 돌린다(의존성을 받는다). Java 17 이상과 mvn이 필요하다"]
+fn maven_통합_테스트를_surefire와_failsafe가_둘_다_돌리면_둘로_읽고_실패만_다시도_둘_다_돈다() {
+    if !require("mvn -v") {
+        return;
+    }
+    // Surefire의 `<includes>`에 통합 테스트(`*IT`)를 넣고 Failsafe도 기본대로 둔다: 통합 테스트가 두 번 돈다.
+    let root = temp_dir("maven-it-both");
+    let java = root.join("src/test/java/com/example/board");
+    std::fs::create_dir_all(&java).unwrap();
+    std::fs::write(
+        root.join("pom.xml"),
+        r#"<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>com.example</groupId>
+  <artifactId>board</artifactId>
+  <version>1.0</version>
+  <properties>
+    <maven.compiler.release>17</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+  </properties>
+  <dependencies>
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <version>5.12.2</version>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+  <build>
+    <plugins>
+      <plugin>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <version>3.5.4</version>
+        <configuration>
+          <includes>
+            <include>**/*Test.java</include>
+            <include>**/*IT.java</include>
+          </includes>
+        </configuration>
+      </plugin>
+      <plugin>
+        <artifactId>maven-failsafe-plugin</artifactId>
+        <version>3.5.4</version>
+        <executions>
+          <execution>
+            <goals>
+              <goal>integration-test</goal>
+              <goal>verify</goal>
+            </goals>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+</project>
+"#,
+    )
+    .unwrap();
+    for (class, ok, wrong) in [
+        ("CalcTest", "adds", "addsWrong"),
+        ("BoardIT", "lists", "savesWrong"),
+    ] {
+        std::fs::write(
+            java.join(format!("{class}.java")),
+            format!("package com.example.board;\n\nimport static org.junit.jupiter.api.Assertions.assertEquals;\n\nimport org.junit.jupiter.api.Test;\n\nclass {class} {{\n    @Test\n    void {ok}() {{\n        assertEquals(3, 1 + 2);\n    }}\n\n    @Test\n    void {wrong}() {{\n        assertEquals(4, 1 + 2);\n    }}\n}}\n"),
+        )
+        .unwrap();
+    }
+    let report = root.join("reports");
+    let command = "mvn -B -q verify";
+    let kinds = |cases: &[Case]| {
+        let mut kinds: Vec<(String, Outcome, bool)> = cases
+            .iter()
+            .map(|c| (c.name.clone(), c.outcome, c.integration))
+            .collect();
+        kinds.sort_by(|a, b| (&a.0, a.2).cmp(&(&b.0, b.2)));
+        kinds
+    };
+    let kind = |name: &str, outcome, integration| (name.to_owned(), outcome, integration);
+    let since = SystemTime::now();
+    let (ok, output) = run(
+        &root,
+        &test_report::with_report(Tool::Maven, command, &report),
+    );
+    assert!(ok, "{output}");
+    let cases = junit(Tool::Maven, &root, &report, since);
+    // 통합 테스트는 두 플러그인의 보고서에 하나씩 남아 둘로 읽는다(단위 테스트 단계에서 돈 것과 통합 테스트 단계에서 돈 것).
+    assert_eq!(
+        kinds(&cases),
+        [
+            kind("adds", Outcome::Passed, false),
+            kind("addsWrong", Outcome::Failed, false),
+            kind("lists", Outcome::Passed, false),
+            kind("lists", Outcome::Passed, true),
+            kind("savesWrong", Outcome::Failed, false),
+            kind("savesWrong", Outcome::Failed, true),
+        ]
+    );
+    // 실패만 다시: 실패한 넷(통합 테스트는 두 번)을 다시 돌리면 두 플러그인이 각자 그것만 돌린다.
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    let since = SystemTime::now();
+    let line = test_report::rerun(Tool::Maven, command, &failed(&cases)).unwrap();
+    let (ok, output) = run(
+        &root,
+        &test_report::with_report(Tool::Maven, &line, &report),
+    );
+    assert!(ok, "{line}\n{output}");
+    assert_eq!(
+        kinds(&junit(Tool::Maven, &root, &report, since)),
+        [
+            kind("addsWrong", Outcome::Failed, false),
+            kind("savesWrong", Outcome::Failed, false),
+            kind("savesWrong", Outcome::Failed, true),
+        ],
+        "{line}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+#[ignore = "Maven으로 JUnit 5 단위·통합 테스트(Surefire·Failsafe)를 돌린다(의존성을 받는다). Java 17 이상과 mvn이 필요하다"]
 fn maven_includes를_바꾼_pom도_보고서_폴더로_가려_실패만_다시() {
     if !require("mvn -v") {
         return;

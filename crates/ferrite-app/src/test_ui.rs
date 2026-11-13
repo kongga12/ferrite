@@ -287,16 +287,7 @@ impl TestPanel {
             self.view = View::Results;
         }
         if running.rerun {
-            for case in found {
-                match self
-                    .cases
-                    .iter_mut()
-                    .find(|c| c.suite == case.suite && c.name == case.name)
-                {
-                    Some(old) => *old = case,
-                    None => self.cases.push(case),
-                }
-            }
+            merge_rerun(&mut self.cases, found);
         } else {
             self.cases = found;
             self.selected = self.cases.iter().position(|c| c.outcome == Outcome::Failed);
@@ -551,7 +542,7 @@ impl TestPanel {
                                 .unwrap_or_default();
                             let row = ui.selectable_label(
                                 self.selected == Some(i),
-                                format!("{}{time}", case.name),
+                                format!("{}{}{time}", case.name, runner_tag(case)),
                             );
                             if row.clicked() {
                                 picked = Some(i);
@@ -575,7 +566,7 @@ impl TestPanel {
 
     fn detail_ui(&mut self, ui: &mut egui::Ui, root: &Path) -> Option<TestAction> {
         let case = self.selected.and_then(|i| self.cases.get(i))?.clone();
-        ui.strong(&case.name);
+        ui.strong(format!("{}{}", case.name, runner_tag(&case)));
         ui.weak(&case.suite);
         ui.horizontal(|ui| {
             let (word, color) = outcome_label(ui, case.outcome);
@@ -709,6 +700,28 @@ fn push_limited(output: &mut String, text: &str) {
     }
 }
 
+/// 다시 돌린 결과를 앞 결과에 덮어 쓴다(없던 것은 더한다). 같은 테스트도 돌린 곳이 다르면 따로다: Maven은
+/// 단위 테스트 단계(Surefire)와 통합 테스트 단계(Failsafe)가 같은 통합 테스트를 둘 다 돌릴 수 있고(pom이 Surefire의
+/// `<includes>`에 넣었을 때), Gradle은 작업마다 따로 돈다.
+fn merge_rerun(cases: &mut Vec<Case>, found: Vec<Case>) {
+    for case in found {
+        match cases.iter_mut().find(|c| {
+            c.suite == case.suite
+                && c.name == case.name
+                && c.integration == case.integration
+                && c.task == case.task
+        }) {
+            Some(old) => *old = case,
+            None => cases.push(case),
+        }
+    }
+}
+
+/// 결과 트리에서 테스트 이름 뒤에 붙이는 돌린 곳: Maven 통합 테스트 단계(Failsafe)에서 돈 것.
+fn runner_tag(case: &Case) -> &'static str {
+    if case.integration { "  (통합)" } else { "" }
+}
+
 /// 프로세스와 그 자식을 모두 끝낸다(셸 → Maven → JVM).
 fn kill_tree(pid: u32) {
     #[cfg(windows)]
@@ -725,4 +738,61 @@ fn kill_tree(pid: u32) {
     };
     ferrite_lsp::client::hide_console(&mut command);
     let _ = command.stdout(Stdio::null()).stderr(Stdio::null()).status();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn case(name: &str, outcome: Outcome, integration: bool, task: Option<&str>) -> Case {
+        Case {
+            suite: "com.example.board.BoardIT".into(),
+            name: name.into(),
+            outcome,
+            integration,
+            task: task.map(str::to_owned),
+            seconds: None,
+            message: None,
+            detail: String::new(),
+            file: None,
+            line: None,
+        }
+    }
+
+    #[test]
+    fn 다시_돌린_결과는_돌린_곳까지_같은_것에만_덮어_쓴다() {
+        // 같은 통합 테스트를 Surefire·Failsafe가 둘 다 돌렸다. 다시 돌린 Failsafe의 것은 Failsafe의 것에만 덮어 쓴다.
+        let mut cases = vec![
+            case("savesWrong", Outcome::Failed, false, None),
+            case("savesWrong", Outcome::Failed, true, None),
+            case("checks", Outcome::Failed, false, Some(":app:test")),
+        ];
+        merge_rerun(
+            &mut cases,
+            vec![
+                case("savesWrong", Outcome::Passed, true, None),
+                case(
+                    "checks",
+                    Outcome::Passed,
+                    false,
+                    Some(":app:integrationTest"),
+                ),
+            ],
+        );
+        let seen: Vec<(bool, Option<&str>, Outcome)> = cases
+            .iter()
+            .map(|c| (c.integration, c.task.as_deref(), c.outcome))
+            .collect();
+        assert_eq!(
+            seen,
+            [
+                (false, None, Outcome::Failed),
+                (true, None, Outcome::Passed),
+                (false, Some(":app:test"), Outcome::Failed),
+                (false, Some(":app:integrationTest"), Outcome::Passed),
+            ]
+        );
+        assert_eq!(runner_tag(&cases[1]), "  (통합)");
+        assert_eq!(runner_tag(&cases[0]), "");
+    }
 }
