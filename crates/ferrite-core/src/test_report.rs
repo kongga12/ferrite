@@ -440,9 +440,7 @@ pub fn read_report(path: &Path) -> Result<Vec<Case>, String> {
 }
 
 /// Gradle 보고서(`<프로젝트>/build/test-results/<작업>/TEST-….xml`)를 남긴 작업의 경로(`:app:test`, 루트
-/// 프로젝트면 `:test`). 빌드의 루트는 위로 가장 가까운 `settings.gradle(.kts)`가 있는 폴더(없으면 그 프로젝트)이고,
-/// 프로젝트 경로는 루트에서 그 폴더까지의 폴더 이름이다(설정에서 프로젝트 이름·폴더를 따로 정한 빌드는 맞지 않을
-/// 수 있다).
+/// 프로젝트면 `:test`).
 fn gradle_task(path: &Path) -> Option<String> {
     let task_dir = path.parent()?;
     let results = task_dir.parent()?;
@@ -450,25 +448,83 @@ fn gradle_task(path: &Path) -> Option<String> {
     if results.file_name()? != "test-results" || build.file_name()? != "build" {
         return None;
     }
-    let project_dir = build.parent()?;
-    let root = project_dir
-        .ancestors()
-        .find(|dir| {
-            ["settings.gradle", "settings.gradle.kts"]
-                .iter()
-                .any(|f| dir.join(f).is_file())
-        })
-        .unwrap_or(project_dir);
-    let project = project_dir.strip_prefix(root).ok()?;
-    let mut task = String::new();
-    for part in project.components() {
-        task.push(':');
-        task.push_str(&part.as_os_str().to_string_lossy());
-    }
-    task.push(':');
-    task.push_str(&task_dir.file_name()?.to_string_lossy());
-    Some(task)
+    let project = gradle_project_path(build.parent()?)?;
+    Some(format!(
+        "{project}:{}",
+        task_dir.file_name()?.to_string_lossy()
+    ))
 }
+
+/// 프로젝트 폴더의 Gradle 경로(`:app`, 루트 프로젝트는 빈 글). 빌드의 루트는 위로 가장 가까운
+/// `settings.gradle(.kts)`가 있는 폴더(없으면 그 프로젝트)다.
+/// - 설정이 폴더를 적은 프로젝트(`project(":app").projectDir = file("modules/application")`)는 그 경로다.
+///   나머지는 루트에서 그 폴더까지의 폴더 이름이다.
+/// - 그 루트를 바깥 빌드가 품으면(`includeBuild("lib")`) 품은 빌드의 이름(폴더 이름)을 앞에 붙인다. 바깥 루트에서
+///   `:lib:core:test`로 돈다(Gradle 9.2.0으로 확인).
+///
+/// 설정은 글로만 읽는다. 반복문으로 정한 폴더, 폴더를 바꾼 프로젝트의 하위 프로젝트(Gradle은 `include`한 때의
+/// 부모 폴더로 정한다), 이름을 바꾼 프로젝트·품은 빌드는 맞지 않을 수 있다(Gradle이 작업을 찾지 못한다고 알린다).
+fn gradle_project_path(project_dir: &Path) -> Option<String> {
+    let Some((root, settings)) = gradle_settings_above(project_dir) else {
+        return Some(String::new());
+    };
+    let here = std::fs::canonicalize(project_dir).ok();
+    let named = GRADLE_PROJECT_DIR
+        .captures_iter(&settings)
+        .find(|c| here.is_some() && std::fs::canonicalize(root.join(&c[2])).ok() == here);
+    let project = match named {
+        Some(c) if c[1].starts_with(':') => c[1].to_owned(),
+        Some(c) => format!(":{}", &c[1]),
+        None => project_dir
+            .strip_prefix(&root)
+            .ok()?
+            .components()
+            .map(|part| format!(":{}", part.as_os_str().to_string_lossy()))
+            .collect(),
+    };
+    let included =
+        root.parent()
+            .and_then(gradle_settings_above)
+            .is_some_and(|(outer, settings)| {
+                let me = std::fs::canonicalize(&root).ok();
+                GRADLE_INCLUDE_BUILD
+                    .captures_iter(&settings)
+                    .any(|c| me.is_some() && std::fs::canonicalize(outer.join(&c[1])).ok() == me)
+            });
+    Some(match (included, root.file_name()) {
+        (true, Some(build)) => format!(":{}{project}", build.to_string_lossy()),
+        _ => project,
+    })
+}
+
+/// `dir`에서 위로 가장 가까운 Gradle 설정 파일의 폴더와 글(줄 주석·블록 주석은 뺀다). 설정은 MS949 주석이 있어도
+/// 읽는다(깨진 글자는 바꾼다).
+fn gradle_settings_above(dir: &Path) -> Option<(PathBuf, String)> {
+    dir.ancestors().find_map(|dir| {
+        ["settings.gradle", "settings.gradle.kts"]
+            .iter()
+            .find_map(|file| std::fs::read(dir.join(file)).ok())
+            .map(|bytes| {
+                let text = String::from_utf8_lossy(&bytes);
+                (
+                    dir.to_path_buf(),
+                    GRADLE_COMMENT.replace_all(&text, "").into_owned(),
+                )
+            })
+    })
+}
+
+/// 설정의 주석: 블록 주석과 줄 전체가 주석인 줄(문자열 속 `//`는 건드리지 않게 줄 끝 주석은 둔다).
+static GRADLE_COMMENT: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?ms)/\*.*?\*/|^[ \t]*//[^\n]*").unwrap());
+/// 프로젝트 폴더를 적은 줄: `project(":app").projectDir = file("modules/app")`,
+/// `project(':app').projectDir = new File(settingsDir, 'modules/app')`(`rootDir`·`File(…)`도). (경로, 폴더).
+static GRADLE_PROJECT_DIR: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"project\s*\(\s*["']([^"']+)["']\s*\)\s*\.\s*projectDir\s*=\s*(?:new\s+)?(?:file|File)\s*\(\s*(?:(?:settingsDir|rootDir|rootProject\.projectDir)\s*,\s*)?["']([^"'$]+)["']\s*\)"#).unwrap()
+});
+/// 품은 빌드: `includeBuild("lib")`, `includeBuild 'lib'`. (폴더).
+static GRADLE_INCLUDE_BUILD: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"includeBuild\s*\(?\s*["']([^"'$]+)["']"#).unwrap());
 
 /// Gradle 명령이 테스트를 돌리는지: `check`, 또는 이름이 `test`로 끝나는 작업
 /// (`integrationTest`, `:app:test`). 옵션의 값(`-x test`)은 작업이 아니다. `build`는 테스트를 거치기만 하므로 Maven의
