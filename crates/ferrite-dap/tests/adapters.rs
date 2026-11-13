@@ -745,6 +745,39 @@ self.onmessage = function (e) {
 };
 ";
 
+/// 번들된 TS 화면: 번들(`bundle.js`)만 불러온다.
+const TS_PAGE: &str = "<!doctype html>
+<html><body>
+<script src=\"/app/js/bundle.js\"></script>
+</body></html>
+";
+
+/// 원래 TS(로컬 `ts/app.ts`). 타입(1~3줄)은 번들에서 빠지므로 번들과 줄이 어긋난다.
+const TS_SOURCE: &str = "interface Board {
+  title: string;
+}
+function shout(board: Board): string {
+  const upper: string = board.title.toUpperCase();
+  return upper + \"!\";
+}
+(window as any).shout = shout;
+";
+
+/// TS를 묶은 번들. 함수(2~5줄)가 TS의 4~7줄이다.
+const TS_BUNDLE: &str = "(function () {
+function shout(board) {
+  const upper = board.title.toUpperCase();
+  return upper + \"!\";
+}
+window.shout = shout;
+})();
+//# sourceMappingURL=bundle.js.map
+";
+
+/// 번들의 소스 맵: 번들 2~6줄을 TS 4~8줄로(줄 첫 칸끼리). 원래 글(`sourcesContent`)은 넣지 않아 js-debug가 주소
+/// (`/app/ts/app.ts`)를 로컬 파일로 바꿔야 한다.
+const TS_MAP: &str = r#"{"version":3,"file":"bundle.js","sources":["../ts/app.ts"],"names":[],"mappings":";AAGA;AACA;AACA;AACA;AACA;"}"#;
+
 const APP_JS: &str = "function add(a, b) {
   var total = a + b;
   return total;
@@ -800,6 +833,12 @@ fn web_server() -> u16 {
                     ("application/javascript", jquery())
                 } else if line.starts_with("GET /app/js/app.js ") {
                     ("application/javascript", APP_JS)
+                } else if line.starts_with("GET /app/ts.do ") {
+                    ("text/html; charset=UTF-8", TS_PAGE)
+                } else if line.starts_with("GET /app/js/bundle.js ") {
+                    ("application/javascript", TS_BUNDLE)
+                } else if line.starts_with("GET /app/js/bundle.js.map ") {
+                    ("application/json", TS_MAP)
                 } else {
                     ("text/plain", "")
                 };
@@ -2150,6 +2189,102 @@ fn js_debug로_다른_사이트_iframe은_그_세션의_cdp로_블록을_받고_
         std::thread::sleep(Duration::from_millis(200));
     }
 
+    session.stop();
+    wait(&mut session, &|e| {
+        matches!(e, DebugEvent::Terminated | DebugEvent::Closed(_))
+    });
+    drop(session);
+    for dir in [servers, project, adapters::scratch_dir()] {
+        for _ in 0..40 {
+            if !dir.exists() || std::fs::remove_dir_all(&dir).is_ok() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        }
+        assert!(!dir.exists(), "폴더가 남음: {}", dir.display());
+    }
+}
+
+#[test]
+#[ignore = "js-debug와 Chrome·Edge로 번들된 TS의 소스 맵을 따라 멈춘다(어댑터를 받는다). node가 필요하다"]
+fn js_debug로_번들의_소스_맵을_따라_원래_ts_파일의_중단점에서_멈춘다() {
+    let Some(kind) = browser() else {
+        require("Chrome", false);
+        return;
+    };
+    if !require("node", find_program("node").is_some()) {
+        return;
+    }
+    let (servers, project) = (temp_dir("js-ts-servers"), temp_dir("js-ts"));
+    let web_root = project.join("src/main/webapp");
+    std::fs::create_dir_all(web_root.join("ts")).unwrap();
+    let source = web_root.join("ts/app.ts");
+    std::fs::write(&source, TS_SOURCE).unwrap();
+    let port = web_server();
+    let adapter = install_adapter(&servers, "js-debug", &project);
+    let mut runtime_args = vec!["--headless=new", "--disable-gpu"];
+    if cfg!(target_os = "linux") {
+        runtime_args.extend(["--no-sandbox", "--disable-dev-shm-usage"]);
+    }
+    let trace = project.join("js-debug.log");
+    let _dump = DumpOnPanic(trace.clone());
+    let launch = Launch {
+        adapter_id: "js-debug".into(),
+        attach: false,
+        arguments: json!({
+            "type": kind,
+            "url": format!("http://127.0.0.1:{port}/app/ts.do"),
+            "webRoot": web_root,
+            "pathMapping": { "/app/": format!("{}/", web_root.display()) },
+            "runtimeArgs": runtime_args,
+            "timeout": 60000,
+            "trace": { "logFile": trace },
+        }),
+    };
+    // 원래 TS 파일의 5줄(`const upper …`, 번들 3줄)에 건다. Ferrite는 로컬 파일 경로만 보낸다.
+    let breakpoints = BTreeMap::from([(
+        source.clone(),
+        vec![Breakpoint {
+            line: 5,
+            condition: None,
+        }],
+    )]);
+    let mut session = DebugSession::start(&adapter, launch, breakpoints, || {}).unwrap();
+    let (mut seen, mut next) = (Vec::new(), 0);
+    let mut wait = |session: &mut DebugSession, done: &dyn Fn(&DebugEvent) -> bool| {
+        wait_for(session, &mut seen, &mut next, done)
+    };
+    // 1) 번들을 받고 소스 맵을 읽으면 TS 파일의 중단점이 걸린다(그 줄로).
+    let states = wait(
+        &mut session,
+        &|e| matches!(e, DebugEvent::Breakpoints { path, states } if *path == source && states[0].verified),
+    );
+    let DebugEvent::Breakpoints { states, .. } = states else {
+        unreachable!()
+    };
+    assert_eq!(states[0].line, Some(5), "{states:?}");
+    // 2) 화면이 그 함수를 부르면 TS 파일의 5줄에서 멈추고, 프레임은 로컬 TS 파일이다. TS 이름의 변수도 읽는다.
+    session.request(
+        "evaluate",
+        json!({ "expression": "shout({ title: 'board' })", "context": "repl" }),
+    );
+    let (thread, frame) = top_frame(&mut session, &mut wait);
+    assert_eq!(frame.line, 5, "{frame:?}");
+    assert_eq!(
+        std::fs::canonicalize(frame.source.as_ref().and_then(|s| s.path.clone()).unwrap()).unwrap(),
+        std::fs::canonicalize(&source).unwrap()
+    );
+    session.evaluate("board.title", Some(frame.id));
+    let title = response(wait(
+        &mut session,
+        &|e| matches!(e, DebugEvent::Response { command, .. } if command == "evaluate"),
+    ));
+    assert_eq!(title["result"], "'board'", "{title}");
+    // 3) 한 줄씩 가면 TS의 다음 줄(6줄)로 간다.
+    session.step_over(thread);
+    let (thread, frame) = top_frame(&mut session, &mut wait);
+    assert_eq!(frame.line, 6, "{frame:?}");
+    session.resume(thread);
     session.stop();
     wait(&mut session, &|e| {
         matches!(e, DebugEvent::Terminated | DebugEvent::Closed(_))
