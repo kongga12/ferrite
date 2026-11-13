@@ -1962,7 +1962,7 @@
     - 단위: `failsafe-reports`의 보고서만 통합 테스트로 읽고, 둘 다 실패·통합 테스트만·단위 테스트만(`install`이면 `-DskipITs`, `test`면 붙이지 않는다)의 명령
     - 실제 도구(`test_tools`, CI의 3개 OS): 단위 테스트 둘·통합 테스트 둘(하나씩 실패)을 `mvn -B -q verify`로 돌려 종료 코드 0, 넷을 단위·통합으로 읽고, 통합 테스트의 실패 줄을 찾는다. 실패만 다시는 단위·통합 테스트를 하나씩만 돌리고(통합 테스트를 단위 테스트 단계에서 돌리지 않는다), 통합 테스트만·단위 테스트만 다시 돌리면 그것만 돈다.
     - 실제 앱(Windows, 릴리스 빌드, JDK 21): 같은 예제에 실행 구성 `mvn -B -q verify`를 두고 [실행 > 테스트]에서 돌려 "통과 2 · 실패 2 · 종료 코드 0"(BoardIT·CalcTest), [실패만 다시]의 명령이 `-Dtest=CalcTest#addsWrong … -Dit.test=BoardIT#savesWrong -Dit.failIfNoSpecifiedTests=false`이고 Surefire·Failsafe가 하나씩만 돈 것을 출력 창에서 보았다.
-  - 확인하지 못한 것: pom이 통합 테스트를 Surefire의 `<includes>`에 넣거나 Failsafe의 `<includes>`를 바꾼 프로젝트(보고서 폴더로 가리므로 될 것으로 본다). Gradle의 통합 테스트 작업(`integrationTest`)은 따로 다루지 않는다.
+  - 확인하지 못한 것: pom이 통합 테스트를 Surefire의 `<includes>`에 넣거나 Failsafe의 `<includes>`를 바꾼 프로젝트(보고서 폴더로 가리므로 될 것으로 본다. 뒤에 백로그 "pom의 테스트 includes 변경"(2026-11-13)에서 실제로 보았다). Gradle의 통합 테스트 작업(`integrationTest`)은 따로 다루지 않는다.
 - [x] 한글 사용자 이름의 Gradle 홈(2026-11-11) — 작음
   - 까닭: 위 "한글 경로의 Gradle 테스트"의 안내는 돌린 폴더 경로만 보았다. Windows 사용자 이름이 한글이면 Gradle 홈(`C:\Users\홍길동\.gradle`)이 한글 경로라 프로젝트를 영문 경로에 두어도 깨질 것으로 보았다. 한국어 사용자에게 흔하다.
   - 찾기(로컬 Windows, 코드 페이지 949, JDK 21, Gradle 9.2.0, Windows 사용자 이름을 바꾸지 않고 `GRADLE_USER_HOME`을 한글 경로로)
@@ -2133,6 +2133,15 @@
   - 찾아 고친 것: **이어 간 뒤에도 상태바가 "멈춤: 중단점"으로 남았다.** 상태바는 멈출 때만 바꾸고 이어 갈 때는 바꾸지 않았다.
     - 고침: 멈춤을 알렸으면(`stop_shown`) 세션이 다시 돌 때(계속·한 줄씩 버튼과 키, 어댑터의 `continued` 어느 길이든) `poll` 처음에 "디버그 중: <구성>"으로 되돌린다. 이번 `poll`의 이벤트보다 먼저 알려, 곧바로 다시 멈추면 그 멈춤이 뒤에 온다(처음에는 끝에 두었더니 계속 직후 같은 `poll`에서 다시 멈추는 가짜 어댑터 시험에서 되돌림이 빠졌다).
     - 검증: 앱 시험(계속을 누른 뒤의 첫 `poll`이 "디버그 중"을 알린다), 실제 앱에서 계속 뒤 상태바 "디버그 중: 화면 확인 묶음(헤드리스)".
+
+- [x] pom의 테스트 includes 변경(2026-11-13) — 작음
+  - 까닭: 위 "Maven Failsafe 통합 테스트"는 Surefire·Failsafe의 기본 includes(`*Test`·`*IT`)로만 보았다. pom이 그것을 바꾼 프로젝트에서 단위·통합 구분과 실패만 다시를 보지 않았다.
+  - 찾기(실제 Maven 3.10, Surefire·Failsafe 3.5.4, JUnit 5.12, `mvn -B -q verify`)
+    - **Surefire의 `<includes>`에 `**/*IT.java`를 넣은 pom(Failsafe 없음)**: `BoardIT`는 `surefire-reports`에 남아 단위 테스트로 읽힌다. 실패만 다시는 `-Dtest=…BoardIT#savesWrong`로 Surefire가 그것만 돌린다.
+    - **Failsafe가 `<includes>`로 `**/*IntegrationTest.java`를 맡고 Surefire가 `<excludes>`로 뺀 pom**: `BoardIntegrationTest`(기본 `*Test`에도 걸리는 이름)는 `failsafe-reports`에 남아 통합 테스트로 읽힌다. 실패만 다시는 `-Dit.test=…`로 Failsafe가 그것만, `-Dtest=…`로 Surefire가 단위 테스트만 돌린다.
+    - 둘 다 고칠 것이 없었다. 단위·통합은 클래스 이름이 아니라 어느 플러그인이 돌렸는지(보고서 폴더)로 가리고, `-Dtest`·`-Dit.test`는 pom의 includes·excludes보다 앞선다.
+  - 검증: 실제 도구(`test_tools`, 로컬과 CI의 3개 OS): 두 pom 모두 넷을 단위·통합으로 읽고, 실패만 다시는 실패한 둘만, 통합(또는 단위로 돈) 테스트만 다시 돌리면 그것만 돈다.
+  - 확인하지 못한 것: 통합 테스트를 Surefire와 Failsafe가 둘 다 돌리게 한 pom(같은 테스트가 두 보고서에 남아 둘로 보일 것으로 본다), JUnit 4의 `@Category`·`<groups>`로 가른 pom.
 
 - 살폈지만 넣지 않은 것: 임베디드(MCU 플래시·시리얼 모니터·장비 설정 파일), 프레임워크별 지원(React·Vue·Angular 등, JS·TS 언어 서버로 기본은 된다), 린터 개별 연동(언어 서버나 저장 시 작업으로 된다), 원격 개발·컨테이너·SFTP 배포, 로컬 AI 완성 모델, 계정 기반 설정 동기화. egov 개발과 거리가 멀거나 크기에 비해 쓰임이 적다.
 
