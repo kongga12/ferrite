@@ -277,6 +277,8 @@ pub struct Debugger {
     ctx: Option<egui::Context>,
     /// 멈춤을 누른 때. 그동안은 세션을 살려 두어 어댑터가 대상을 끝내게 한다.
     stopping: Option<Instant>,
+    /// 상태바에 멈춤을 알렸다. 이어 가면(버튼·키, 어댑터의 `continued` 어느 길이든) "디버그 중"으로 되돌린다.
+    stop_shown: bool,
     /// 스레드를 모를 때 누른 일시 정지. 스레드 목록을 받으면 보낸다.
     pause_requested: bool,
     /// 지금 세션의 구성 이름과 어댑터 이름.
@@ -791,6 +793,17 @@ impl Debugger {
     /// 세션 이벤트를 처리한다. 매 프레임 부른다.
     pub fn poll(&mut self) -> Vec<DebugNotice> {
         let mut notices = Vec::new();
+        // 이어 갔으면(계속·한 줄씩, 어댑터의 `continued`) 상태바를 되돌린다. 이번에 받을 이벤트보다 먼저 알려, 곧바로
+        // 다시 멈추면 그 멈춤이 뒤에 온다.
+        if self.stop_shown
+            && self
+                .session
+                .as_ref()
+                .is_some_and(|s| matches!(s.state(), State::Running))
+        {
+            self.stop_shown = false;
+            notices.push(DebugNotice::Status(format!("디버그 중: {}", self.name)));
+        }
         if let Some(result) = self.pending.as_ref().and_then(|p| p.build.try_recv().ok()) {
             let Some(pending) = self.pending.take() else {
                 return notices;
@@ -868,6 +881,7 @@ impl Debugger {
                         other => other,
                     };
                     notices.push(DebugNotice::Status(format!("멈춤: {reason}")));
+                    self.stop_shown = true;
                     match stopped.thread_id {
                         Some(thread) => {
                             self.thread_id = Some(thread);
@@ -3030,6 +3044,14 @@ mod tests {
         assert!(!seen.iter().any(|m| m == "Page.reload"), "{seen:?}");
         // 한 줄씩 가는 것으로는 부르지 않는다. 계속을 누르면 부른다.
         debugger.resume(Step::Continue);
+        // 상태바도 멈춤에서 "디버그 중"으로 돌아온다.
+        assert!(
+            debugger
+                .poll()
+                .iter()
+                .any(|n| matches!(n, DebugNotice::Status(s) if s.starts_with("디버그 중"))),
+            "이어 간 뒤에도 상태바가 멈춤으로 남음"
+        );
         pump(
             &mut debugger,
             "계속 뒤에 다시 부르지 않음",
