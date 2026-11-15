@@ -2141,7 +2141,7 @@
     - **Failsafe가 `<includes>`로 `**/*IntegrationTest.java`를 맡고 Surefire가 `<excludes>`로 뺀 pom**: `BoardIntegrationTest`(기본 `*Test`에도 걸리는 이름)는 `failsafe-reports`에 남아 통합 테스트로 읽힌다. 실패만 다시는 `-Dit.test=…`로 Failsafe가 그것만, `-Dtest=…`로 Surefire가 단위 테스트만 돌린다.
     - 둘 다 고칠 것이 없었다. 단위·통합은 클래스 이름이 아니라 어느 플러그인이 돌렸는지(보고서 폴더)로 가리고, `-Dtest`·`-Dit.test`는 pom의 includes·excludes보다 앞선다.
   - 검증: 실제 도구(`test_tools`, 로컬과 CI의 3개 OS): 두 pom 모두 넷을 단위·통합으로 읽고, 실패만 다시는 실패한 둘만, 통합(또는 단위로 돈) 테스트만 다시 돌리면 그것만 돈다.
-  - 확인하지 못한 것: 통합 테스트를 Surefire와 Failsafe가 둘 다 돌리게 한 pom(같은 테스트가 두 보고서에 남아 둘로 보일 것으로 본다. 뒤에 백로그 "Surefire·Failsafe 둘 다 돈 통합 테스트"(2026-11-13)에서 보고 고쳤다), JUnit 4의 `@Category`·`<groups>`로 가른 pom.
+  - 확인하지 못한 것: 통합 테스트를 Surefire와 Failsafe가 둘 다 돌리게 한 pom(같은 테스트가 두 보고서에 남아 둘로 보일 것으로 본다. 뒤에 백로그 "Surefire·Failsafe 둘 다 돈 통합 테스트"(2026-11-13)에서 보고 고쳤다), JUnit 4의 `@Category`·`<groups>`로 가른 pom(뒤에 백로그 "JUnit 4 분류로 가른 pom"(2026-11-16)에서 보았다).
 
 - [x] 번들 TS 소스 맵 확인(2026-11-13) — 작음
   - 까닭: 소스 맵(번들된 TS 등)은 js-debug가 하는 대로 두고 확인하지 않았다. Ferrite는 중단점을 로컬 파일 경로로만 보내므로, 원래 `.ts`에 건 중단점이 번들에서 걸리는지는 js-debug가 소스 맵을 로컬 파일로 이어 주느냐에 달렸다.
@@ -2220,6 +2220,16 @@
     - 실제 도구(`test_tools`, 로컬과 CI의 3개 OS): 위 pom으로 여섯(통합 테스트 둘씩)을 단위·통합으로 읽고, 실패만 다시는 실패한 셋(통합 테스트는 두 단계에서)만 돈다.
     - 앱 단위 시험: Failsafe의 다시 돌린 결과는 Failsafe의 줄에만, Gradle은 작업이 같은 줄에만 덮이고 다른 작업의 것은 더한다(고치기 전 코드로는 깨진다).
   - 확인하지 못한 것: 앱 화면.
+
+- [x] JUnit 4 분류로 가른 pom(2026-11-16) — 작음(확인만, 코드는 그대로)
+  - 까닭: egov 프로젝트는 JUnit 4가 많고, 통합 테스트를 이름(`*IT`)이 아니라 분류(`@Category`)로 가르기도 한다. 위 "pom의 테스트 includes 변경"은 JUnit 5와 이름으로 가른 pom만 보았다.
+  - 찾기(실제 Maven 3.10, Surefire·Failsafe 3.5.4, JUnit 4.13.2, `mvn -B -q verify`): 통합 테스트 `BoardTest`(이름은 단위 테스트 꼴)에 `@Category(IntegrationTests.class)`를 붙이고, Surefire는 `<excludedGroups>`로 그 분류를 빼고 Failsafe는 `<groups>`로 그 분류만(`<includes>`는 `**/*Test.java`) 돌린다.
+    - `BoardTest`는 `failsafe-reports`에 남아 통합 테스트로 읽힌다(단위·통합은 보고서 폴더로 가리므로 이름과 상관없다).
+    - 실패만 다시: `-Dtest`·`-Dit.test`로 걸러도 분류 설정은 그대로 먹어, 각 플러그인이 제 분류에서 실패한 것만 돈다. 통합 테스트만 다시 돌리면 그것만 돈다.
+    - JUnit 4의 실패 스택에서도 테스트 줄(`BoardTest.java:16`)로 간다.
+    - 고칠 것이 없었다.
+  - 검증: 실제 도구(`test_tools`, 로컬과 CI의 3개 OS).
+  - 확인하지 못한 것: JUnit 4 `Suite`(`@RunWith(Suite.class)`)로 묶어 돌리는 pom(보고서의 클래스 이름이 묶음 이름일 수 있다), TestNG.
 
 - 살폈지만 넣지 않은 것: 임베디드(MCU 플래시·시리얼 모니터·장비 설정 파일), 프레임워크별 지원(React·Vue·Angular 등, JS·TS 언어 서버로 기본은 된다), 린터 개별 연동(언어 서버나 저장 시 작업으로 된다), 원격 개발·컨테이너·SFTP 배포, 로컬 AI 완성 모델, 계정 기반 설정 동기화. egov 개발과 거리가 멀거나 크기에 비해 쓰임이 적다.
 
