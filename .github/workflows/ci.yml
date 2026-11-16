@@ -101,6 +101,18 @@ jobs:
           mvn -B -q dependency:get -Dtransitive=false -Dartifact=com.oracle.database.nls:orai18n:11.2.0.4
           mvn -B -q dependency:get -Dtransitive=false -Dartifact=cubrid:cubrid-jdbc:11.2.0.0035 \
             -DremoteRepositories=https://maven.cubrid.org
+      # JDBC 사이드카를 JDK 8로도 컴파일하는 시험은 JDK 8을 `JAVA_HOME_8_X64`에서 찾는다. ubuntu-latest가
+      # ubuntu-26.04 이미지로 바뀌며 JDK 8이 빠졌다(2026-11-16). 없을 때만 Temurin 8을 받아 그 변수만 알린다
+      # (`JAVA_HOME`·`PATH`는 그대로 두어 다른 시험의 Java를 바꾸지 않는다).
+      - &jdk8
+        name: JDK 8 받기(러너에 없으면)
+        if: runner.os == 'Linux' && env.JAVA_HOME_8_X64 == ''
+        run: |
+          mkdir -p "$RUNNER_TEMP/jdk8"
+          curl -fsSL https://api.adoptium.net/v3/binary/latest/8/ga/linux/x64/jdk/hotspot/normal/eclipse \
+            | tar -xz -C "$RUNNER_TEMP/jdk8" --strip-components=1
+          "$RUNNER_TEMP/jdk8/bin/javac" -version
+          echo "JAVA_HOME_8_X64=$RUNNER_TEMP/jdk8" >> "$GITHUB_ENV"
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
@@ -142,6 +154,7 @@ jobs:
       - name: PostgreSQL 설치(macOS)
         if: runner.os == 'macOS'
         run: brew install postgresql@17
+      - *jdk8
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
       # npm으로 설치하는 웹 언어 서버: TypeScript 7 실행 파일과 Node로 도는 HTML·CSS·JSON 서버가 3개 OS에서

@@ -543,14 +543,21 @@ fn 거꾸로_요청한_자식_세션에서_멈추고_페이지_스크립트에_�
             condition: None,
         }],
     );
-    let event = wait_for(
+    // 부모(브라우저 세션)와 자식(페이지)이 따로 답한다. 부모의 미확인 응답은 그때까지 자식이 확인한 것과 합쳐
+    // 알리므로, 부모가 먼저 오면 "미확인 → 확인", 자식이 먼저 오면 "확인 → 확인"이다. 어느 쪽이든 마지막은 확인이다.
+    let first = wait_for(
+        &mut session,
+        &mut log,
+        |e| matches!(e, DebugEvent::Breakpoints { path, .. } if *path == local),
+    );
+    let last = wait_for(
         &mut session,
         &mut log,
         |e| matches!(e, DebugEvent::Breakpoints { path, .. } if *path == local),
     );
     assert!(
-        matches!(&event, DebugEvent::Breakpoints { states, .. } if states[0].verified),
-        "부모의 미확인 응답은 버린다: {event:?}"
+        matches!(&last, DebugEvent::Breakpoints { states, .. } if states[0].verified),
+        "부모의 미확인 응답은 자식이 확인한 것과 합친다: {first:?} → {last:?}"
     );
     session.set_breakpoints(
         &local,
