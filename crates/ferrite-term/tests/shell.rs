@@ -48,7 +48,7 @@ fn wait(terminal: &mut Terminal, what: &str, done: impl Fn(&Terminal) -> bool) {
 fn 실행_구성의_명령_줄을_플랫폼_셸로_돌리고_환경_변수를_넘긴다() {
     // 따옴표가 든 줄을 그대로 넘기는지(Windows cmd는 C 런타임 이스케이프를 모른다) 함께 본다.
     let line = if cfg!(windows) {
-        r#"echo "따옴표 안" %FERRITE_RUN%& ping -n 2 127.0.0.1 >nul& exit 4"#
+        r#"echo "따옴표 안" %FERRITE_RUN%& exit 4"#
     } else {
         r#"echo "따옴표 안" "$FERRITE_RUN"; exit 4"#
     };
@@ -75,13 +75,8 @@ fn 실행_구성의_명령_줄을_플랫폼_셸로_돌리고_환경_변수를_�
 
 #[test]
 fn 명령의_출력과_종료_코드를_받는다() {
-    // ConPTY는 곧바로 끝나는 프로세스의 마지막 화면을 다 내보내지 않을 때가 있어(실험으로 확인) 끝나기
-    // 전에 1초 쉰다. 통합 터미널의 셸은 계속 떠 있으므로 상관없다.
     let args: &[&str] = if cfg!(windows) {
-        &[
-            "/c",
-            "echo hello-ferrite& echo 한글출력& ping -n 2 127.0.0.1 >nul& exit 3",
-        ]
+        &["/c", "echo hello-ferrite& echo 한글출력& exit 3"]
     } else {
         &["-c", "echo hello-ferrite; echo 한글출력; exit 3"]
     };
@@ -93,6 +88,21 @@ fn 명령의_출력과_종료_코드를_받는다() {
     let text = terminal.snapshot().text();
     assert!(text.contains("hello-ferrite"), "{text}");
     assert_eq!(terminal.exited(), Some(Some(3)));
+}
+
+/// ConPTY는 곧바로 끝나는 명령의 마지막 출력을 프로세스가 끝난 뒤에 내보낸다.
+#[test]
+fn 곧바로_끝나는_명령의_마지막_출력도_남는다() {
+    let args: &[&str] = if cfg!(windows) {
+        &["/c", "echo first-line& echo last-line"]
+    } else {
+        &["-c", "echo first-line; echo last-line"]
+    };
+    let mut terminal = spawn(shell(args));
+    wait(&mut terminal, "두 줄과 종료", |t| {
+        let text = t.snapshot().text();
+        t.exited().is_some() && text.contains("first-line") && text.contains("last-line")
+    });
 }
 
 #[test]

@@ -5883,9 +5883,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("ferrite-run-ui-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(dir.join(".ferrite")).unwrap();
-        // ConPTY는 곧바로 끝나는 프로세스의 마지막 화면을 놓칠 수 있어 Windows에서는 1초 쉰다.
         let command = if cfg!(windows) {
-            "echo run-%FERRITE_RUN%& ping -n 2 127.0.0.1 >nul"
+            "echo run-%FERRITE_RUN%"
         } else {
             "echo run-$FERRITE_RUN"
         };
