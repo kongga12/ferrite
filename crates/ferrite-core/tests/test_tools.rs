@@ -1551,6 +1551,60 @@ fn gradle_test_보고서와_실패만_다시() {
 }
 
 #[test]
+#[ignore = "Gradle로 묶음만 돌리게 한 JUnit 5 테스트를 돌린다(의존성을 받는다). Java 17 이상과 gradle이 필요하다"]
+fn gradle_묶음만_돌리는_설정은_실패만_다시가_테스트를_찾지_못한_것을_알아본다() {
+    if !require("gradle --version") {
+        return;
+    }
+    for (name, rule) in [
+        (
+            "filter",
+            "filter {\n        includeTestsMatching(\"*AllTests\")\n    }",
+        ),
+        ("include", "include(\"**/AllTests.class\")"),
+    ] {
+        let root = gradle_project(
+            &format!("gradle-suite-only-{name}"),
+            &[(
+                "app",
+                &format!(
+                    "plugins {{\n    java\n}}\n\nrepositories {{\n    mavenCentral()\n}}\n\ndependencies {{\n    testImplementation(\"org.junit.jupiter:junit-jupiter:5.12.2\")\n    testImplementation(\"org.junit.platform:junit-platform-suite\")\n    testRuntimeOnly(\"org.junit.platform:junit-platform-launcher\")\n}}\n\ntasks.test {{\n    useJUnitPlatform()\n    {rule}\n}}\n"
+                ),
+            )],
+        );
+        write_junit5_suite(&root.join("app/src/test/java/com/example/board"));
+        let command = "gradle test";
+        let since = SystemTime::now();
+        run(
+            &root,
+            &test_report::with_report(Tool::Gradle, command, &root),
+        );
+        let cases = junit(Tool::Gradle, &root, &root, since);
+        // 묶음으로 한 번만 돌고, 보고서에는 실제 클래스가 적힌다.
+        assert_eq!(
+            suite_tests(&cases),
+            [
+                suite_test("BoardTest", "lists()", Outcome::Passed),
+                suite_test("BoardTest", "savesWrong()", Outcome::Failed),
+                suite_test("CalcTest", "adds()", Outcome::Passed),
+                suite_test("CalcTest", "addsWrong()", Outcome::Failed),
+            ],
+            "{name}"
+        );
+        // 그 클래스 이름의 `--tests`는 빌드 설정의 거르기에 걸려 돌 것이 없다. 테스트 창은 전체를 다시 돌린다.
+        let line = test_report::rerun(Tool::Gradle, command, &failed(&cases)).unwrap();
+        let line = test_report::with_report(Tool::Gradle, &line, &root);
+        let (ok, output) = run(&root, &format!("{line} 2>&1"));
+        assert!(!ok, "{name}: {output}");
+        assert!(
+            test_report::gradle_rerun_found_nothing(Tool::Gradle, &output),
+            "{name}: {output}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+#[test]
 #[ignore = "Gradle로 TestNG 테스트(useTestNG)를 돌린다(의존성을 받는다). Java 17 이상과 gradle이 필요하다"]
 fn gradle_testng_매개변수_테스트를_줄마다_읽고_실패만_다시() {
     if !require("gradle --version") {
