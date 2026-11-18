@@ -546,6 +546,106 @@ fn maven_testng_테스트도_한_번씩_읽고_실패만_다시() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// TestNG 매개변수 테스트(`@DataProvider`, 두 줄 중 둘째가 틀림)와 그냥 실패하는 테스트. 테스트 줄은 16·21줄.
+fn write_testng_data_provider(java: &Path) {
+    std::fs::create_dir_all(java).unwrap();
+    std::fs::write(
+        java.join("CalcTest.java"),
+        "package com.example.board;\n\nimport static org.testng.Assert.assertEquals;\n\nimport org.testng.annotations.DataProvider;\nimport org.testng.annotations.Test;\n\npublic class CalcTest {\n    @DataProvider\n    public Object[][] sums() {\n        return new Object[][] {{1, 2, 3}, {2, 2, 5}};\n    }\n\n    @Test(dataProvider = \"sums\")\n    public void adds(int a, int b, int sum) {\n        assertEquals(a + b, sum);\n    }\n\n    @Test\n    public void subtractsWrong() {\n        assertEquals(3 - 1, 1);\n    }\n}\n",
+    )
+    .unwrap();
+}
+
+/// TestNG 매개변수 테스트를 돌려 읽고, 줄을 찾고, 실패만 다시 돌린다. 도구마다 매개변수 줄의 이름 꼴만 다르다.
+fn check_testng_data_provider(
+    tool: Tool,
+    root: &Path,
+    report: &Path,
+    command: &str,
+    rows: [&str; 2],
+) {
+    let java = root.join(match tool {
+        Tool::Gradle => "app/src/test/java/com/example/board",
+        _ => "src/test/java/com/example/board",
+    });
+    write_testng_data_provider(&java);
+    let run_tool = |line: &str| {
+        let since = SystemTime::now();
+        run(root, &test_report::with_report(tool, line, report));
+        outcomes(&test_report::dedup(junit(tool, root, report, since)))
+    };
+    let all = |first| {
+        vec![
+            (rows[0].to_owned(), first),
+            (rows[1].to_owned(), Outcome::Failed),
+            ("subtractsWrong".to_owned(), Outcome::Failed),
+        ]
+    };
+    // 매개변수 줄마다 이름이 달라 `dedup`이 하나로 모으지 않는다.
+    let since = SystemTime::now();
+    run(root, &test_report::with_report(tool, command, report));
+    let cases = junit(tool, root, report, since);
+    assert_eq!(
+        outcomes(&test_report::dedup(cases.clone())),
+        all(Outcome::Passed)
+    );
+    let row = cases.iter().find(|c| c.name == rows[1]).unwrap();
+    assert_eq!(test_line(root, root, row), (java.join("CalcTest.java"), 16));
+    // 실패만 다시: 매개변수 줄 하나만 고를 수는 없어 그 메서드(`adds`)의 줄을 모두 돈다.
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    let line = test_report::rerun(tool, command, &failed(&cases)).unwrap();
+    assert_eq!(run_tool(&line), all(Outcome::Passed), "{line}");
+}
+
+#[test]
+#[ignore = "Maven으로 TestNG 매개변수 테스트를 돌린다(의존성을 받는다). Java 17 이상과 mvn이 필요하다"]
+fn maven_testng_매개변수_테스트를_줄마다_읽고_실패만_다시() {
+    if !require("mvn -v") {
+        return;
+    }
+    let root = temp_dir("maven-testng-data-provider");
+    std::fs::write(
+        root.join("pom.xml"),
+        r#"<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>com.example</groupId>
+  <artifactId>board</artifactId>
+  <version>1.0</version>
+  <properties>
+    <maven.compiler.release>17</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+  </properties>
+  <dependencies>
+    <dependency>
+      <groupId>org.testng</groupId>
+      <artifactId>testng</artifactId>
+      <version>7.10.2</version>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+  <build>
+    <plugins>
+      <plugin>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <version>3.5.4</version>
+      </plugin>
+    </plugins>
+  </build>
+</project>
+"#,
+    )
+    .unwrap();
+    // Surefire는 값을 먼저, 줄 번호(1부터)를 뒤에 적는다.
+    check_testng_data_provider(
+        Tool::Maven,
+        &root,
+        &root.join("reports"),
+        "mvn -B -q test",
+        ["adds[1, 2, 3](1)", "adds[2, 2, 5](2)"],
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 #[test]
 #[ignore = "Maven으로 JUnit 4 Suite로 묶은 테스트를 돌린다(의존성을 받는다). Java 17 이상과 mvn이 필요하다"]
 fn maven_junit4_suite로_묶어_돌려도_실제_클래스로_읽고_실패만_다시() {
@@ -1337,6 +1437,30 @@ fn gradle_test_보고서와_실패만_다시() {
             ("throwsError()".to_owned(), Outcome::Failed),
         ],
         "실패한 것만 다시"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+#[ignore = "Gradle로 TestNG 테스트(useTestNG)를 돌린다(의존성을 받는다). Java 17 이상과 gradle이 필요하다"]
+fn gradle_testng_매개변수_테스트를_줄마다_읽고_실패만_다시() {
+    if !require("gradle --version") {
+        return;
+    }
+    let root = gradle_project(
+        "gradle-testng",
+        &[(
+            "app",
+            "plugins {\n    java\n}\n\nrepositories {\n    mavenCentral()\n}\n\ndependencies {\n    testImplementation(\"org.testng:testng:7.10.2\")\n}\n\ntasks.test {\n    useTestNG()\n}\n",
+        )],
+    );
+    // Gradle은 줄 번호(0부터)를 먼저, 값을 뒤에 적는다.
+    check_testng_data_provider(
+        Tool::Gradle,
+        &root,
+        &root,
+        "gradle test",
+        ["adds[0](1, 2, 3)", "adds[1](2, 2, 5)"],
     );
     let _ = std::fs::remove_dir_all(&root);
 }
