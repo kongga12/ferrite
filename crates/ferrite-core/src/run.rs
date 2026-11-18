@@ -4,7 +4,9 @@
 use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 
+use regex::Regex;
 use serde::Deserialize;
 
 /// 사용자 구성 파일(프로젝트 루트 기준).
@@ -23,12 +25,12 @@ pub const CUSTOM_TEMPLATE: &str = r#"# Ferrite 실행 구성. [[run]]마다 하�
 #   name    목록에 보일 이름
 #   command 셸이 실행할 명령 줄(Windows는 cmd, 그 밖에는 사용자 셸)
 #   cwd     작업 폴더(선택). 상대 경로면 프로젝트 루트 기준
-#   env     더할 환경 변수(선택)
+#   env     더할 환경 변수(선택). 값의 ${env:이름}은 앱의 환경 변수로 바꾼다(없으면 빈 글)
 #
 # [[run]]
 # name = "톰캣으로 실행(JDK 8)"
 # command = "mvn tomcat7:run"
-# env = { JAVA_HOME = "C:/Program Files/Java/jdk1.8.0_202" }
+# env = { JAVA_HOME = "C:/Program Files/Java/jdk1.8.0_202", PATH = "C:/Program Files/Java/jdk1.8.0_202/bin;${env:PATH}" }
 
 # 저장 시 작업. 저장한 파일이 pattern에 맞으면 command를 창 없이 돌리고 결과를 상태바에 알린다.
 #   pattern 프로젝트 루트 기준 글롭. `/`가 없으면 어느 폴더든(`*.scss`)
@@ -178,8 +180,33 @@ pub fn load_on_save(root: &Path) -> Result<Vec<SaveTask>, String> {
     parse_custom(&text).map(|f| f.on_save)
 }
 
+/// 환경 변수 값 안의 `${env:이름}`.
+static ENV_VAR: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\$\{env:([^}]+)\}").unwrap());
+
+/// 값 안의 `${env:이름}`을 `lookup`으로 찾은 값으로 바꾼다(없으면 빈 글). 같은 이름을 앞에 덧붙일 때 쓴다:
+/// `PATH = "C:/gradle/bin;${env:PATH}"`. 닫지 않은 `${env:`는 그대로 둔다.
+fn expand_env(value: &str, lookup: impl Fn(&str) -> Option<String>) -> String {
+    ENV_VAR
+        .replace_all(value, |c: &regex::Captures| {
+            lookup(&c[1]).unwrap_or_default()
+        })
+        .into_owned()
+}
+
 fn parse_custom(text: &str) -> Result<CustomFile, String> {
-    let file: CustomFile = toml::from_str(text).map_err(|e| format!("{CUSTOM_FILE}: {e}"))?;
+    let mut file: CustomFile = toml::from_str(text).map_err(|e| format!("{CUSTOM_FILE}: {e}"))?;
+    // 앱의 환경 변수로 펼친다(Windows는 이름의 대소문자를 가리지 않는다: `${env:PATH}`도 `Path`를 찾는다).
+    let lookup = |name: &str| std::env::var(name).ok();
+    let envs = file
+        .run
+        .iter_mut()
+        .map(|c| &mut c.env)
+        .chain(file.on_save.iter_mut().map(|t| &mut t.env));
+    for env in envs {
+        for value in env.values_mut() {
+            *value = expand_env(value, lookup);
+        }
+    }
     if let Some(bad) = file
         .run
         .iter()
@@ -494,6 +521,32 @@ mod tests {
         .run;
         assert_eq!(configs.len(), 1);
         assert_eq!(configs[0].env["JAVA_HOME"], "C:/jdk8");
+
+        // 값의 `${env:이름}`은 앱의 환경 변수로 펼친다(실행 구성·저장 시 작업 모두). 없으면 빈 글.
+        let file = parse_custom(
+            r#"
+            [[run]]
+            name = "그레이들"
+            command = "gradle test"
+            env = { PATH = "C:/gradle/bin;${env:PATH}", HOME_X = "[${env:FERRITE_NO_SUCH_VAR_42}]" }
+            [[on_save]]
+            name = "포맷"
+            pattern = "*.java"
+            command = "fmt"
+            env = { P = "${env:PATH}" }
+            "#,
+        )
+        .unwrap();
+        let path = std::env::var("PATH").unwrap();
+        assert_eq!(file.run[0].env["PATH"], format!("C:/gradle/bin;{path}"));
+        assert_eq!(file.run[0].env["HOME_X"], "[]");
+        assert_eq!(file.on_save[0].env["P"], path);
+        assert_eq!(
+            expand_env("a${env:X}b${env:Y}c${env:", |n| (n == "X")
+                .then(|| "1".to_owned())),
+            "a1bc${env:",
+            "여럿을 펼치고 닫지 않은 것은 그대로"
+        );
         let root = Path::new("project");
         assert_eq!(configs[0].working_directory(root), root.join("web"));
 

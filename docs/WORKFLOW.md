@@ -2243,7 +2243,15 @@
     - **Maven**(Surefire `<includes>`에 `*IT`, Failsafe도 그대로, `mvn -B -q verify`): "통과 3 · 실패 3 · 종료 코드 0". `BoardIT` 아래에 `lists`·`savesWrong`이 둘씩, 통합 테스트 단계의 것은 이름 뒤에 "(통합)"(자세히 보기에도). [실패만 다시] 뒤에도 여섯 줄 그대로이고 실패한 세 줄(두 `savesWrong`과 `addsWrong`)의 걸린 시간이 모두 새것으로 바뀌었다(각자 덮였다). 출력 창에서 Failsafe는 `BoardIT.savesWrong` 하나만 돌았다("Tests run: 1").
     - **Gradle**(`project(":app").projectDir = file("modules/application")`, `includeBuild("lib")`, `gradle test :lib:core:test --continue`, Gradle 9.2.0을 PATH에): "통과 2 · 실패 2 · 종료 코드 1"(`demo.AppTest`·`demo.CoreTest`). [실패만 다시]의 출력 첫 줄 `gradle --continue :lib:core:test --tests "demo.CoreTest.wrong" :app:test --tests "demo.AppTest.wrong"`, 다시 돈 뒤 "통과 2 · 실패 2".
   - 고칠 것이 없었다.
-  - 알아 둘 것: 실행 구성의 `env`는 `${PATH}` 같은 변수를 펼치지 않는다(PATH를 바꾸려면 앱을 띄우는 환경에서 바꾼다).
+  - 알아 둘 것: 실행 구성의 `env`는 `${PATH}` 같은 변수를 펼치지 않는다(PATH를 바꾸려면 앱을 띄우는 환경에서 바꾼다. 뒤에 백로그 "실행 구성 env의 변수 펼치기"(2026-11-18)에서 `${env:이름}`을 펼치게 했다).
+
+- [x] 실행 구성 env의 변수 펼치기(2026-11-18) — 작음
+  - 까닭: 위 "테스트 창 앱 화면 확인"에서 실행 구성의 `env`가 다른 환경 변수를 넣지 못해, `PATH` 앞에 Gradle·JDK 폴더를 더하려면 앱을 띄우는 환경을 바꿔야 했다. egov는 프로젝트마다 JDK(8·11·17)가 달라 실행 구성에 `JAVA_HOME`과 함께 `PATH`를 바꾸는 일이 흔하다.
+  - 고침(`run::parse_custom`): `.ferrite/run.toml`의 실행 구성(`[[run]]`)과 저장 시 작업(`[[on_save]]`)의 `env` 값 안의 `${env:이름}`을 앱의 환경 변수로 바꾼다(VS Code와 같은 꼴). 없는 변수는 빈 글, 닫지 않은 `${env:`는 그대로. Windows는 이름의 대소문자를 가리지 않는다(`${env:PATH}`가 `Path`를 찾는다). 읽을 때 한 번 펼치므로 터미널 탭·테스트 창·저장 시 작업이 모두 같은 값을 받는다. 새 구성 파일의 예에도 적었다.
+  - 검증
+    - 단위: 실행 구성·저장 시 작업의 `PATH = "C:/gradle/bin;${env:PATH}"`가 앱의 `PATH`로 펼쳐지고, 없는 변수는 빈 글, 여럿을 펼치고 닫지 않은 것은 그대로.
+    - 실제 앱(Windows, 릴리스 빌드): Gradle을 앱의 `PATH`에 두지 않고 실행 구성에만 `PATH = "<Gradle bin>;${env:PATH}"`를 적어 테스트 창에서 `gradle test :lib:core:test --continue`가 돌았다("통과 2 · 실패 2"). 펼치지 않아도 Gradle 폴더가 앞에 있어 찾을 수 있으므로 펼치기 자체는 단위 시험이 본다.
+  - 확인하지 못한 것: `env`가 아닌 값(`command`·`cwd`)의 `${env:이름}`(명령 줄은 셸이 `%이름%`·`$이름`으로 펼친다).
 
 - 살폈지만 넣지 않은 것: 임베디드(MCU 플래시·시리얼 모니터·장비 설정 파일), 프레임워크별 지원(React·Vue·Angular 등, JS·TS 언어 서버로 기본은 된다), 린터 개별 연동(언어 서버나 저장 시 작업으로 된다), 원격 개발·컨테이너·SFTP 배포, 로컬 AI 완성 모델, 계정 기반 설정 동기화. egov 개발과 거리가 멀거나 크기에 비해 쓰임이 적다.
 
