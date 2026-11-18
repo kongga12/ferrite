@@ -2253,6 +2253,14 @@
     - 실제 앱(Windows, 릴리스 빌드): Gradle을 앱의 `PATH`에 두지 않고 실행 구성에만 `PATH = "<Gradle bin>;${env:PATH}"`를 적어 테스트 창에서 `gradle test :lib:core:test --continue`가 돌았다("통과 2 · 실패 2"). 펼치지 않아도 Gradle 폴더가 앞에 있어 찾을 수 있으므로 펼치기 자체는 단위 시험이 본다.
   - 확인하지 못한 것: `env`가 아닌 값(`command`·`cwd`)의 `${env:이름}`(명령 줄은 셸이 `%이름%`·`$이름`으로 펼친다).
 
+- [x] CI 의존성 받기 재시도(2026-11-18) — 작음(CI만)
+  - 까닭: 위 "실행 구성 env의 변수 펼치기"의 PR CI에서 `full (ubuntu-latest)`의 Maven·Gradle 시험 아홉 개가 한꺼번에 깨졌다. Maven Central에서 받지 못했다(Maven "Could not transfer artifact … maven-failsafe-plugin", Gradle "Could not resolve org.junit.jupiter:junit-jupiter"). 실패한 작업만 다시 돌리니 통과했다(러너의 네트워크가 잠깐 끊긴 것으로 본다).
+  - 고침(`ci.yml`)
+    - Maven: 워크플로 전체의 `MAVEN_ARGS`(Maven 3.9 이상의 모든 `mvn`이 읽는다. 시험이 띄우는 `mvn`도)에 받기 재시도 횟수 6을 넣는다. 이름은 resolver 판마다 달라(1.x `aether.connector.http.retryHandler.count`, 2.x `aether.transport.http.retryHandler.count`) 둘 다 적는다. 모르는 이름은 Maven이 무시한다(로컬 Maven 3.10, resolver 2.0.24에서 그대로 돈다).
+    - Gradle: `full` 작업이 사용자 홈의 `gradle.properties`에 `org.gradle.internal.repository.max.retries=6`, `initial.backoff=2000`(기본 3번, 125ms부터)을 적는다. 시험이 만드는 빌드가 모두 읽는다(Gradle 홈을 따로 준 한글 홈 시험은 빼고).
+  - 검증: CI의 3개 OS에서 그대로 통과한다(설정이 빌드를 깨지 않는다).
+  - 확인하지 못한 것: 받기가 실제로 끊겼을 때 다시 해서 통과하는 것(일부러 일으키지 않았다). 의존성 캐시(`~/.m2`·`~/.gradle/caches`)는 두지 않았다(디스크를 더 쓰고, 고정한 판이라 다시 받는 양이 적다).
+
 - 살폈지만 넣지 않은 것: 임베디드(MCU 플래시·시리얼 모니터·장비 설정 파일), 프레임워크별 지원(React·Vue·Angular 등, JS·TS 언어 서버로 기본은 된다), 린터 개별 연동(언어 서버나 저장 시 작업으로 된다), 원격 개발·컨테이너·SFTP 배포, 로컬 AI 완성 모델, 계정 기반 설정 동기화. egov 개발과 거리가 멀거나 크기에 비해 쓰임이 적다.
 
 ## 3. Phase별 3-OS 검증 체크리스트 (수동)
