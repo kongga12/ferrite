@@ -646,6 +646,115 @@ fn maven_testng_매개변수_테스트를_줄마다_읽고_실패만_다시() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// TestNG 묶음 파일(`src/test/resources/testng.xml`)이 고르는 두 클래스를 쓰고 돌려 읽고, 줄을 찾고, 실패만
+/// 다시 돌린다. `root`는 명령을 돌리는 폴더, `project`는 테스트가 든 (하위) 프로젝트 폴더.
+fn check_testng_xml(tool: Tool, root: &Path, project: &Path, report: &Path, command: &str) {
+    let java = project.join("src/test/java/com/example/board");
+    std::fs::create_dir_all(&java).unwrap();
+    std::fs::create_dir_all(project.join("src/test/resources")).unwrap();
+    std::fs::write(
+        project.join("src/test/resources/testng.xml"),
+        "<!DOCTYPE suite SYSTEM \"https://testng.org/testng-1.0.dtd\">\n<suite name=\"board\">\n  <test name=\"all\">\n    <classes>\n      <class name=\"com.example.board.CalcTest\"/>\n      <class name=\"com.example.board.BoardTest\"/>\n    </classes>\n  </test>\n</suite>\n",
+    )
+    .unwrap();
+    for (class, ok, wrong) in [
+        ("CalcTest", "adds", "addsWrong"),
+        ("BoardTest", "lists", "savesWrong"),
+    ] {
+        std::fs::write(
+            java.join(format!("{class}.java")),
+            format!("package com.example.board;\n\nimport static org.testng.Assert.assertEquals;\n\nimport org.testng.annotations.Test;\n\npublic class {class} {{\n    @Test\n    public void {ok}() {{\n        assertEquals(1 + 2, 3);\n    }}\n\n    @Test\n    public void {wrong}() {{\n        assertEquals(1 + 2, 4);\n    }}\n}}\n"),
+        )
+        .unwrap();
+    }
+    let run_tool = |line: &str| {
+        let since = SystemTime::now();
+        run(root, &test_report::with_report(tool, line, report));
+        test_report::dedup(junit(tool, root, report, since))
+    };
+    let cases = run_tool(command);
+    assert_eq!(
+        suite_tests(&cases),
+        [
+            suite_test("BoardTest", "lists", Outcome::Passed),
+            suite_test("BoardTest", "savesWrong", Outcome::Failed),
+            suite_test("CalcTest", "adds", Outcome::Passed),
+            suite_test("CalcTest", "addsWrong", Outcome::Failed),
+        ]
+    );
+    let saves = cases.iter().find(|c| c.name == "savesWrong").unwrap();
+    assert_eq!(
+        test_line(root, root, saves),
+        (java.join("BoardTest.java"), 15)
+    );
+    // 실패만 다시: 거르기(Maven `-Dtest`, Gradle `--tests`)가 묶음 파일보다 앞서 실패한 메서드만 돈다.
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    let line = test_report::rerun(tool, command, &failed(&cases)).unwrap();
+    assert_eq!(
+        suite_tests(&run_tool(&line)),
+        [
+            suite_test("BoardTest", "savesWrong", Outcome::Failed),
+            suite_test("CalcTest", "addsWrong", Outcome::Failed),
+        ],
+        "{line}"
+    );
+}
+
+#[test]
+#[ignore = "Maven으로 TestNG 묶음 파일(testng.xml)의 테스트를 돌린다(의존성을 받는다). Java 17 이상과 mvn이 필요하다"]
+fn maven_testng_xml로_돌린_테스트를_읽고_실패만_다시() {
+    if !require("mvn -v") {
+        return;
+    }
+    // Surefire는 묶음 파일로 돌면 보고서 하나(`TEST-TestSuite.xml`)에 테스트마다 실제 클래스를 적는다. TestNG가
+    // 따로 남기는 보고서(`junitreports/`, 묶음 이름 폴더)는 읽지 않는다.
+    let root = temp_dir("maven-testng-xml");
+    std::fs::write(
+        root.join("pom.xml"),
+        r#"<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>com.example</groupId>
+  <artifactId>board</artifactId>
+  <version>1.0</version>
+  <properties>
+    <maven.compiler.release>17</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+  </properties>
+  <dependencies>
+    <dependency>
+      <groupId>org.testng</groupId>
+      <artifactId>testng</artifactId>
+      <version>7.10.2</version>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+  <build>
+    <plugins>
+      <plugin>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <version>3.5.4</version>
+        <configuration>
+          <suiteXmlFiles>
+            <suiteXmlFile>src/test/resources/testng.xml</suiteXmlFile>
+          </suiteXmlFiles>
+        </configuration>
+      </plugin>
+    </plugins>
+  </build>
+</project>
+"#,
+    )
+    .unwrap();
+    check_testng_xml(
+        Tool::Maven,
+        &root,
+        &root,
+        &root.join("reports"),
+        "mvn -B -q test",
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 #[test]
 #[ignore = "Maven으로 JUnit 4 Suite로 묶은 테스트를 돌린다(의존성을 받는다). Java 17 이상과 mvn이 필요하다"]
 fn maven_junit4_suite로_묶어_돌려도_실제_클래스로_읽고_실패만_다시() {
@@ -1462,6 +1571,23 @@ fn gradle_testng_매개변수_테스트를_줄마다_읽고_실패만_다시() {
         "gradle test",
         ["adds[0](1, 2, 3)", "adds[1](2, 2, 5)"],
     );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+#[ignore = "Gradle로 TestNG 묶음 파일(useTestNG의 suites)의 테스트를 돌린다(의존성을 받는다). Java 17 이상과 gradle이 필요하다"]
+fn gradle_testng_xml로_돌린_테스트를_읽고_실패만_다시() {
+    if !require("gradle --version") {
+        return;
+    }
+    let root = gradle_project(
+        "gradle-testng-xml",
+        &[(
+            "app",
+            "plugins {\n    java\n}\n\nrepositories {\n    mavenCentral()\n}\n\ndependencies {\n    testImplementation(\"org.testng:testng:7.10.2\")\n}\n\ntasks.test {\n    useTestNG {\n        suites(\"src/test/resources/testng.xml\")\n    }\n}\n",
+        )],
+    );
+    check_testng_xml(Tool::Gradle, &root, &root.join("app"), &root, "gradle test");
     let _ = std::fs::remove_dir_all(&root);
 }
 

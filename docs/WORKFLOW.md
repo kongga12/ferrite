@@ -2298,7 +2298,17 @@
     - 실패만 다시: 이름에서 `[`·`(` 앞(`adds`)만 거르므로 매개변수 줄 하나만 고르지 못하고 그 메서드의 줄을 모두 돈다(Maven `-Dtest=CalcTest#adds+subtractsWrong`, Gradle `--tests …CalcTest.adds`). JUnit 5 매개변수 테스트와 같다.
     - 고칠 것이 없었다.
   - 검증: 실제 도구(`test_tools`, Maven·Gradle 각 하나, 로컬과 CI의 3개 OS).
-  - 확인하지 못한 것: 매개변수 줄 하나만 다시 돌리는 것(도구가 거르는 꼴이 없다), `testng.xml`로 돌리는 pom·Gradle(`useTestNG { suites(…) }`), 앱 화면.
+  - 확인하지 못한 것: 매개변수 줄 하나만 다시 돌리는 것(도구가 거르는 꼴이 없다), `testng.xml`로 돌리는 pom·Gradle(`useTestNG { suites(…) }`. 뒤에 백로그 "TestNG 묶음 파일(testng.xml)"(2026-11-18)에서 보았다), 앱 화면.
+
+- [x] TestNG 묶음 파일(testng.xml)(2026-11-18) — 작음(확인만, 코드는 그대로)
+  - 까닭: TestNG 프로젝트는 돌릴 클래스를 묶음 파일(`testng.xml`)로 고르기도 한다(Maven `<suiteXmlFiles>`, Gradle `useTestNG { suites(…) }`). 보고서 이름이 묶음으로 남거나, 실패만 다시의 거르기가 묶음 파일에 밀려 다 돌 수 있다고 보았다.
+  - 찾기(실제 Maven 3.10·Surefire 3.5.4, Gradle 9.2.0, TestNG 7.10.2)
+    - Maven: 보고서가 하나(`TEST-TestSuite.xml`)로 나오지만 테스트마다 실제 클래스를 적는다. TestNG가 따로 남기는 보고서(`junitreports/`, 묶음 이름 폴더의 `all.xml`)는 하위 폴더라 읽지 않는다.
+    - Gradle: 묶음 파일로 돌아도 보고서는 클래스마다 나온다.
+    - 실패만 다시: `-Dtest`·`--tests`가 묶음 파일보다 앞서, 실패한 메서드만 돈다.
+    - 실패 스택에서 테스트 줄로 간다. 고칠 것이 없었다.
+  - 검증: 실제 도구(`test_tools`, Maven·Gradle 각 하나, 로컬과 CI의 3개 OS).
+  - 확인하지 못한 것: 묶음 파일이 여럿인 설정, 묶음 파일 안의 `<packages>`·`<groups>`로 고른 것, 앱 화면.
 
 - 살폈지만 넣지 않은 것: 임베디드(MCU 플래시·시리얼 모니터·장비 설정 파일), 프레임워크별 지원(React·Vue·Angular 등, JS·TS 언어 서버로 기본은 된다), 린터 개별 연동(언어 서버나 저장 시 작업으로 된다), 원격 개발·컨테이너·SFTP 배포, 로컬 AI 완성 모델, 계정 기반 설정 동기화. egov 개발과 거리가 멀거나 크기에 비해 쓰임이 적다.
 
