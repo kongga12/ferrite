@@ -19,6 +19,13 @@ concurrency:
 # 로컬에서 재현되지 않는 OS별 실패를 로그만으로 찾을 수 있게 패닉 위치를 남긴다.
 env:
   RUST_BACKTRACE: 1
+  # Maven Central에서 받다가 러너의 네트워크가 잠깐 끊기면 Maven·Gradle 시험이 한꺼번에 깨졌다(2026-11-18,
+  # full ubuntu의 "Could not transfer artifact"). 모든 mvn(시험이 띄우는 것 포함, Maven 3.9 이상)이 읽는
+  # MAVEN_ARGS로 받기를 더 여러 번 다시 한다. 이름은 resolver 판마다 다르다(1.x connector, 2.x transport).
+  # 모르는 이름은 Maven이 무시한다.
+  MAVEN_ARGS: >-
+    -Daether.connector.http.retryHandler.count=6
+    -Daether.transport.http.retryHandler.count=6
 
 jobs:
   linux:
@@ -180,6 +187,16 @@ jobs:
           gradle-version: '9.2.0'
           cache-disabled: true
           add-job-summary: never
+      # Gradle도 받기가 잠깐 끊겨도 더 여러 번, 더 길게 기다리며 다시 한다(기본 3번, 125ms부터).
+      # 사용자 홈의 gradle.properties는 시험이 만드는 모든 빌드가 읽는다(Gradle 홈을 따로 준 시험은 빼고).
+      - name: Gradle 받기 재시도 설정
+        shell: bash
+        run: |
+          mkdir -p ~/.gradle
+          printf '%s\n' \
+            'systemProp.org.gradle.internal.repository.max.retries=6' \
+            'systemProp.org.gradle.internal.repository.initial.backoff=2000' >> ~/.gradle/gradle.properties
+          cat ~/.gradle/gradle.properties
       - name: 테스트 러너·정적 분석 시험(Maven·Gradle·pytest·Go·CTest·SpotBugs·PMD·Semgrep)
         run: cargo test -p ferrite-core --test test_tools -- --ignored --nocapture --test-threads=1
       - run: cargo build --release
