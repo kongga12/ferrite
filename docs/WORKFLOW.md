@@ -2269,7 +2269,7 @@
     - 실패만 다시: TestNG도 `-Dtest`·`-Dit.test`의 `클래스#메서드`로 걸러 실패한 둘만 돈다.
     - 고칠 것이 없었다.
   - 검증: 실제 도구(`test_tools`, 로컬과 CI의 3개 OS).
-  - 확인하지 못한 것: TestNG의 `testng.xml`(묶음 파일)로 돌리는 pom, Gradle의 `useTestNG()`, 매개변수 테스트(`@DataProvider`)의 이름.
+  - 확인하지 못한 것: TestNG의 `testng.xml`(묶음 파일)로 돌리는 pom, Gradle의 `useTestNG()`, 매개변수 테스트(`@DataProvider`)의 이름(뒤의 둘은 백로그 "Gradle TestNG와 매개변수 테스트"(2026-11-18)에서 보았다).
 
 - [x] JUnit 4 Suite로 묶은 테스트(2026-11-18) — 작음
   - 까닭: 오래된 프로젝트는 `AllTests`가 `@RunWith(Suite.class)`로 테스트 클래스들을 묶고, pom이 그 묶음만 돌리기도 한다. 보고서의 클래스 이름이 묶음 이름이면 실패 스택의 줄 찾기와 실패만 다시가 어긋난다고 보았다.
@@ -2289,6 +2289,16 @@
     - 둘 다 위 "JUnit 4 Suite로 묶은 테스트"의 `dedup`이 하나로 모은다. 실패 스택의 줄과 실패만 다시(Maven `-Dtest`, Gradle `--tests`)도 맞다.
   - 검증: 실제 도구(`test_tools`, Maven·Gradle 각 하나, 로컬과 CI의 3개 OS).
   - 확인하지 못한 것: `@SelectPackages`·`@IncludeClassNamePatterns`로 고른 묶음, 묶음만 돌리게 한 설정(Gradle `filter`, Surefire includes), 앱 화면.
+
+- [x] Gradle TestNG와 매개변수 테스트(2026-11-18) — 작음(확인만, 코드는 그대로)
+  - 까닭: 위 "TestNG 테스트 보고서"에서 보지 못한 Gradle의 `useTestNG()`와 TestNG 매개변수 테스트(`@DataProvider`)의 이름. 매개변수 줄의 이름이 같으면 "JUnit 4 Suite로 묶은 테스트"의 `dedup`이 줄들을 하나로 모을 수 있다고 보았다.
+  - 찾기(실제 Maven 3.10·Surefire 3.5.4, Gradle 9.2.0, TestNG 7.10.2)
+    - 매개변수 줄마다 이름이 다르다: Surefire는 `adds[2, 2, 5](2)`(값, 1부터 센 줄 번호), Gradle은 `adds[1](2, 2, 5)`(0부터 센 줄 번호, 값). `dedup`이 모으지 않는다.
+    - 실패 스택에서 테스트 줄로 간다(클래스로 찾는다).
+    - 실패만 다시: 이름에서 `[`·`(` 앞(`adds`)만 거르므로 매개변수 줄 하나만 고르지 못하고 그 메서드의 줄을 모두 돈다(Maven `-Dtest=CalcTest#adds+subtractsWrong`, Gradle `--tests …CalcTest.adds`). JUnit 5 매개변수 테스트와 같다.
+    - 고칠 것이 없었다.
+  - 검증: 실제 도구(`test_tools`, Maven·Gradle 각 하나, 로컬과 CI의 3개 OS).
+  - 확인하지 못한 것: 매개변수 줄 하나만 다시 돌리는 것(도구가 거르는 꼴이 없다), `testng.xml`로 돌리는 pom·Gradle(`useTestNG { suites(…) }`), 앱 화면.
 
 - 살폈지만 넣지 않은 것: 임베디드(MCU 플래시·시리얼 모니터·장비 설정 파일), 프레임워크별 지원(React·Vue·Angular 등, JS·TS 언어 서버로 기본은 된다), 린터 개별 연동(언어 서버나 저장 시 작업으로 된다), 원격 개발·컨테이너·SFTP 배포, 로컬 AI 완성 모델, 계정 기반 설정 동기화. egov 개발과 거리가 멀거나 크기에 비해 쓰임이 적다.
 
