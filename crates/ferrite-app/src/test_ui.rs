@@ -54,6 +54,8 @@ struct Running {
     started: (SystemTime, Instant),
     /// 실패한 것만 다시 돌리는 중(결과를 앞 결과에 덮어 쓴다).
     rerun: bool,
+    /// 실패한 것만 고르지 못해 구성의 명령 그대로 다시 돌리는 중.
+    whole: bool,
     /// `go test -json`의 표준 출력.
     json: String,
     /// 사용자가 멈췄다(끝난 테스트의 결과만 있다).
@@ -208,6 +210,7 @@ impl TestPanel {
             report: report.clone(),
             started: (SystemTime::now(), Instant::now()),
             rerun: rerun.is_some(),
+            whole: rerun.as_deref() == Some(config.command.as_str()),
             json: String::new(),
             stopped: false,
         });
@@ -264,13 +267,16 @@ impl TestPanel {
         let Some(running) = self.running.take() else {
             return;
         };
-        // 빌드 설정이 묶음만 돌리면 실패한 테스트만 고를 수 없다. 그 설정대로 전체를 다시 돌린다.
+        // 빌드 설정이 묶음만 돌리면 실패한 테스트만 고를 수 없다. 그 설정대로 전체를 다시 돌린다. 통과한
+        // 프로젝트는 Gradle이 최신으로 보고 건너뛰어 보고서를 새로 쓰지 않으므로 앞 결과에 덮어 쓴다.
         if running.rerun
+            && !running.whole
             && !running.stopped
             && test_report::gradle_rerun_found_nothing(running.tool, &self.output)
             && let Some((config, ..)) = self.last.clone()
         {
-            self.start(ctx, root, config, None);
+            let command = config.command.clone();
+            self.start(ctx, root, config, Some(command));
             push_limited(
                 &mut self.output,
                 "[빌드 설정의 거르기(filter·include) 때문에 실패한 테스트만 고르지 못해 전체를 다시 돌립니다]\n",
@@ -301,7 +307,7 @@ impl TestPanel {
             self.view = View::Results;
         }
         if running.rerun {
-            merge_rerun(&mut self.cases, found);
+            test_report::merge_rerun(&mut self.cases, found);
         } else {
             self.cases = found;
             self.selected = self.cases.iter().position(|c| c.outcome == Outcome::Failed);
@@ -714,18 +720,6 @@ fn push_limited(output: &mut String, text: &str) {
     }
 }
 
-/// 다시 돌린 결과를 앞 결과에 덮어 쓴다(없던 것은 더한다). 같은 테스트도 돌린 곳이 다르면 따로다: Maven은
-/// 단위 테스트 단계(Surefire)와 통합 테스트 단계(Failsafe)가 같은 통합 테스트를 둘 다 돌릴 수 있고(pom이 Surefire의
-/// `<includes>`에 넣었을 때), Gradle은 작업마다 따로 돈다.
-fn merge_rerun(cases: &mut Vec<Case>, found: Vec<Case>) {
-    for case in found {
-        match cases.iter_mut().find(|c| c.same_test(&case)) {
-            Some(old) => *old = case,
-            None => cases.push(case),
-        }
-    }
-}
-
 /// 결과 트리에서 테스트 이름 뒤에 붙이는 돌린 곳: Maven 통합 테스트 단계(Failsafe)에서 돈 것.
 fn runner_tag(case: &Case) -> &'static str {
     if case.integration { "  (통합)" } else { "" }
@@ -776,7 +770,7 @@ mod tests {
             case("savesWrong", Outcome::Failed, true, None),
             case("checks", Outcome::Failed, false, Some(":app:test")),
         ];
-        merge_rerun(
+        test_report::merge_rerun(
             &mut cases,
             vec![
                 case("savesWrong", Outcome::Passed, true, None),

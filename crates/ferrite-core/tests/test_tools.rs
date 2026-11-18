@@ -1605,6 +1605,73 @@ fn gradle_묶음만_돌리는_설정은_실패만_다시가_테스트를_찾지_
 }
 
 #[test]
+#[ignore = "Gradle로 묶음만 도는 프로젝트와 보통 프로젝트를 함께 돌린다(의존성을 받는다). Java 17 이상과 gradle이 필요하다"]
+fn gradle_일부_프로젝트만_묶음만_돌아도_전체를_다시_돌린_결과에_통과한_프로젝트가_남는다() {
+    if !require("gradle --version") {
+        return;
+    }
+    let build = |rule: &str| {
+        format!(
+            "plugins {{\n    java\n}}\n\nrepositories {{\n    mavenCentral()\n}}\n\ndependencies {{\n    testImplementation(\"org.junit.jupiter:junit-jupiter:5.12.2\")\n    testImplementation(\"org.junit.platform:junit-platform-suite\")\n    testRuntimeOnly(\"org.junit.platform:junit-platform-launcher\")\n}}\n\ntasks.test {{\n    useJUnitPlatform()\n    {rule}\n}}\n"
+        )
+    };
+    let root = gradle_project(
+        "gradle-partial-suite",
+        &[
+            ("app", &build("")),
+            (
+                "lib",
+                &build("filter {\n        includeTestsMatching(\"*AllTests\")\n    }"),
+            ),
+        ],
+    );
+    let app = root.join("app/src/test/java/com/example/board");
+    std::fs::create_dir_all(&app).unwrap();
+    std::fs::write(
+        app.join("AppTest.java"),
+        "package com.example.board;\n\nimport static org.junit.jupiter.api.Assertions.assertEquals;\n\nimport org.junit.jupiter.api.Test;\n\nclass AppTest {\n    @Test\n    void starts() {\n        assertEquals(3, 1 + 2);\n    }\n}\n",
+    )
+    .unwrap();
+    write_junit5_suite(&root.join("lib/src/test/java/com/example/board"));
+    let command = "gradle test";
+    let since = SystemTime::now();
+    run(
+        &root,
+        &test_report::with_report(Tool::Gradle, command, &root),
+    );
+    let mut cases = junit(Tool::Gradle, &root, &root, since);
+    let all = [
+        suite_test("AppTest", "starts()", Outcome::Passed),
+        suite_test("BoardTest", "lists()", Outcome::Passed),
+        suite_test("BoardTest", "savesWrong()", Outcome::Failed),
+        suite_test("CalcTest", "adds()", Outcome::Passed),
+        suite_test("CalcTest", "addsWrong()", Outcome::Failed),
+    ];
+    assert_eq!(suite_tests(&cases), all);
+    // 실패는 lib에만 있고, lib의 거르기에 걸려 `--tests`로는 돌 것이 없다.
+    let line = test_report::rerun(Tool::Gradle, command, &failed(&cases)).unwrap();
+    let line = test_report::with_report(Tool::Gradle, &line, &root);
+    let (ok, output) = run(&root, &format!("{line} 2>&1"));
+    assert!(!ok, "{output}");
+    assert!(
+        test_report::gradle_rerun_found_nothing(Tool::Gradle, &output),
+        "{output}"
+    );
+    // 전체를 다시 돌려도 통과한 app은 최신이라 건너뛰어 새 보고서가 없다. 앞 결과에 덮어 써야 남는다.
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    let since = SystemTime::now();
+    run(
+        &root,
+        &test_report::with_report(Tool::Gradle, command, &root),
+    );
+    let found = junit(Tool::Gradle, &root, &root, since);
+    assert_eq!(suite_tests(&found), all[1..]);
+    test_report::merge_rerun(&mut cases, found);
+    assert_eq!(suite_tests(&cases), all);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
 #[ignore = "Gradle로 TestNG 테스트(useTestNG)를 돌린다(의존성을 받는다). Java 17 이상과 gradle이 필요하다"]
 fn gradle_testng_매개변수_테스트를_줄마다_읽고_실패만_다시() {
     if !require("gradle --version") {
