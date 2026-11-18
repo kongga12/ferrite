@@ -2279,7 +2279,16 @@
     - 어긋난 것: pom이 includes를 두지 않으면 묶음도 Surefire 기본 includes(`*Tests`)에 들어, 테스트마다 묶음과 제 클래스로 두 번 돌고 두 보고서에 남는다. 테스트 창에 같은 테스트가 두 줄로 나오고, 실패만 다시로 고친 뒤에도 한 줄만 바뀌어 다른 줄은 실패로 남았다.
   - 고침: 한 번 돌린 결과에서 같은 테스트(묶음·이름·돌린 곳)를 하나로 모은다(`test_report::dedup`). 하나라도 실패했으면 실패한 것을 남긴다. 테스트 창이 보고서를 읽은 뒤 부른다.
   - 검증: 단위 시험(`dedup`), 실제 도구(`test_tools`, 묶음만 도는 pom과 기본 includes의 pom).
-  - 확인하지 못한 것: 앱 화면(실제 도구 시험이 앱과 같은 `read_report`·`dedup`·`rerun`을 부른다), JUnit 5 `@Suite`(JUnit Platform Suite), 묶음 안의 묶음.
+  - 확인하지 못한 것: 앱 화면(실제 도구 시험이 앱과 같은 `read_report`·`dedup`·`rerun`을 부른다), JUnit 5 `@Suite`(JUnit Platform Suite. 뒤에 백로그 "JUnit 5 @Suite 묶음"(2026-11-18)에서 보았다), 묶음 안의 묶음.
+
+- [x] JUnit 5 @Suite 묶음(2026-11-18) — 작음(확인만, 코드는 그대로)
+  - 까닭: JUnit 5 프로젝트는 `@Suite`·`@SelectClasses`(JUnit Platform Suite)로 묶는다. JUnit 4 Suite처럼 두 번 돌거나 이름이 묶음으로 남는지 보았다.
+  - 찾기(실제 Maven 3.10·Surefire 3.5.4, Gradle 9.2.0, JUnit 5.12.2·Platform Suite 1.12.2)
+    - Maven: `AllTests`도 기본 includes(`*Tests`)에 들어 테스트마다 묶음(suite 엔진)과 제 클래스(jupiter 엔진)로 두 번 돈다. 묶음의 보고서(`TEST-…AllTests.xml`)는 `tests="0"`이지만 테스트마다 실제 클래스를 적는다.
+    - Gradle: 묶음과 제 클래스로 두 번 돌고, 둘 다 제 클래스의 보고서(`TEST-…CalcTest.xml`)에 들어가 한 보고서에 같은 테스트가 두 번 적힌다.
+    - 둘 다 위 "JUnit 4 Suite로 묶은 테스트"의 `dedup`이 하나로 모은다. 실패 스택의 줄과 실패만 다시(Maven `-Dtest`, Gradle `--tests`)도 맞다.
+  - 검증: 실제 도구(`test_tools`, Maven·Gradle 각 하나, 로컬과 CI의 3개 OS).
+  - 확인하지 못한 것: `@SelectPackages`·`@IncludeClassNamePatterns`로 고른 묶음, 묶음만 돌리게 한 설정(Gradle `filter`, Surefire includes), 앱 화면.
 
 - 살폈지만 넣지 않은 것: 임베디드(MCU 플래시·시리얼 모니터·장비 설정 파일), 프레임워크별 지원(React·Vue·Angular 등, JS·TS 언어 서버로 기본은 된다), 린터 개별 연동(언어 서버나 저장 시 작업으로 된다), 원격 개발·컨테이너·SFTP 배포, 로컬 AI 완성 모델, 계정 기반 설정 동기화. egov 개발과 거리가 멀거나 크기에 비해 쓰임이 적다.
 
