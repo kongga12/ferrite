@@ -768,3 +768,38 @@ fn egov_pom의_skip_tests를_찾아_지운다() {
     assert_eq!(pom_skips_tests("<project/>"), None);
     assert_eq!(enable_tests("<project/>"), None);
 }
+
+#[test]
+fn 같은_테스트가_둘이면_실패한_것_하나로_모은다() {
+    let case = |suite: &str, name: &str, outcome, integration| Case {
+        suite: suite.to_owned(),
+        name: name.to_owned(),
+        outcome,
+        seconds: None,
+        message: None,
+        detail: String::new(),
+        file: None,
+        line: None,
+        integration,
+        task: None,
+    };
+    let found = dedup(vec![
+        case("CalcTest", "adds", Outcome::Passed, false),
+        case("CalcTest", "addsWrong", Outcome::Passed, false),
+        case("CalcTest", "adds", Outcome::Passed, false),
+        case("CalcTest", "addsWrong", Outcome::Failed, false),
+        // 돌린 곳(Failsafe)이 다르면 다른 테스트다.
+        case("CalcTest", "adds", Outcome::Failed, true),
+    ]);
+    assert_eq!(
+        found
+            .iter()
+            .map(|c| (c.name.as_str(), c.outcome, c.integration))
+            .collect::<Vec<_>>(),
+        [
+            ("adds", Outcome::Passed, false),
+            ("addsWrong", Outcome::Failed, false),
+            ("adds", Outcome::Failed, true),
+        ]
+    );
+}

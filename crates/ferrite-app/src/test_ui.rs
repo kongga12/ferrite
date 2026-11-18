@@ -282,6 +282,7 @@ impl TestPanel {
                 cases
             }
         };
+        let found = test_report::dedup(found);
         let found_any = !found.is_empty();
         if found_any {
             self.view = View::Results;
@@ -705,12 +706,7 @@ fn push_limited(output: &mut String, text: &str) {
 /// `<includes>`에 넣었을 때), Gradle은 작업마다 따로 돈다.
 fn merge_rerun(cases: &mut Vec<Case>, found: Vec<Case>) {
     for case in found {
-        match cases.iter_mut().find(|c| {
-            c.suite == case.suite
-                && c.name == case.name
-                && c.integration == case.integration
-                && c.task == case.task
-        }) {
+        match cases.iter_mut().find(|c| c.same_test(&case)) {
             Some(old) => *old = case,
             None => cases.push(case),
         }
