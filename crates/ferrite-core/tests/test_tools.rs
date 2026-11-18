@@ -547,6 +547,131 @@ fn maven_testng_테스트도_한_번씩_읽고_실패만_다시() {
 }
 
 #[test]
+#[ignore = "Maven으로 JUnit 4 Suite로 묶은 테스트를 돌린다(의존성을 받는다). Java 17 이상과 mvn이 필요하다"]
+fn maven_junit4_suite로_묶어_돌려도_실제_클래스로_읽고_실패만_다시() {
+    if !require("mvn -v") {
+        return;
+    }
+    // 오래된 프로젝트에 흔한 JUnit 4 묶음: `AllTests`가 `@RunWith(Suite.class)`로 클래스들을 묶고, pom은 그 묶음만
+    // 돌린다(`<includes>`). 보고서 파일은 묶음 이름(`TEST-…AllTests.xml`)이지만 테스트마다 실제 클래스를 적는다.
+    let root = temp_dir("maven-junit4-suite");
+    let java = root.join("src/test/java/com/example/board");
+    std::fs::create_dir_all(&java).unwrap();
+    let pom = |configuration: &str| {
+        format!(
+            r#"<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>com.example</groupId>
+  <artifactId>board</artifactId>
+  <version>1.0</version>
+  <properties>
+    <maven.compiler.release>17</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+  </properties>
+  <dependencies>
+    <dependency>
+      <groupId>junit</groupId>
+      <artifactId>junit</artifactId>
+      <version>4.13.2</version>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+  <build>
+    <plugins>
+      <plugin>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <version>3.5.4</version>{configuration}
+      </plugin>
+    </plugins>
+  </build>
+</project>
+"#
+        )
+    };
+    std::fs::write(
+        root.join("pom.xml"),
+        pom("
+        <configuration>
+          <includes>
+            <include>**/AllTests.java</include>
+          </includes>
+        </configuration>"),
+    )
+    .unwrap();
+    std::fs::write(
+        java.join("AllTests.java"),
+        "package com.example.board;\n\nimport org.junit.runner.RunWith;\nimport org.junit.runners.Suite;\n\n@RunWith(Suite.class)\n@Suite.SuiteClasses({CalcTest.class, BoardTest.class})\npublic class AllTests {\n}\n",
+    )
+    .unwrap();
+    for (class, ok, wrong) in [
+        ("CalcTest", "adds", "addsWrong"),
+        ("BoardTest", "lists", "savesWrong"),
+    ] {
+        std::fs::write(
+            java.join(format!("{class}.java")),
+            format!("package com.example.board;\n\nimport static org.junit.Assert.assertEquals;\n\nimport org.junit.Test;\n\npublic class {class} {{\n    @Test\n    public void {ok}() {{\n        assertEquals(3, 1 + 2);\n    }}\n\n    @Test\n    public void {wrong}() {{\n        assertEquals(4, 1 + 2);\n    }}\n}}\n"),
+        )
+        .unwrap();
+    }
+    let report = root.join("reports");
+    let command = "mvn -B -q test";
+    let tests = |cases: &[Case]| {
+        let mut tests: Vec<(String, String, Outcome)> = cases
+            .iter()
+            .map(|c| (c.suite.clone(), c.name.clone(), c.outcome))
+            .collect();
+        tests.sort_by(|a, b| (&a.0, &a.1).cmp(&(&b.0, &b.1)));
+        tests
+    };
+    let test = |class: &str, name: &str, outcome| {
+        (
+            format!("com.example.board.{class}"),
+            name.to_owned(),
+            outcome,
+        )
+    };
+    let all = [
+        test("BoardTest", "lists", Outcome::Passed),
+        test("BoardTest", "savesWrong", Outcome::Failed),
+        test("CalcTest", "adds", Outcome::Passed),
+        test("CalcTest", "addsWrong", Outcome::Failed),
+    ];
+    // 실패가 있어 mvn은 실패로 끝난다.
+    let run_maven = |line: &str| {
+        let since = SystemTime::now();
+        run(&root, &test_report::with_report(Tool::Maven, line, &report));
+        junit(Tool::Maven, &root, &report, since)
+    };
+    let cases = run_maven(command);
+    // 묶음 이름이 아니라 실제 클래스로 읽는다.
+    assert_eq!(tests(&cases), all);
+    let saves = cases.iter().find(|c| c.name == "savesWrong").unwrap();
+    assert_eq!(
+        test_line(&root, &root, saves),
+        (java.join("BoardTest.java"), 15)
+    );
+    // 실패만 다시: `-Dtest`가 includes를 덮어 묶음 없이 실패한 클래스의 메서드만 돈다.
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    let line = test_report::rerun(Tool::Maven, command, &failed(&cases)).unwrap();
+    assert_eq!(
+        tests(&run_maven(&line)),
+        [
+            test("BoardTest", "savesWrong", Outcome::Failed),
+            test("CalcTest", "addsWrong", Outcome::Failed),
+        ],
+        "{line}"
+    );
+    // includes를 두지 않으면 묶음(`AllTests`)도 기본 includes(`*Tests`)에 들어, 테스트마다 묶음과 제 클래스로 두 번
+    // 돌아 두 보고서에 남는다. 테스트 창은 하나로 모은다.
+    std::fs::write(root.join("pom.xml"), pom("")).unwrap();
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    let twice = run_maven(command);
+    assert_eq!(twice.len(), 8);
+    assert_eq!(tests(&test_report::dedup(twice)), all);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
 #[ignore = "Maven으로 JUnit 4 단위·통합 테스트(Surefire·Failsafe)를 돌린다(의존성을 받는다). Java 17 이상과 mvn이 필요하다"]
 fn maven_junit4_분류로_가른_통합_테스트도_보고서_폴더로_가려_실패만_다시() {
     if !require("mvn -v") {

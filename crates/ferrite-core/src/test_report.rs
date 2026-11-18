@@ -77,6 +77,34 @@ pub struct Case {
     pub task: Option<String>,
 }
 
+impl Case {
+    /// 같은 테스트인지: 묶음·이름과 돌린 곳(Failsafe, Gradle 작업)이 같다.
+    pub fn same_test(&self, other: &Case) -> bool {
+        self.suite == other.suite
+            && self.name == other.name
+            && self.integration == other.integration
+            && self.task == other.task
+    }
+}
+
+/// 한 번 돌린 결과에 같은 테스트가 둘 이상이면 하나로 모은다. JUnit 4 `Suite`로 묶은 클래스(`AllTests`)는
+/// Surefire 기본 includes(`*Tests`)에도 들어, 묶음과 각 클래스로 두 번 돌아 두 보고서에 남는다(묶음의 보고서도
+/// 테스트마다 실제 클래스를 적는다). 하나라도 실패했으면 실패한 것을 남긴다.
+// ponytail: 선형 탐색이라 O(n²). 테스트가 수만 개라 느려지면 (묶음, 이름) 키의 HashMap으로.
+pub fn dedup(cases: Vec<Case>) -> Vec<Case> {
+    let mut kept: Vec<Case> = Vec::with_capacity(cases.len());
+    for case in cases {
+        match kept.iter_mut().find(|k| k.same_test(&case)) {
+            Some(old) if old.outcome != Outcome::Failed && case.outcome == Outcome::Failed => {
+                *old = case
+            }
+            Some(_) => {}
+            None => kept.push(case),
+        }
+    }
+    kept
+}
+
 /// Go 패키지 자체가 실패했을 때(빌드 실패 등)의 이름.
 pub const PACKAGE_CASE: &str = "(패키지)";
 
