@@ -2229,7 +2229,7 @@
     - JUnit 4의 실패 스택에서도 테스트 줄(`BoardTest.java:16`)로 간다.
     - 고칠 것이 없었다.
   - 검증: 실제 도구(`test_tools`, 로컬과 CI의 3개 OS).
-  - 확인하지 못한 것: JUnit 4 `Suite`(`@RunWith(Suite.class)`)로 묶어 돌리는 pom(보고서의 클래스 이름이 묶음 이름일 수 있다), TestNG.
+  - 확인하지 못한 것: JUnit 4 `Suite`(`@RunWith(Suite.class)`)로 묶어 돌리는 pom(보고서의 클래스 이름이 묶음 이름일 수 있다), TestNG(뒤에 백로그 "TestNG 테스트 보고서"(2026-11-18)에서 보았다).
 
 - [x] CI 러너 ubuntu-26.04와 자식 세션 시험의 경합(2026-11-16) — 작음
   - 까닭: 위 "JUnit 4 분류로 가른 pom"의 PR CI에서 이 PR과 상관없는 시험 둘이 Linux에서 깨졌다.
@@ -2260,6 +2260,16 @@
     - Gradle: `full` 작업이 사용자 홈의 `gradle.properties`에 `org.gradle.internal.repository.max.retries=6`, `initial.backoff=2000`(기본 3번, 125ms부터)을 적는다. 시험이 만드는 빌드가 모두 읽는다(Gradle 홈을 따로 준 한글 홈 시험은 빼고).
   - 검증: CI의 3개 OS에서 그대로 통과한다(설정이 빌드를 깨지 않는다).
   - 확인하지 못한 것: 받기가 실제로 끊겼을 때 다시 해서 통과하는 것(일부러 일으키지 않았다). 의존성 캐시(`~/.m2`·`~/.gradle/caches`)는 두지 않았다(디스크를 더 쓰고, 고정한 판이라 다시 받는 양이 적다).
+
+- [x] TestNG 테스트 보고서(2026-11-18) — 작음(확인만, 코드는 그대로)
+  - 까닭: 일부 공공 프로젝트는 TestNG를 쓴다. Surefire·Failsafe가 TestNG를 돌리면 JUnit 꼴 보고서 말고도 TestNG의 보고서를 같은 폴더에 남겨, 같은 테스트를 두 번 읽을 수 있다고 보았다.
+  - 찾기(실제 Maven 3.10, Surefire·Failsafe 3.5.4, TestNG 7.10.2, `mvn -B -q verify`)
+    - 테스트마다 한 번씩만 읽는다. 보고서는 `surefire-reports`·`failsafe-reports` 바로 아래의 `TEST-*.xml`만 고르므로, TestNG가 남기는 `testng-results.xml`과 하위 폴더(`junitreports/` 등)의 파일은 읽지 않는다.
+    - 단위·통합(`*IT`는 Failsafe)도 보고서 폴더로 맞게 가리고, 실패 스택에서 테스트 줄(`BoardIT.java:15`)로 간다.
+    - 실패만 다시: TestNG도 `-Dtest`·`-Dit.test`의 `클래스#메서드`로 걸러 실패한 둘만 돈다.
+    - 고칠 것이 없었다.
+  - 검증: 실제 도구(`test_tools`, 로컬과 CI의 3개 OS).
+  - 확인하지 못한 것: TestNG의 `testng.xml`(묶음 파일)로 돌리는 pom, Gradle의 `useTestNG()`, 매개변수 테스트(`@DataProvider`)의 이름.
 
 - 살폈지만 넣지 않은 것: 임베디드(MCU 플래시·시리얼 모니터·장비 설정 파일), 프레임워크별 지원(React·Vue·Angular 등, JS·TS 언어 서버로 기본은 된다), 린터 개별 연동(언어 서버나 저장 시 작업으로 된다), 원격 개발·컨테이너·SFTP 배포, 로컬 AI 완성 모델, 계정 기반 설정 동기화. egov 개발과 거리가 멀거나 크기에 비해 쓰임이 적다.
 
