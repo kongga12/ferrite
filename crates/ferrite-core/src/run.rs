@@ -25,12 +25,19 @@ pub const CUSTOM_TEMPLATE: &str = r#"# Ferrite 실행 구성. [[run]]마다 하�
 #   name    목록에 보일 이름
 #   command 셸이 실행할 명령 줄(Windows는 cmd, 그 밖에는 사용자 셸)
 #   cwd     작업 폴더(선택). 상대 경로면 프로젝트 루트 기준
-#   env     더할 환경 변수(선택). 값의 ${env:이름}은 앱의 환경 변수로 바꾼다(없으면 빈 글)
+#   env     더할 환경 변수(선택)
+#   command·cwd·env 값의 ${env:이름}은 앱의 환경 변수로 바꾼다(없으면 빈 글). env에 더한 값을 명령 줄에서
+#           쓰려면 셸의 꼴(Windows %이름%, 그 밖에는 $이름)로 적는다
 #
 # [[run]]
 # name = "톰캣으로 실행(JDK 8)"
 # command = "mvn tomcat7:run"
 # env = { JAVA_HOME = "C:/Program Files/Java/jdk1.8.0_202", PATH = "C:/Program Files/Java/jdk1.8.0_202/bin;${env:PATH}" }
+#
+# [[run]]
+# name = "톰캣 시작"
+# command = "startup.bat"
+# cwd = "${env:CATALINA_HOME}/bin"
 
 # 저장 시 작업. 저장한 파일이 pattern에 맞으면 command를 창 없이 돌리고 결과를 상태바에 알린다.
 #   pattern 프로젝트 루트 기준 글롭. `/`가 없으면 어느 폴더든(`*.scss`)
@@ -196,13 +203,22 @@ fn expand_env(value: &str, lookup: impl Fn(&str) -> Option<String>) -> String {
 fn parse_custom(text: &str) -> Result<CustomFile, String> {
     let mut file: CustomFile = toml::from_str(text).map_err(|e| format!("{CUSTOM_FILE}: {e}"))?;
     // 앱의 환경 변수로 펼친다(Windows는 이름의 대소문자를 가리지 않는다: `${env:PATH}`도 `Path`를 찾는다).
+    // `command`·`cwd`도 펼친다. 작업 폴더는 셸을 거치지 않아 셸 변수(`%이름%`·`$이름`)를 쓸 수 없다.
     let lookup = |name: &str| std::env::var(name).ok();
-    let envs = file
+    let fields = file
         .run
         .iter_mut()
-        .map(|c| &mut c.env)
-        .chain(file.on_save.iter_mut().map(|t| &mut t.env));
-    for env in envs {
+        .map(|c| (&mut c.command, &mut c.cwd, &mut c.env))
+        .chain(
+            file.on_save
+                .iter_mut()
+                .map(|t| (&mut t.command, &mut t.cwd, &mut t.env)),
+        );
+    for (command, cwd, env) in fields {
+        *command = expand_env(command, lookup);
+        if let Some(dir) = cwd {
+            *dir = PathBuf::from(expand_env(&dir.to_string_lossy(), lookup));
+        }
         for value in env.values_mut() {
             *value = expand_env(value, lookup);
         }
@@ -529,10 +545,15 @@ mod tests {
             name = "그레이들"
             command = "gradle test"
             env = { PATH = "C:/gradle/bin;${env:PATH}", HOME_X = "[${env:FERRITE_NO_SUCH_VAR_42}]" }
+            [[run]]
+            name = "톰캣 홈"
+            command = "\"${env:PATH}/startup\" run"
+            cwd = "${env:PATH}/bin"
             [[on_save]]
             name = "포맷"
             pattern = "*.java"
-            command = "fmt"
+            command = "fmt ${env:PATH} ${file}"
+            cwd = "${env:FERRITE_NO_SUCH_VAR_42}web"
             env = { P = "${env:PATH}" }
             "#,
         )
@@ -541,6 +562,11 @@ mod tests {
         assert_eq!(file.run[0].env["PATH"], format!("C:/gradle/bin;{path}"));
         assert_eq!(file.run[0].env["HOME_X"], "[]");
         assert_eq!(file.on_save[0].env["P"], path);
+        // `command`·`cwd`도 펼친다(`${file}` 등 저장 시 작업의 변수는 그대로 둔다).
+        assert_eq!(file.run[1].command, format!("\"{path}/startup\" run"));
+        assert_eq!(file.run[1].cwd, Some(PathBuf::from(format!("{path}/bin"))));
+        assert_eq!(file.on_save[0].command, format!("fmt {path} ${{file}}"));
+        assert_eq!(file.on_save[0].cwd, Some(PathBuf::from("web")));
         assert_eq!(
             expand_env("a${env:X}b${env:Y}c${env:", |n| (n == "X")
                 .then(|| "1".to_owned())),
