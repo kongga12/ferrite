@@ -708,6 +708,26 @@ pub fn report_files(tool: Tool, root: &Path, dir: &Path, since: SystemTime) -> V
     files
 }
 
+/// Gradle 출력의 건너뛴 작업 줄(`> Task :app:test UP-TO-DATE`).
+static GRADLE_SKIPPED_TASK: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?m)^> Task (\S+) (?:UP-TO-DATE|FROM-CACHE)\s*$").unwrap());
+
+/// Gradle이 최신으로 보고 건너뛴 테스트 작업의 보고서. 앞선 실행이 남긴 그대로라 시각으로 고르는
+/// `report_files`에 들지 않는다. 출력에 작업 줄이 없으면(`-q`) 찾지 못한다.
+pub fn gradle_skipped_reports(root: &Path, output: &str) -> Vec<PathBuf> {
+    let skipped: Vec<&str> = GRADLE_SKIPPED_TASK
+        .captures_iter(output)
+        .filter_map(|c| c.get(1).map(|m| m.as_str()))
+        .collect();
+    if skipped.is_empty() {
+        return Vec::new();
+    }
+    report_files(Tool::Gradle, root, root, SystemTime::UNIX_EPOCH)
+        .into_iter()
+        .filter(|path| gradle_task(path).is_some_and(|task| skipped.contains(&task.as_str())))
+        .collect()
+}
+
 /// 실패한 것만 다시 돌리는 명령: Maven `-Dtest`(통합 테스트는 `-Dit.test`), Gradle `--tests`, pytest `--lf`,
 /// CTest `--rerun-failed`, Go `-run`.
 pub fn rerun(tool: Tool, command: &str, failed: &[&Case]) -> Option<String> {

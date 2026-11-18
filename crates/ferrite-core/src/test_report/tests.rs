@@ -770,6 +770,34 @@ fn egov_pom의_skip_tests를_찾아_지운다() {
 }
 
 #[test]
+fn gradle이_건너뛴_작업의_보고서만_고른다() {
+    let root = std::env::temp_dir().join(format!("ferrite-gradle-skipped-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let report = |project: &str, task: &str| {
+        let dir = root.join(project).join("build/test-results").join(task);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("TEST-demo.CalcTest.xml");
+        std::fs::write(&file, "<testsuite/>").unwrap();
+        file
+    };
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("settings.gradle"), "include 'app', 'lib'\n").unwrap();
+    let app = report("app", "test");
+    let app_it = report("app", "integrationTest");
+    let lib = report("lib", "test");
+    let top = report("", "test");
+    let output = "> Task :app:compileTestJava UP-TO-DATE\r\n> Task :app:test UP-TO-DATE\r\n> Task :app:integrationTest\r\n> Task :lib:test FAILED\r\n> Task :test FROM-CACHE\r\n";
+    let mut found = gradle_skipped_reports(&root, output);
+    found.sort();
+    let mut expected = vec![app, top];
+    expected.sort();
+    assert_eq!(found, expected);
+    assert!(!found.contains(&app_it) && !found.contains(&lib));
+    assert!(gradle_skipped_reports(&root, "BUILD SUCCESSFUL").is_empty());
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
 fn gradle의_실패만_다시가_테스트를_찾지_못한_것을_알아본다() {
     let output = "> No tests found for given includes: [*AllTests](filter.includeTestsMatching)";
     assert!(gradle_rerun_found_nothing(Tool::Gradle, output));
