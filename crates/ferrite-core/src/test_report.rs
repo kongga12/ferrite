@@ -357,6 +357,13 @@ pub fn unreported_failure(tool: Tool, code: Option<i32>, failed: usize) -> bool 
     code.is_some_and(|c| c != 0) && (tool == Tool::Maven || failed == 0)
 }
 
+/// Gradle의 실패만 다시(`--tests`)가 돌릴 테스트를 찾지 못했는지. 빌드 설정이 묶음만 돌리면(`filter`의
+/// `includeTestsMatching("*AllTests")`, `include("**/AllTests.class")`) 그 거르기와 `--tests`를 둘 다 만족하는
+/// 테스트가 없다. 보고서에는 묶음 안의 실제 클래스가 적혀 있어 그 이름으로 거르기 때문이다.
+pub fn gradle_rerun_found_nothing(tool: Tool, output: &str) -> bool {
+    tool == Tool::Gradle && output.contains("No tests found for given includes")
+}
+
 /// Windows의 Gradle(JDK 18 이상)이 경로에 든 한글 등 ASCII가 아닌 글자 때문에 테스트를 돌리지 못한 곳.
 /// Gradle은 테스트 JVM의 클래스 경로를 인자 파일(`@…gradle-worker-classpath…txt`)로 넘기는데, JDK 18부터
 /// 기본 문자셋이 UTF-8이라(JEP 400) 그 파일을 UTF-8로 쓰고 Windows의 java는 시스템 코드 페이지(한국어

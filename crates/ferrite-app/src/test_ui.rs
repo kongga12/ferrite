@@ -222,7 +222,7 @@ impl TestPanel {
         }
     }
 
-    fn poll(&mut self, root: &Path) {
+    fn poll(&mut self, ctx: &egui::Context, root: &Path) {
         let Some(running) = &mut self.running else {
             return;
         };
@@ -264,6 +264,19 @@ impl TestPanel {
         let Some(running) = self.running.take() else {
             return;
         };
+        // 빌드 설정이 묶음만 돌리면 실패한 테스트만 고를 수 없다. 그 설정대로 전체를 다시 돌린다.
+        if running.rerun
+            && !running.stopped
+            && test_report::gradle_rerun_found_nothing(running.tool, &self.output)
+            && let Some((config, ..)) = self.last.clone()
+        {
+            self.start(ctx, root, config, None);
+            push_limited(
+                &mut self.output,
+                "[빌드 설정의 거르기(filter·include) 때문에 실패한 테스트만 고르지 못해 전체를 다시 돌립니다]\n",
+            );
+            return;
+        }
         let found = match running.tool {
             Tool::Go => test_report::parse_go_json(&running.json),
             tool => {
@@ -357,7 +370,7 @@ impl TestPanel {
         if self.root.as_deref() != Some(root) {
             self.refresh(root);
         }
-        self.poll(root);
+        self.poll(ui.ctx(), root);
         let running = self.is_running();
         let mut run = None;
         ui.horizontal(|ui| {

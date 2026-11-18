@@ -770,6 +770,17 @@ fn egov_pom의_skip_tests를_찾아_지운다() {
 }
 
 #[test]
+fn gradle의_실패만_다시가_테스트를_찾지_못한_것을_알아본다() {
+    let output = "> No tests found for given includes: [*AllTests](filter.includeTestsMatching)";
+    assert!(gradle_rerun_found_nothing(Tool::Gradle, output));
+    assert!(!gradle_rerun_found_nothing(Tool::Maven, output));
+    assert!(!gradle_rerun_found_nothing(
+        Tool::Gradle,
+        "2 tests completed, 2 failed"
+    ));
+}
+
+#[test]
 fn 같은_테스트가_둘이면_실패한_것_하나로_모은다() {
     let case = |suite: &str, name: &str, outcome, integration| Case {
         suite: suite.to_owned(),
