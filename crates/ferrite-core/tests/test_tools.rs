@@ -671,6 +671,129 @@ fn maven_junit4_suite로_묶어_돌려도_실제_클래스로_읽고_실패만_�
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// JUnit 5 묶음(`@Suite`, JUnit Platform Suite)과 그것이 고르는 두 클래스. 테스트 줄은 15줄.
+fn write_junit5_suite(java: &Path) {
+    std::fs::create_dir_all(java).unwrap();
+    std::fs::write(
+        java.join("AllTests.java"),
+        "package com.example.board;\n\nimport org.junit.platform.suite.api.SelectClasses;\nimport org.junit.platform.suite.api.Suite;\n\n@Suite\n@SelectClasses({CalcTest.class, BoardTest.class})\nclass AllTests {\n}\n",
+    )
+    .unwrap();
+    for (class, ok, wrong) in [
+        ("CalcTest", "adds", "addsWrong"),
+        ("BoardTest", "lists", "savesWrong"),
+    ] {
+        std::fs::write(
+            java.join(format!("{class}.java")),
+            format!("package com.example.board;\n\nimport static org.junit.jupiter.api.Assertions.assertEquals;\n\nimport org.junit.jupiter.api.Test;\n\nclass {class} {{\n    @Test\n    void {ok}() {{\n        assertEquals(3, 1 + 2);\n    }}\n\n    @Test\n    void {wrong}() {{\n        assertEquals(4, 1 + 2);\n    }}\n}}\n"),
+        )
+        .unwrap();
+    }
+}
+
+/// (클래스, 이름, 결과)를 이름 순으로.
+fn suite_tests(cases: &[Case]) -> Vec<(String, String, Outcome)> {
+    let mut tests: Vec<(String, String, Outcome)> = cases
+        .iter()
+        .map(|c| {
+            let class = c.suite.rsplit('.').next().unwrap_or(&c.suite);
+            (class.to_owned(), c.name.clone(), c.outcome)
+        })
+        .collect();
+    tests.sort_by(|a, b| (&a.0, &a.1).cmp(&(&b.0, &b.1)));
+    tests
+}
+
+fn suite_test(class: &str, name: &str, outcome: Outcome) -> (String, String, Outcome) {
+    (class.to_owned(), name.to_owned(), outcome)
+}
+
+#[test]
+#[ignore = "Maven으로 JUnit 5 Suite로 묶은 테스트를 돌린다(의존성을 받는다). Java 17 이상과 mvn이 필요하다"]
+fn maven_junit5_suite가_고른_클래스와_두_번_돈_테스트를_하나로_읽고_실패만_다시() {
+    if !require("mvn -v") {
+        return;
+    }
+    // `@Suite`인 `AllTests`도 Surefire 기본 includes(`*Tests`)에 들어, 테스트마다 묶음(suite 엔진)과 제
+    // 클래스(jupiter 엔진)로 두 번 돈다. 묶음의 보고서(`TEST-…AllTests.xml`)도 테스트마다 실제 클래스를 적는다.
+    let root = temp_dir("maven-junit5-suite");
+    let java = root.join("src/test/java/com/example/board");
+    write_junit5_suite(&java);
+    std::fs::write(
+        root.join("pom.xml"),
+        r#"<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>com.example</groupId>
+  <artifactId>board</artifactId>
+  <version>1.0</version>
+  <properties>
+    <maven.compiler.release>17</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+  </properties>
+  <dependencies>
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <version>5.12.2</version>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.junit.platform</groupId>
+      <artifactId>junit-platform-suite</artifactId>
+      <version>1.12.2</version>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+  <build>
+    <plugins>
+      <plugin>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <version>3.5.4</version>
+      </plugin>
+    </plugins>
+  </build>
+</project>
+"#,
+    )
+    .unwrap();
+    let report = root.join("reports");
+    let command = "mvn -B -q test";
+    let run_maven = |line: &str| {
+        let since = SystemTime::now();
+        run(&root, &test_report::with_report(Tool::Maven, line, &report));
+        junit(Tool::Maven, &root, &report, since)
+    };
+    let twice = run_maven(command);
+    assert_eq!(twice.len(), 8, "묶음과 제 클래스로 두 번");
+    let cases = test_report::dedup(twice);
+    assert_eq!(
+        suite_tests(&cases),
+        [
+            suite_test("BoardTest", "lists", Outcome::Passed),
+            suite_test("BoardTest", "savesWrong", Outcome::Failed),
+            suite_test("CalcTest", "adds", Outcome::Passed),
+            suite_test("CalcTest", "addsWrong", Outcome::Failed),
+        ]
+    );
+    let saves = cases.iter().find(|c| c.name == "savesWrong").unwrap();
+    assert_eq!(
+        test_line(&root, &root, saves),
+        (java.join("BoardTest.java"), 15)
+    );
+    // 실패만 다시: `-Dtest=CalcTest#addsWrong,…`에 묶음 이름이 없어 묶음은 돌지 않는다.
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    let line = test_report::rerun(Tool::Maven, command, &failed(&cases)).unwrap();
+    assert_eq!(
+        suite_tests(&run_maven(&line)),
+        [
+            suite_test("BoardTest", "savesWrong", Outcome::Failed),
+            suite_test("CalcTest", "addsWrong", Outcome::Failed),
+        ],
+        "{line}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 #[test]
 #[ignore = "Maven으로 JUnit 4 단위·통합 테스트(Surefire·Failsafe)를 돌린다(의존성을 받는다). Java 17 이상과 mvn이 필요하다"]
 fn maven_junit4_분류로_가른_통합_테스트도_보고서_폴더로_가려_실패만_다시() {
@@ -1214,6 +1337,59 @@ fn gradle_test_보고서와_실패만_다시() {
             ("throwsError()".to_owned(), Outcome::Failed),
         ],
         "실패한 것만 다시"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+#[ignore = "Gradle로 JUnit 5 Suite로 묶은 테스트를 돌린다(의존성을 받는다). Java 17 이상과 gradle이 필요하다"]
+fn gradle_junit5_suite로_두_번_돈_테스트를_하나로_읽고_실패만_다시() {
+    if !require("gradle --version") {
+        return;
+    }
+    // Gradle은 `@Suite`인 `AllTests`와 그것이 고른 클래스를 모두 돌린다. 묶음으로 돈 것도 제 클래스의 보고서
+    // (`TEST-…CalcTest.xml`)에 들어가, 한 보고서에 같은 테스트가 두 번 적힌다.
+    let root = gradle_project(
+        "gradle-junit5-suite",
+        &[(
+            "app",
+            "plugins {\n    java\n}\n\nrepositories {\n    mavenCentral()\n}\n\ndependencies {\n    testImplementation(\"org.junit.jupiter:junit-jupiter:5.12.2\")\n    testImplementation(\"org.junit.platform:junit-platform-suite\")\n    testRuntimeOnly(\"org.junit.platform:junit-platform-launcher\")\n}\n\ntasks.test {\n    useJUnitPlatform()\n}\n",
+        )],
+    );
+    let java = root.join("app/src/test/java/com/example/board");
+    write_junit5_suite(&java);
+    let command = "gradle test";
+    let run_gradle = |line: &str| {
+        let since = SystemTime::now();
+        run(&root, &test_report::with_report(Tool::Gradle, line, &root));
+        junit(Tool::Gradle, &root, &root, since)
+    };
+    let twice = run_gradle(command);
+    assert_eq!(twice.len(), 8, "묶음과 제 클래스로 두 번");
+    let cases = test_report::dedup(twice);
+    assert_eq!(
+        suite_tests(&cases),
+        [
+            suite_test("BoardTest", "lists()", Outcome::Passed),
+            suite_test("BoardTest", "savesWrong()", Outcome::Failed),
+            suite_test("CalcTest", "adds()", Outcome::Passed),
+            suite_test("CalcTest", "addsWrong()", Outcome::Failed),
+        ]
+    );
+    let saves = cases.iter().find(|c| c.name == "savesWrong()").unwrap();
+    assert_eq!(
+        test_line(&root, &root, saves),
+        (java.join("BoardTest.java"), 15)
+    );
+    // 실패만 다시: `--tests`가 고른 메서드만 돈다(묶음으로 다시 돌아도 하나로 모은다).
+    let line = test_report::rerun(Tool::Gradle, command, &failed(&cases)).unwrap();
+    assert_eq!(
+        suite_tests(&test_report::dedup(run_gradle(&line))),
+        [
+            suite_test("BoardTest", "savesWrong()", Outcome::Failed),
+            suite_test("CalcTest", "addsWrong()", Outcome::Failed),
+        ],
+        "{line}"
     );
     let _ = std::fs::remove_dir_all(&root);
 }
