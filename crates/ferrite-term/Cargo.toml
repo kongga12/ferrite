@@ -12,3 +12,7 @@ alacritty_terminal = "0.26.0"
 # PTY를 직접 열어 slave를 쥐어 둔다(셸이 끝날 때 마지막 출력을 잃지 않게, `Terminal::spawn` 참고).
 [target.'cfg(unix)'.dependencies]
 rustix-openpty = "0.2.0"
+
+# ConPTY의 마지막 출력을 기다린 뒤 이벤트 루프를 깨운다(`conpty` 모듈 참고).
+[target.'cfg(windows)'.dependencies]
+polling = "3.11.0"

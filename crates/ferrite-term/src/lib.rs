@@ -2,6 +2,9 @@
 //! 띄운다. PTY 출력은 그 읽기 스레드(`EventLoop`)가 화면 상태(`Term`)에 바로 반영하고, UI는
 //! [`Terminal::snapshot`]으로 화면을 꺼내 그린다. UI(egui)와 떨어져 있어 단독으로 시험한다.
 
+#[cfg(windows)]
+mod conpty;
+
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::io;
@@ -193,7 +196,7 @@ impl Terminal {
             )
         };
         #[cfg(not(unix))]
-        let pty = tty::new(&tty_options, size.window(), 0)?;
+        let pty = conpty::Pty::new(tty::new(&tty_options, size.window(), 0)?);
         let (notices_tx, notices) = channel();
         let pty_sender = Arc::new(OnceLock::new());
         let listener = Listener {
