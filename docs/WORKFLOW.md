@@ -2322,7 +2322,7 @@
   - 알아 둘 것: `${env:이름}`은 앱의 환경 변수다. 같은 구성의 `env`에 더한 값은 들지 않으므로, 명령 줄에서 그것을 쓰려면 셸의 꼴로 적는다(틀에 적었다). 값에 공백이 들면 `${file}`처럼 따옴표로 감싼다.
   - 검증: 단위 시험(`run`, 실행 구성·저장 시 작업의 `command`·`cwd`). 실제 앱(Windows): 앱을 띄운 환경에 `FERRITE_DEMO_HOME`·`FERRITE_DEMO_NAME`을 두고 `cwd = "${env:FERRITE_DEMO_HOME}/bin"`, `command = "echo NAME=${env:FERRITE_DEMO_NAME}> out.txt & cd >> out.txt"`를 `Ctrl+F5`로 돌리니 그 `bin`에 `NAME=tomcat9`와 그 폴더 경로가 남았다.
   - 함께 찾은 것: 실행 탭에서 `echo a & cd`처럼 `echo` 뒤에 `cd`를 이은 명령은 출력이 하나도 보이지 않았다(코드 0으로 끝남). 변수를 쓰지 않아도 같아 이 고침과 상관없고, 뒤에 따로 고쳤다(PR #117).
-  - 확인하지 못한 것: 앱 화면에서 확인한 것은 실행 구성 하나다(저장 시 작업은 단위 시험만).
+  - 확인하지 못한 것: 앱 화면에서 확인한 것은 실행 구성 하나다(저장 시 작업은 단위 시험만. 뒤에 백로그 "저장 시 작업의 변수 앱 확인"(2026-11-19)에서 보았다).
 
 - [x] 묶음만 도는 Gradle 설정의 실패만 다시(2026-11-18) — 작음
   - 까닭: Gradle 빌드 설정이 묶음(`AllTests`)만 돌리게 하면(`filter { includeTestsMatching("*AllTests") }`, `include("**/AllTests.class")`) 보고서에는 묶음 안의 실제 클래스가 적힌다. 그 이름으로 고르는 `--tests`가 맞는지 보았다.
@@ -2359,6 +2359,12 @@
   - 고침(`test_report::with_report`): 테스트 창이 돌리는 Gradle 명령 끝에 `--console=plain -Dorg.gradle.logging.level=lifecycle`을 붙인다. 명령의 `-Dorg.gradle.logging.level=…`은 뺀다(`--info`·`--debug`는 그대로 앞선다).
   - 알아 둘 것: 속성으로 `info`·`debug`를 준 프로젝트도 테스트 창에서는 `lifecycle`로 돈다(출력만 줄고 테스트는 같다).
   - 검증: 단위 시험, 실제 도구(`test_tools`, 로컬과 CI의 3개 OS, Windows에서는 Gradle 시험 12개 모두). 실제 앱(Windows, 두 프로젝트, `gradle.properties`에 `quiet`·`rich`): `실행`을 두 번 눌러도 통과 1·실패 1이 그대로 나오고, 명령은 `gradle test --continue --console=plain -Dorg.gradle.logging.level=lifecycle`이었다.
+
+- [x] 저장 시 작업의 변수 앱 확인(2026-11-19) — 작음(확인만, 코드는 그대로)
+  - 까닭: 위 "실행 구성 command·cwd의 변수"는 저장 시 작업(`[[on_save]]`)을 단위 시험으로만 보았다. 저장할 때 `${env:이름}`과 저장한 파일의 변수(`${fileBasename}` 등)가 함께 펼쳐지는지 보았다.
+  - 찾기(실제 앱, Windows): 앱을 띄운 환경에 `FERRITE_DEMO_HOME`·`FERRITE_DEMO_NAME`을 두고 `pattern = "*.txt"`, `cwd = "${env:FERRITE_DEMO_HOME}"`, `command = "echo NAME=${env:FERRITE_DEMO_NAME} FILE=${fileBasename}> out.txt & cd >> out.txt"`로 적었다. `notes.txt`를 고쳐 `Ctrl+S`로 저장하니 그 폴더의 `out.txt`에 `NAME=tomcat9 FILE=notes.txt`와 그 폴더 경로가 남고, 상태바에 "저장 시 작업 완료: env check"가 떴다.
+  - 고칠 것이 없었다.
+  - 확인하지 못한 것: Windows가 아닌 OS의 앱 화면(같은 `parse_custom`·`command_for`를 단위 시험으로 본다).
 
 - 살폈지만 넣지 않은 것: 임베디드(MCU 플래시·시리얼 모니터·장비 설정 파일), 프레임워크별 지원(React·Vue·Angular 등, JS·TS 언어 서버로 기본은 된다), 린터 개별 연동(언어 서버나 저장 시 작업으로 된다), 원격 개발·컨테이너·SFTP 배포, 로컬 AI 완성 모델, 계정 기반 설정 동기화. egov 개발과 거리가 멀거나 크기에 비해 쓰임이 적다.
 
