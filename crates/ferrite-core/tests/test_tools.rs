@@ -841,6 +841,90 @@ fn maven_실패한_테스트의_이름을_바꾸면_실패만_다시는_아무�
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// 늘 실패하는 두 번째 클래스(`MinusTest.subtractsWrong`).
+fn write_minus_test(java: &Path) {
+    std::fs::write(
+        java.join("MinusTest.java"),
+        "package demo;\n\nimport static org.junit.jupiter.api.Assertions.assertEquals;\n\nimport org.junit.jupiter.api.Test;\n\nclass MinusTest {\n    @Test\n    void subtractsWrong() {\n        assertEquals(2, 3 - 2);\n    }\n}\n",
+    )
+    .unwrap();
+}
+
+#[test]
+#[ignore = "Maven으로 JUnit 5 테스트를 돌린다(의존성을 받는다). Java 17 이상과 mvn이 필요하다"]
+fn maven_실패_둘_가운데_하나의_이름을_바꾸면_실패만_다시가_그것을_뺀다() {
+    if !require("mvn -v") {
+        return;
+    }
+    let root = temp_dir("maven-partly-renamed");
+    std::fs::write(
+        root.join("pom.xml"),
+        r#"<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>demo</groupId>
+  <artifactId>board</artifactId>
+  <version>1.0</version>
+  <properties>
+    <maven.compiler.release>17</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+  </properties>
+  <dependencies>
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <version>5.12.2</version>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+  <build>
+    <plugins>
+      <plugin>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <version>3.5.4</version>
+      </plugin>
+    </plugins>
+  </build>
+</project>
+"#,
+    )
+    .unwrap();
+    let java = root.join("src/test/java/demo");
+    write_calc_test(&java, "addsWrong", false);
+    write_minus_test(&java);
+    let report = root.join("reports");
+    let command = "mvn -B -q test";
+    let since = SystemTime::now();
+    run(
+        &root,
+        &test_report::with_report(Tool::Maven, command, &report),
+    );
+    let mut cases = junit(Tool::Maven, &root, &report, since);
+    // 실패한 `addsWrong`만 이름을 바꿔 고쳤다. `subtractsWrong`은 그대로 실패한다.
+    write_calc_test(&java, "addsFixed", true);
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    let since = SystemTime::now();
+    let line = test_report::rerun(Tool::Maven, command, &failed(&cases)).unwrap();
+    let (ok, output) = run(
+        &root,
+        &test_report::with_report(Tool::Maven, &line, &report),
+    );
+    assert!(ok, "{line}\n{output}");
+    let found = junit(Tool::Maven, &root, &report, since);
+    assert_eq!(
+        outcomes(&found),
+        [("subtractsWrong".to_owned(), Outcome::Failed)]
+    );
+    test_report::apply_rerun(Tool::Maven, Some(0), &mut cases, found);
+    assert_eq!(
+        outcomes(&cases),
+        [
+            ("adds".to_owned(), Outcome::Passed),
+            ("subtractsWrong".to_owned(), Outcome::Failed),
+        ]
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 #[test]
 #[ignore = "Maven으로 JUnit 4 Suite로 묶은 테스트를 돌린다(의존성을 받는다). Java 17 이상과 mvn이 필요하다"]
 fn maven_junit4_suite로_묶어_돌려도_실제_클래스로_읽고_실패만_다시() {
@@ -1883,6 +1967,56 @@ fn gradle_실패한_테스트의_이름을_바꾸면_실패만_다시가_테스�
 }
 
 #[test]
+#[ignore = "Gradle로 JUnit 5 테스트를 돌린다(의존성을 받는다). Java 17 이상과 gradle이 필요하다"]
+fn gradle_실패_둘_가운데_하나의_이름을_바꾸면_실패만_다시가_그것을_뺀다() {
+    if !require("gradle --version") {
+        return;
+    }
+    let root = gradle_project(
+        "gradle-partly-renamed",
+        &[(
+            "app",
+            "plugins {\n    java\n}\n\nrepositories {\n    mavenCentral()\n}\n\ndependencies {\n    testImplementation(\"org.junit.jupiter:junit-jupiter:5.12.2\")\n    testRuntimeOnly(\"org.junit.platform:junit-platform-launcher\")\n}\n\ntasks.test {\n    useJUnitPlatform()\n}\n",
+        )],
+    );
+    let java = root.join("app/src/test/java/demo");
+    write_calc_test(&java, "addsWrong", false);
+    write_minus_test(&java);
+    let command = "gradle test";
+    let since = SystemTime::now();
+    run(
+        &root,
+        &test_report::with_report(Tool::Gradle, command, &root),
+    );
+    let mut cases = junit(Tool::Gradle, &root, &root, since);
+    write_calc_test(&java, "addsFixed", true);
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    let since = SystemTime::now();
+    let line = test_report::rerun(Tool::Gradle, command, &failed(&cases)).unwrap();
+    let (ok, output) = run(&root, &test_report::with_report(Tool::Gradle, &line, &root));
+    // 남은 실패가 있어 Gradle은 실패로 끝나지만, 거르기에 맞는 테스트가 있어 "No tests found"는 아니다.
+    assert!(!ok);
+    assert!(
+        !test_report::gradle_rerun_found_nothing(Tool::Gradle, &output),
+        "{output}"
+    );
+    let found = junit(Tool::Gradle, &root, &root, since);
+    assert_eq!(
+        outcomes(&found),
+        [("subtractsWrong()".to_owned(), Outcome::Failed)]
+    );
+    test_report::apply_rerun(Tool::Gradle, Some(1), &mut cases, found);
+    assert_eq!(
+        outcomes(&cases),
+        [
+            ("adds()".to_owned(), Outcome::Passed),
+            ("subtractsWrong()".to_owned(), Outcome::Failed),
+        ]
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
 #[ignore = "Gradle로 TestNG 테스트(useTestNG)를 돌린다(의존성을 받는다). Java 17 이상과 gradle이 필요하다"]
 fn gradle_testng_매개변수_테스트를_줄마다_읽고_실패만_다시() {
     if !require("gradle --version") {
@@ -2487,7 +2621,17 @@ fn pytest_junitxml_보고서와_실패만_다시() {
         ],
         "{output}"
     );
-    assert!(test_report::rerun_ran_others(&cases, &renamed));
+    // 테스트 창은 지난 실패(`test_fail`)를 빼고 이 결과를 넣는다.
+    let mut shown = cases.clone();
+    test_report::apply_rerun(Tool::Pytest, Some(0), &mut shown, renamed);
+    assert_eq!(
+        outcomes(&shown),
+        [
+            ("test_add".to_owned(), Outcome::Passed),
+            ("test_fixed".to_owned(), Outcome::Passed),
+            ("test_skip".to_owned(), Outcome::Skipped),
+        ]
+    );
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -2620,9 +2764,8 @@ fn ctest_output_junit과_실패만_다시() {
         [("fixed".to_owned(), Outcome::Passed)],
         "{output}"
     );
-    assert!(test_report::rerun_ran_others(&cases, &renamed));
     let mut shown = cases.clone();
-    test_report::apply_rerun(&mut shown, renamed);
+    test_report::apply_rerun(Tool::Ctest, Some(0), &mut shown, renamed);
     assert_eq!(
         outcomes(&shown),
         [

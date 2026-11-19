@@ -117,24 +117,26 @@ pub fn merge_rerun(cases: &mut Vec<Case>, found: Vec<Case>) {
     }
 }
 
-/// 실패만 다시의 결과를 앞 결과에 넣는다. 실패한 테스트는 하나도 돌지 않고 다른 테스트만 돌았으면
-/// (`rerun_ran_others`) 실패한 테스트는 이제 없다고 보고 앞 결과에서 뺀 뒤 넣는다.
-pub fn apply_rerun(cases: &mut Vec<Case>, found: Vec<Case>) {
-    if rerun_ran_others(cases, &found) {
-        cases.retain(|c| c.outcome != Outcome::Failed);
-    }
+/// 실패만 다시의 결과(`found`, 끝난 종료 코드 `code`)를 앞 결과에 넣는다. 다시 돌린 지난 실패가 결과에 없으면
+/// 지우거나 이름을 바꾼 것으로 보고 뺀다. 다만 그 테스트가 돌 자리가 돌지 못했으면(빌드 오류) 남긴다.
+/// - Maven: 테스트 실패로는 0으로 끝나게 돌리므로(`with_report`) 0이 아니면 빌드 오류다.
+/// - Gradle: 그 테스트의 작업이 결과를 냈다(컴파일이 깨지면 작업이 돌지 않는다).
+/// - Go: 그 패키지가 빌드에 실패하지 않았다(`PACKAGE_CASE`).
+/// - pytest·CTest: 모으지 못한 파일은 결과에 오류로 남는다. pytest의 `--lf`는 지난 실패를 하나도 찾지 못하면
+///   모두 돌리고, CTest의 `--rerun-failed`는 번호로 골라 이름을 바꾼 뒤 같은 번호의 다른 테스트를 돌린다.
+pub fn apply_rerun(tool: Tool, code: Option<i32>, cases: &mut Vec<Case>, found: Vec<Case>) {
+    let ran_there = |c: &Case| match tool {
+        Tool::Maven => code == Some(0),
+        Tool::Gradle => c.task.is_some() && found.iter().any(|f| f.task == c.task),
+        Tool::Go => !found
+            .iter()
+            .any(|f| f.suite == c.suite && f.name == PACKAGE_CASE),
+        Tool::Pytest | Tool::Ctest => true,
+    };
+    cases.retain(|c| {
+        c.outcome != Outcome::Failed || found.iter().any(|f| f.same_test(c)) || !ran_there(c)
+    });
     merge_rerun(cases, found);
-}
-
-/// 실패만 다시가 실패한 테스트는 하나도 돌리지 않고 다른 테스트를 돌렸는지. 실패한 테스트를 지우거나 이름을
-/// 바꾸면 pytest의 `--lf`는 모두 돌리고, CTest의 `--rerun-failed`는 번호로 골라 그 번호의 다른 테스트를 돌린다.
-pub fn rerun_ran_others(cases: &[Case], found: &[Case]) -> bool {
-    !found.is_empty()
-        && !found.iter().any(|f| {
-            cases
-                .iter()
-                .any(|c| c.outcome == Outcome::Failed && c.same_test(f))
-        })
 }
 
 /// Go 패키지 자체가 실패했을 때(빌드 실패 등)의 이름.

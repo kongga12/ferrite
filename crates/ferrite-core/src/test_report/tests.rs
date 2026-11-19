@@ -835,9 +835,9 @@ fn gradle의_실패만_다시가_테스트를_찾지_못한_것을_알아본다(
 }
 
 #[test]
-fn 실패만_다시가_실패한_테스트를_하나도_돌리지_않은_것을_알아본다() {
-    let case = |name: &str, outcome| Case {
-        suite: "tests.test_calc".to_owned(),
+fn 실패만_다시가_다시_돌리지_않은_지난_실패는_지운_것으로_보고_뺀다() {
+    let case = |name: &str, outcome, task: Option<&str>| Case {
+        suite: "demo.CalcTest".to_owned(),
         name: name.to_owned(),
         outcome,
         seconds: None,
@@ -846,53 +846,83 @@ fn 실패만_다시가_실패한_테스트를_하나도_돌리지_않은_것을_
         file: None,
         line: None,
         integration: false,
-        task: None,
+        task: task.map(str::to_owned),
     };
-    let before = [
-        case("test_add", Outcome::Passed),
-        case("test_fail", Outcome::Failed),
-    ];
-    // 실패한 것을 다시 돌렸다(이제 통과해도).
-    assert!(!rerun_ran_others(
-        &before,
-        &[case("test_fail", Outcome::Passed)]
-    ));
-    // 실패한 것은 없고 다른 것만 돌았다(pytest `--lf`가 모두 돌림).
-    assert!(rerun_ran_others(
-        &before,
-        &[
-            case("test_add", Outcome::Passed),
-            case("test_fixed", Outcome::Passed)
-        ]
-    ));
-    // 아무것도 돌지 않았다(따로 전체를 다시 돌린다).
-    assert!(!rerun_ran_others(&before, &[]));
-
     let names = |cases: &[Case]| {
         cases
             .iter()
             .map(|c| (c.name.clone(), c.outcome))
             .collect::<Vec<_>>()
     };
-    // 실패한 것을 다시 돌렸으면 덮어 쓴다.
-    let mut cases = before.to_vec();
-    apply_rerun(&mut cases, vec![case("test_fail", Outcome::Passed)]);
-    assert_eq!(
-        names(&cases),
-        [
-            ("test_add".to_owned(), Outcome::Passed),
-            ("test_fail".to_owned(), Outcome::Passed)
+    let pass = |name: &str| (name.to_owned(), Outcome::Passed);
+    let fail = |name: &str| (name.to_owned(), Outcome::Failed);
+    // 실패 둘 가운데 `gone`은 지웠고 `still`만 다시 돌았다.
+    let before = |task| {
+        vec![
+            case("ok", Outcome::Passed, task),
+            case("gone", Outcome::Failed, task),
+            case("still", Outcome::Failed, task),
         ]
+    };
+    let apply = |tool, code, task, found: Vec<Case>| {
+        let mut cases = before(task);
+        apply_rerun(tool, code, &mut cases, found);
+        names(&cases)
+    };
+    let still = |task| vec![case("still", Outcome::Failed, task)];
+    for (tool, code) in [
+        (Tool::Maven, Some(0)),
+        (Tool::Pytest, Some(1)),
+        (Tool::Ctest, Some(8)),
+        (Tool::Go, Some(1)),
+    ] {
+        assert_eq!(
+            apply(tool, code, None, still(None)),
+            [pass("ok"), fail("still")],
+            "{tool:?}"
+        );
+    }
+    let task = Some(":app:test");
+    assert_eq!(
+        apply(Tool::Gradle, Some(1), task, still(task)),
+        [pass("ok"), fail("still")]
     );
-    // 다른 것만 돌았으면(CTest가 같은 번호의 다른 테스트를 돌림) 실패한 것을 빼고 넣는다. 돌지 않은 통과는 남는다.
-    let mut cases = before.to_vec();
-    apply_rerun(&mut cases, vec![case("test_fixed", Outcome::Passed)]);
+    // 빌드 오류면 돌지 못한 것이라 남긴다: Maven이 0이 아니게 끝났다, Gradle의 그 작업이 결과를 내지 않았다,
+    // Go의 그 패키지가 빌드에 실패했다.
+    let kept = [pass("ok"), fail("gone"), fail("still")];
+    assert_eq!(apply(Tool::Maven, Some(1), None, still(None)), kept);
     assert_eq!(
-        names(&cases),
-        [
-            ("test_add".to_owned(), Outcome::Passed),
-            ("test_fixed".to_owned(), Outcome::Passed)
-        ]
+        apply(Tool::Gradle, Some(1), task, still(Some(":lib:test"))),
+        [pass("ok"), fail("gone"), fail("still"), fail("still")]
+    );
+    let mut built = still(None);
+    built.push(case(PACKAGE_CASE, Outcome::Failed, None));
+    assert_eq!(
+        apply(Tool::Go, Some(1), None, built),
+        [pass("ok"), fail("gone"), fail("still"), fail(PACKAGE_CASE)]
+    );
+    // 실패한 것은 돌지 않고 다른 것만 돌았다(pytest `--lf`가 모두 돌림, CTest가 같은 번호의 다른 테스트를 돌림).
+    assert_eq!(
+        apply(
+            Tool::Ctest,
+            Some(0),
+            None,
+            vec![case("fixed", Outcome::Passed, None)]
+        ),
+        [pass("ok"), pass("fixed")]
+    );
+    // 다시 돈 실패가 이제 통과하면 덮어 쓴다.
+    assert_eq!(
+        apply(
+            Tool::Pytest,
+            Some(0),
+            None,
+            vec![
+                case("gone", Outcome::Passed, None),
+                case("still", Outcome::Passed, None)
+            ]
+        ),
+        [pass("ok"), pass("gone"), pass("still")]
     );
 }
 

@@ -316,9 +316,18 @@ impl TestPanel {
             self.view = View::Results;
         }
         // 전체를 다시 돌린 결과는 앞 결과를 바꾼다(지운 테스트가 남지 않게). Gradle이 최신으로 건너뛴 작업의
-        // 보고서도 위에서 읽었다. 실패만 다시의 결과는 앞 결과에 넣는다(지운 실패는 뺀다).
+        // 보고서도 위에서 읽었다. 실패만 다시의 결과는 앞 결과에 넣는다(지운 실패는 빼고, 멈췄으면 그대로 둔다).
         if running.rerun && !running.whole {
-            test_report::apply_rerun(&mut self.cases, found);
+            if running.stopped {
+                test_report::merge_rerun(&mut self.cases, found);
+            } else {
+                // 지운 실패를 빼면 줄 번호가 바뀌므로 고른 테스트를 다시 찾는다(빠졌으면 첫 실패).
+                let chosen = self.selected.and_then(|i| self.cases.get(i)).cloned();
+                test_report::apply_rerun(running.tool, code, &mut self.cases, found);
+                self.selected = chosen
+                    .and_then(|c| self.cases.iter().position(|x| x.same_test(&c)))
+                    .or_else(|| self.cases.iter().position(|c| c.outcome == Outcome::Failed));
+            }
         } else {
             self.cases = found;
             self.selected = self.cases.iter().position(|c| c.outcome == Outcome::Failed);
