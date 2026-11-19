@@ -2612,14 +2612,24 @@ fn ctest_output_junit과_실패만_다시() {
         .iter()
         .flat_map(|f| test_report::read_report(f).unwrap())
         .collect();
-    eprintln!(
-        "ctest 이름을 바꾼 뒤: 성공 {ok}, 결과 {:?}\n{output}",
-        outcomes(&renamed)
+    // `--rerun-failed`는 지난 실패를 번호로 골라, 같은 번호(2)가 된 `fixed`를 돌린다(CI의 3개 OS에서 확인).
+    // 테스트 창은 지난 실패(`bad`)를 빼고 이 결과를 넣는다.
+    assert!(ok, "{rerun}\n{output}");
+    assert_eq!(
+        outcomes(&renamed),
+        [("fixed".to_owned(), Outcome::Passed)],
+        "{output}"
     );
-    // 아무것도 돌지 않고 0으로 끝나면 테스트 창이 전체를 다시 돌린다. 다른 테스트를 돌렸으면 그 결과로 바꾼다.
-    assert!(
-        (ok && renamed.is_empty()) || test_report::rerun_ran_others(&cases, &renamed),
-        "{rerun}\n{output}"
+    assert!(test_report::rerun_ran_others(&cases, &renamed));
+    let mut shown = cases.clone();
+    test_report::apply_rerun(&mut shown, renamed);
+    assert_eq!(
+        outcomes(&shown),
+        [
+            ("fixed".to_owned(), Outcome::Passed),
+            ("off".to_owned(), Outcome::Skipped),
+            ("ok".to_owned(), Outcome::Passed),
+        ]
     );
     let _ = std::fs::remove_dir_all(&root);
 }

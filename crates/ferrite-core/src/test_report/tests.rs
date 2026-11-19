@@ -867,6 +867,33 @@ fn 실패만_다시가_실패한_테스트를_하나도_돌리지_않은_것을_
     ));
     // 아무것도 돌지 않았다(따로 전체를 다시 돌린다).
     assert!(!rerun_ran_others(&before, &[]));
+
+    let names = |cases: &[Case]| {
+        cases
+            .iter()
+            .map(|c| (c.name.clone(), c.outcome))
+            .collect::<Vec<_>>()
+    };
+    // 실패한 것을 다시 돌렸으면 덮어 쓴다.
+    let mut cases = before.to_vec();
+    apply_rerun(&mut cases, vec![case("test_fail", Outcome::Passed)]);
+    assert_eq!(
+        names(&cases),
+        [
+            ("test_add".to_owned(), Outcome::Passed),
+            ("test_fail".to_owned(), Outcome::Passed)
+        ]
+    );
+    // 다른 것만 돌았으면(CTest가 같은 번호의 다른 테스트를 돌림) 실패한 것을 빼고 넣는다. 돌지 않은 통과는 남는다.
+    let mut cases = before.to_vec();
+    apply_rerun(&mut cases, vec![case("test_fixed", Outcome::Passed)]);
+    assert_eq!(
+        names(&cases),
+        [
+            ("test_add".to_owned(), Outcome::Passed),
+            ("test_fixed".to_owned(), Outcome::Passed)
+        ]
+    );
 }
 
 #[test]

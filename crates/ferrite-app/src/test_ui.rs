@@ -316,10 +316,9 @@ impl TestPanel {
             self.view = View::Results;
         }
         // 전체를 다시 돌린 결과는 앞 결과를 바꾼다(지운 테스트가 남지 않게). Gradle이 최신으로 건너뛴 작업의
-        // 보고서도 위에서 읽었다. 실패만 다시가 실패한 것은 돌리지 않고 다른 것을 돌렸으면(pytest `--lf`가 지난
-        // 실패를 찾지 못해 모두 돌림) 그것도 전체 결과다.
-        if running.rerun && !running.whole && !test_report::rerun_ran_others(&self.cases, &found) {
-            test_report::merge_rerun(&mut self.cases, found);
+        // 보고서도 위에서 읽었다. 실패만 다시의 결과는 앞 결과에 넣는다(지운 실패는 뺀다).
+        if running.rerun && !running.whole {
+            test_report::apply_rerun(&mut self.cases, found);
         } else {
             self.cases = found;
             self.selected = self.cases.iter().position(|c| c.outcome == Outcome::Failed);
