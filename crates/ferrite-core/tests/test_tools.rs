@@ -2463,6 +2463,31 @@ fn pytest_junitxml_보고서와_실패만_다시() {
         [("test_fail".to_owned(), Outcome::Failed)],
         "실패한 것만 다시"
     );
+    // 실패한 테스트의 이름을 바꿔 고치면 `--lf`는 지난 실패를 찾지 못해 모두 돌린다. 테스트 창은 그 결과로 앞 결과를
+    // 바꾼다(실패한 것은 하나도 돌지 않았다).
+    std::fs::write(
+        root.join("tests/test_calc.py"),
+        "import pytest\n\n\ndef add(a, b):\n    return a + b\n\n\ndef test_add():\n    assert add(1, 2) == 3\n\n\ndef test_fixed():\n    assert add(1, 2) == 3\n\n\n@pytest.mark.skip(reason=\"later\")\ndef test_skip():\n    pass\n",
+    )
+    .unwrap();
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    let since = SystemTime::now();
+    let (ok, output) = run(
+        &root,
+        &test_report::with_report(Tool::Pytest, &rerun, &report),
+    );
+    assert!(ok, "{rerun}\n{output}");
+    let renamed = junit(Tool::Pytest, &root, &report, since);
+    assert_eq!(
+        outcomes(&renamed),
+        [
+            ("test_add".to_owned(), Outcome::Passed),
+            ("test_fixed".to_owned(), Outcome::Passed),
+            ("test_skip".to_owned(), Outcome::Skipped),
+        ],
+        "{output}"
+    );
+    assert!(test_report::rerun_ran_others(&cases, &renamed));
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -2511,6 +2536,19 @@ fn go_test_json과_실패만_다시() {
         [("TestWrong".to_owned(), Outcome::Failed)],
         "실패한 것만 다시"
     );
+    // 실패한 테스트의 이름을 바꿔 고치면 `-run`에 맞는 테스트가 없어 아무것도 돌지 않고 0으로 끝난다. 테스트 창은
+    // 전체를 다시 돌린다.
+    std::fs::write(
+        root.join("calc/calc_test.go"),
+        "package calc\n\nimport \"testing\"\n\nfunc TestAdd(t *testing.T) {\n\tif Add(1, 2) != 3 {\n\t\tt.Fatal(\"add\")\n\t}\n}\n\nfunc TestFixed(t *testing.T) {\n\tif got := Add(1, 2); got != 3 {\n\t\tt.Errorf(\"got %d, want 3\", got)\n\t}\n}\n",
+    )
+    .unwrap();
+    let (ok, stdout) = run(&root, &rerun);
+    assert!(ok, "{rerun}\n{stdout}");
+    assert!(
+        test_report::parse_go_json(&stdout).is_empty(),
+        "{rerun}\n{stdout}"
+    );
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -2556,6 +2594,42 @@ fn ctest_output_junit과_실패만_다시() {
         outcomes(&again),
         [("bad".to_owned(), Outcome::Failed)],
         "실패한 것만 다시"
+    );
+    // 실패한 테스트의 이름을 바꿔 고치고 다시 구성하면 `--rerun-failed`가 고를 테스트가 없다.
+    std::fs::write(
+        root.join("CMakeLists.txt"),
+        "cmake_minimum_required(VERSION 3.21)\nproject(t NONE)\nenable_testing()\nadd_test(NAME ok COMMAND ${CMAKE_COMMAND} -E true)\nadd_test(NAME fixed COMMAND ${CMAKE_COMMAND} -E true)\nadd_test(NAME off COMMAND ${CMAKE_COMMAND} -E true)\nset_tests_properties(off PROPERTIES DISABLED TRUE)\n",
+    )
+    .unwrap();
+    assert!(run(&root, "cmake -S . -B build").0, "cmake 다시 구성");
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    let since = SystemTime::now();
+    let (ok, output) = run(
+        &root,
+        &test_report::with_report(Tool::Ctest, &rerun, &report),
+    );
+    let renamed: Vec<Case> = test_report::report_files(Tool::Ctest, &root, &report, since)
+        .iter()
+        .flat_map(|f| test_report::read_report(f).unwrap())
+        .collect();
+    // `--rerun-failed`는 지난 실패를 번호로 골라, 같은 번호(2)가 된 `fixed`를 돌린다(CI의 3개 OS에서 확인).
+    // 테스트 창은 지난 실패(`bad`)를 빼고 이 결과를 넣는다.
+    assert!(ok, "{rerun}\n{output}");
+    assert_eq!(
+        outcomes(&renamed),
+        [("fixed".to_owned(), Outcome::Passed)],
+        "{output}"
+    );
+    assert!(test_report::rerun_ran_others(&cases, &renamed));
+    let mut shown = cases.clone();
+    test_report::apply_rerun(&mut shown, renamed);
+    assert_eq!(
+        outcomes(&shown),
+        [
+            ("fixed".to_owned(), Outcome::Passed),
+            ("off".to_owned(), Outcome::Skipped),
+            ("ok".to_owned(), Outcome::Passed),
+        ]
     );
     let _ = std::fs::remove_dir_all(&root);
 }

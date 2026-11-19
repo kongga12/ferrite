@@ -835,6 +835,68 @@ fn gradle의_실패만_다시가_테스트를_찾지_못한_것을_알아본다(
 }
 
 #[test]
+fn 실패만_다시가_실패한_테스트를_하나도_돌리지_않은_것을_알아본다() {
+    let case = |name: &str, outcome| Case {
+        suite: "tests.test_calc".to_owned(),
+        name: name.to_owned(),
+        outcome,
+        seconds: None,
+        message: None,
+        detail: String::new(),
+        file: None,
+        line: None,
+        integration: false,
+        task: None,
+    };
+    let before = [
+        case("test_add", Outcome::Passed),
+        case("test_fail", Outcome::Failed),
+    ];
+    // 실패한 것을 다시 돌렸다(이제 통과해도).
+    assert!(!rerun_ran_others(
+        &before,
+        &[case("test_fail", Outcome::Passed)]
+    ));
+    // 실패한 것은 없고 다른 것만 돌았다(pytest `--lf`가 모두 돌림).
+    assert!(rerun_ran_others(
+        &before,
+        &[
+            case("test_add", Outcome::Passed),
+            case("test_fixed", Outcome::Passed)
+        ]
+    ));
+    // 아무것도 돌지 않았다(따로 전체를 다시 돌린다).
+    assert!(!rerun_ran_others(&before, &[]));
+
+    let names = |cases: &[Case]| {
+        cases
+            .iter()
+            .map(|c| (c.name.clone(), c.outcome))
+            .collect::<Vec<_>>()
+    };
+    // 실패한 것을 다시 돌렸으면 덮어 쓴다.
+    let mut cases = before.to_vec();
+    apply_rerun(&mut cases, vec![case("test_fail", Outcome::Passed)]);
+    assert_eq!(
+        names(&cases),
+        [
+            ("test_add".to_owned(), Outcome::Passed),
+            ("test_fail".to_owned(), Outcome::Passed)
+        ]
+    );
+    // 다른 것만 돌았으면(CTest가 같은 번호의 다른 테스트를 돌림) 실패한 것을 빼고 넣는다. 돌지 않은 통과는 남는다.
+    let mut cases = before.to_vec();
+    apply_rerun(&mut cases, vec![case("test_fixed", Outcome::Passed)]);
+    assert_eq!(
+        names(&cases),
+        [
+            ("test_add".to_owned(), Outcome::Passed),
+            ("test_fixed".to_owned(), Outcome::Passed)
+        ]
+    );
+}
+
+#[test]
 fn 같은_테스트가_둘이면_실패한_것_하나로_모은다() {
     let case = |suite: &str, name: &str, outcome, integration| Case {
         suite: suite.to_owned(),

@@ -117,6 +117,26 @@ pub fn merge_rerun(cases: &mut Vec<Case>, found: Vec<Case>) {
     }
 }
 
+/// 실패만 다시의 결과를 앞 결과에 넣는다. 실패한 테스트는 하나도 돌지 않고 다른 테스트만 돌았으면
+/// (`rerun_ran_others`) 실패한 테스트는 이제 없다고 보고 앞 결과에서 뺀 뒤 넣는다.
+pub fn apply_rerun(cases: &mut Vec<Case>, found: Vec<Case>) {
+    if rerun_ran_others(cases, &found) {
+        cases.retain(|c| c.outcome != Outcome::Failed);
+    }
+    merge_rerun(cases, found);
+}
+
+/// 실패만 다시가 실패한 테스트는 하나도 돌리지 않고 다른 테스트를 돌렸는지. 실패한 테스트를 지우거나 이름을
+/// 바꾸면 pytest의 `--lf`는 모두 돌리고, CTest의 `--rerun-failed`는 번호로 골라 그 번호의 다른 테스트를 돌린다.
+pub fn rerun_ran_others(cases: &[Case], found: &[Case]) -> bool {
+    !found.is_empty()
+        && !found.iter().any(|f| {
+            cases
+                .iter()
+                .any(|c| c.outcome == Outcome::Failed && c.same_test(f))
+        })
+}
+
 /// Go 패키지 자체가 실패했을 때(빌드 실패 등)의 이름.
 pub const PACKAGE_CASE: &str = "(패키지)";
 
