@@ -1731,6 +1731,18 @@ fn gradle_최신으로_건너뛴_프로젝트의_보고서도_다시_읽는다()
         1,
         "{quiet}\n{output}"
     );
+    // `gradle.properties`가 출력을 줄여도(로그 수준·콘솔) 작업 줄이 남는다.
+    let properties = root.join("gradle.properties");
+    let mut text = std::fs::read_to_string(&properties).unwrap();
+    text.push_str("org.gradle.logging.level=quiet\norg.gradle.console=rich\n");
+    std::fs::write(&properties, text).unwrap();
+    let plain = test_report::with_report(Tool::Gradle, "gradle test", &root);
+    let (_, output) = run(&root, &plain);
+    assert_eq!(
+        test_report::gradle_skipped_reports(&root, &output).len(),
+        1,
+        "{plain}\n{output}"
+    );
     let _ = std::fs::remove_dir_all(&root);
 }
 

@@ -356,19 +356,25 @@ pub fn with_report(tool: Tool, command: &str, dir: &Path) -> String {
         }
         Tool::Go if !has(&["-json"]) => command.replacen("test", "test -json", 1),
         Tool::Gradle => {
-            let line = gradle_with_task_lines(command);
-            if has(&["--continue"]) {
-                line
-            } else {
-                format!("{line} --continue")
+            let mut line = gradle_with_task_lines(command);
+            if !has(&["--continue"]) {
+                line.push_str(" --continue");
             }
+            line.push(' ');
+            line.push_str(GRADLE_TASK_LINES);
+            line
         }
         _ => command.to_owned(),
     }
 }
 
-/// 건너뛴 작업을 알려 주는 작업 줄(`> Task :app:test UP-TO-DATE`)을 숨기는 옵션을 뺀다. `-q`·`-w`는 줄을 없애고,
-/// `--console`은 꼴을 바꾼다(출력을 파이프로 받으면 기본이 줄 단위다). 값 안의 빈칸을 그대로 두려고 한 칸씩 나눈다.
+/// 건너뛴 작업을 알려 주는 작업 줄(`> Task :app:test UP-TO-DATE`)을 남기는 옵션. `gradle.properties`(프로젝트·
+/// Gradle 홈)의 `org.gradle.logging.level=quiet`·`org.gradle.console=rich`를 덮는다. 명령 줄의 `-q`·`--console`은
+/// 이것보다 앞서므로 `gradle_with_task_lines`가 뺀다(Gradle 9.2.0으로 확인).
+const GRADLE_TASK_LINES: &str = "--console=plain -Dorg.gradle.logging.level=lifecycle";
+
+/// 건너뛴 작업을 알려 주는 작업 줄을 숨기는 옵션을 뺀다. `-q`·`-w`는 줄을 없애고, `--console`은 꼴을 바꾼다.
+/// 로그 수준 속성은 `GRADLE_TASK_LINES`가 다시 준다. 값 안의 빈칸을 그대로 두려고 한 칸씩 나눈다.
 fn gradle_with_task_lines(command: &str) -> String {
     let mut kept = Vec::new();
     let mut words = command.split(' ');
@@ -378,7 +384,8 @@ fn gradle_with_task_lines(command: &str) -> String {
             "--console" => {
                 words.next();
             }
-            _ if word.starts_with("--console=") => {}
+            _ if word.starts_with("--console=")
+                || word.starts_with("-Dorg.gradle.logging.level=") => {}
             _ => kept.push(word),
         }
     }
@@ -736,7 +743,7 @@ static GRADLE_SKIPPED_TASK: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?m)^> Task (\S+) (?:UP-TO-DATE|FROM-CACHE)\s*$").unwrap());
 
 /// Gradle이 최신으로 보고 건너뛴 테스트 작업의 보고서. 앞선 실행이 남긴 그대로라 시각으로 고르는
-/// `report_files`에 들지 않는다. 작업 줄은 `with_report`가 남긴다(`gradle.properties`로 줄인 출력은 예외).
+/// `report_files`에 들지 않는다. 작업 줄은 `with_report`가 남긴다.
 pub fn gradle_skipped_reports(root: &Path, output: &str) -> Vec<PathBuf> {
     let skipped: Vec<&str> = GRADLE_SKIPPED_TASK
         .captures_iter(output)

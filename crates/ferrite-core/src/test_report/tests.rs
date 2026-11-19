@@ -254,13 +254,15 @@ fn 보고서_옵션과_실패만_다시_돌리는_명령을_만든다() {
         "mvn -ff test -Dmaven.test.failure.ignore=false",
         "사용자가 고른 실패 방식은 그대로"
     );
+    // 작업 줄을 남기는 옵션(`gradle.properties`의 출력 설정을 덮는다)을 끝에 붙인다.
+    let lines = "--console=plain -Dorg.gradle.logging.level=lifecycle";
     assert_eq!(
         with_report(Tool::Gradle, "gradle test", dir),
-        "gradle test --continue"
+        format!("gradle test --continue {lines}")
     );
     assert_eq!(
         with_report(Tool::Gradle, "gradle test --continue", dir),
-        "gradle test --continue"
+        format!("gradle test --continue {lines}")
     );
     // 건너뛴 작업을 알아보는 작업 줄을 숨기는 옵션은 뺀다(값 안의 빈칸과 다른 옵션은 그대로).
     for quiet in [
@@ -270,10 +272,11 @@ fn 보고서_옵션과_실패만_다시_돌리는_명령을_만든다() {
         "gradle --warn test",
         "gradle --console=rich test",
         "gradle --console rich test",
+        "gradle -Dorg.gradle.logging.level=quiet test",
     ] {
         assert_eq!(
             with_report(Tool::Gradle, quiet, dir),
-            "gradle test --continue",
+            format!("gradle test --continue {lines}"),
             "{quiet}"
         );
     }
@@ -283,7 +286,7 @@ fn 보고서_옵션과_실패만_다시_돌리는_명령을_만든다() {
             "gradle test -q --tests \"a  b\" -Pq=-q --info --continue",
             dir
         ),
-        "gradle test --tests \"a  b\" -Pq=-q --info --continue"
+        format!("gradle test --tests \"a  b\" -Pq=-q --info --continue {lines}")
     );
     let pytest = with_report(Tool::Pytest, "python -m pytest", dir);
     assert!(
