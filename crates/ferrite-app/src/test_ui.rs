@@ -54,7 +54,7 @@ struct Running {
     started: (SystemTime, Instant),
     /// 실패한 것만 다시 돌리는 중(결과를 앞 결과에 덮어 쓴다).
     rerun: bool,
-    /// 실패한 것만 고르지 못해 구성의 명령 그대로 다시 돌리는 중.
+    /// 실패한 것만 고르지 못해 구성의 명령 그대로 다시 돌리는 중(결과는 앞 결과를 바꾼다).
     whole: bool,
     /// `go test -json`의 표준 출력.
     json: String,
@@ -267,22 +267,6 @@ impl TestPanel {
         let Some(running) = self.running.take() else {
             return;
         };
-        // 빌드 설정이 묶음만 돌리면 실패한 테스트만 고를 수 없다. 그 설정대로 전체를 다시 돌린다. 통과한
-        // 프로젝트는 Gradle이 최신으로 보고 건너뛰어 보고서를 새로 쓰지 않으므로 앞 결과에 덮어 쓴다.
-        if running.rerun
-            && !running.whole
-            && !running.stopped
-            && test_report::gradle_rerun_found_nothing(running.tool, &self.output)
-            && let Some((config, ..)) = self.last.clone()
-        {
-            let command = config.command.clone();
-            self.start(ctx, root, config, Some(command));
-            push_limited(
-                &mut self.output,
-                "[빌드 설정의 거르기(filter·include) 때문에 실패한 테스트만 고르지 못해 전체를 다시 돌립니다]\n",
-            );
-            return;
-        }
         let found = match running.tool {
             Tool::Go => test_report::parse_go_json(&running.json),
             tool => {
@@ -309,11 +293,31 @@ impl TestPanel {
             }
         };
         let found = test_report::dedup(found);
+        // 실패만 다시가 돌 테스트를 찾지 못하면 구성의 명령 그대로 전체를 다시 돌린다. 빌드 설정이 묶음만 돌리거나
+        // (Gradle "No tests found"), 실패한 테스트를 지우거나 이름을 바꿨다(Gradle은 같은 오류, Maven은 아무것도
+        // 돌지 않고 0으로 끝난다).
+        if running.rerun
+            && !running.whole
+            && !running.stopped
+            && (test_report::gradle_rerun_found_nothing(running.tool, &self.output)
+                || (found.is_empty() && code == Some(0)))
+            && let Some((config, ..)) = self.last.clone()
+        {
+            let command = config.command.clone();
+            self.start(ctx, root, config, Some(command));
+            push_limited(
+                &mut self.output,
+                "[실패한 테스트만 골라 돌리지 못해(빌드 설정의 거르기, 지우거나 이름을 바꾼 테스트) 전체를 다시 돌립니다]\n",
+            );
+            return;
+        }
         let found_any = !found.is_empty();
         if found_any {
             self.view = View::Results;
         }
-        if running.rerun {
+        // 전체를 다시 돌린 결과는 앞 결과를 바꾼다(지운 테스트가 남지 않게). Gradle이 최신으로 건너뛴 작업의
+        // 보고서도 위에서 읽었다.
+        if running.rerun && !running.whole {
             test_report::merge_rerun(&mut self.cases, found);
         } else {
             self.cases = found;
