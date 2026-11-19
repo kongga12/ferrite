@@ -117,6 +117,17 @@ pub fn merge_rerun(cases: &mut Vec<Case>, found: Vec<Case>) {
     }
 }
 
+/// 실패만 다시가 실패한 테스트는 하나도 돌리지 않고 다른 테스트를 돌렸는지. pytest의 `--lf`는 지난 실패를
+/// 찾지 못하면(지우거나 이름을 바꿨다) 모두 돌린다. 그 결과는 앞 결과를 바꿔야 지운 테스트가 남지 않는다.
+pub fn rerun_ran_others(cases: &[Case], found: &[Case]) -> bool {
+    !found.is_empty()
+        && !found.iter().any(|f| {
+            cases
+                .iter()
+                .any(|c| c.outcome == Outcome::Failed && c.same_test(f))
+        })
+}
+
 /// Go 패키지 자체가 실패했을 때(빌드 실패 등)의 이름.
 pub const PACKAGE_CASE: &str = "(패키지)";
 
