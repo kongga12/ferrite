@@ -2351,7 +2351,14 @@
   - 찾기(실제 Gradle 9.2.0): `-q`·`--quiet`·`-w`·`--warn`·`--console=rich`·`--console=verbose`에서 작업 줄을 알아볼 수 없다. `-q`는 `-Dorg.gradle.logging.level=lifecycle`을 더해도, `--console=rich`는 뒤에 `--console=plain`을 더해도 그대로다. 그래서 더하지 않고 뺀다.
   - 고침(`test_report::with_report`): 테스트 창이 돌리는 Gradle 명령에서 이 옵션들을 뺀다. 출력 탭에 줄이 더 보일 뿐 테스트는 같다. 파이프로 받으면 기본 콘솔이 줄 단위다.
   - 검증: 단위 시험, 실제 도구(`test_tools`, 로컬과 CI의 3개 OS). 실제 앱(Windows, 두 프로젝트, `.ferrite/run.toml`의 `gradle test -q` 구성): `실행`을 두 번 눌러도 통과 1·실패 1이 그대로 나오고, 출력 탭의 명령은 `gradle test --continue`였다.
-  - 확인하지 못한 것: `gradle.properties`로 출력을 줄인 프로젝트(`org.gradle.logging.level=quiet`, `org.gradle.console=rich`. 이때는 예전처럼 새 보고서만 읽는다).
+  - 확인하지 못한 것: `gradle.properties`로 출력을 줄인 프로젝트(`org.gradle.logging.level=quiet`, `org.gradle.console=rich`. 이때는 예전처럼 새 보고서만 읽는다. 뒤에 백로그 "gradle.properties의 출력 설정"(2026-11-19)에서 고쳤다).
+
+- [x] gradle.properties의 출력 설정(2026-11-19) — 작음
+  - 까닭: 위 "작업 줄을 숨기는 Gradle 옵션"은 명령 줄의 옵션만 뺐다. 프로젝트나 Gradle 홈의 `gradle.properties`에 `org.gradle.logging.level=quiet`·`org.gradle.console=rich`를 적으면 작업 줄이 없어 통과한 프로젝트가 다시 사라진다.
+  - 찾기(실제 Gradle 9.2.0): 속성의 `quiet`는 명령 줄의 `-Dorg.gradle.logging.level=lifecycle`이, 속성의 `rich`는 `--console=plain`이 덮어 작업 줄이 나온다(명령 줄의 `-q`·`--console`은 덮지 못해 위에서 뺐다).
+  - 고침(`test_report::with_report`): 테스트 창이 돌리는 Gradle 명령 끝에 `--console=plain -Dorg.gradle.logging.level=lifecycle`을 붙인다. 명령의 `-Dorg.gradle.logging.level=…`은 뺀다(`--info`·`--debug`는 그대로 앞선다).
+  - 알아 둘 것: 속성으로 `info`·`debug`를 준 프로젝트도 테스트 창에서는 `lifecycle`로 돈다(출력만 줄고 테스트는 같다).
+  - 검증: 단위 시험, 실제 도구(`test_tools`, 로컬과 CI의 3개 OS, Windows에서는 Gradle 시험 12개 모두). 실제 앱(Windows, 두 프로젝트, `gradle.properties`에 `quiet`·`rich`): `실행`을 두 번 눌러도 통과 1·실패 1이 그대로 나오고, 명령은 `gradle test --continue --console=plain -Dorg.gradle.logging.level=lifecycle`이었다.
 
 - 살폈지만 넣지 않은 것: 임베디드(MCU 플래시·시리얼 모니터·장비 설정 파일), 프레임워크별 지원(React·Vue·Angular 등, JS·TS 언어 서버로 기본은 된다), 린터 개별 연동(언어 서버나 저장 시 작업으로 된다), 원격 개발·컨테이너·SFTP 배포, 로컬 AI 완성 모델, 계정 기반 설정 동기화. egov 개발과 거리가 멀거나 크기에 비해 쓰임이 적다.
 
