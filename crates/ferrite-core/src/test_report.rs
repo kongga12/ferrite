@@ -105,6 +105,18 @@ pub fn dedup(cases: Vec<Case>) -> Vec<Case> {
     kept
 }
 
+/// 다시 돌린 결과를 앞 결과에 덮어 쓴다(없던 것은 더한다). 같은 테스트도 돌린 곳이 다르면 따로다: Maven은
+/// 단위 테스트 단계(Surefire)와 통합 테스트 단계(Failsafe)가 같은 통합 테스트를 둘 다 돌릴 수 있고(pom이 Surefire의
+/// `<includes>`에 넣었을 때), Gradle은 작업마다 따로 돈다.
+pub fn merge_rerun(cases: &mut Vec<Case>, found: Vec<Case>) {
+    for case in found {
+        match cases.iter_mut().find(|c| c.same_test(&case)) {
+            Some(old) => *old = case,
+            None => cases.push(case),
+        }
+    }
+}
+
 /// Go 패키지 자체가 실패했을 때(빌드 실패 등)의 이름.
 pub const PACKAGE_CASE: &str = "(패키지)";
 
