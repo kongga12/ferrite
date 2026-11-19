@@ -1672,6 +1672,61 @@ fn gradle_일부_프로젝트만_묶음만_돌아도_전체를_다시_돌린_결
 }
 
 #[test]
+#[ignore = "Gradle로 두 프로젝트의 테스트를 두 번 돌린다(의존성을 받는다). Java 17 이상과 gradle이 필요하다"]
+fn gradle_최신으로_건너뛴_프로젝트의_보고서도_다시_읽는다() {
+    if !require("gradle --version") {
+        return;
+    }
+    let build = "plugins {\n    java\n}\n\nrepositories {\n    mavenCentral()\n}\n\ndependencies {\n    testImplementation(\"org.junit.jupiter:junit-jupiter:5.12.2\")\n    testRuntimeOnly(\"org.junit.platform:junit-platform-launcher\")\n}\n\ntasks.test {\n    useJUnitPlatform()\n}\n";
+    let root = gradle_project("gradle-up-to-date", &[("app", build), ("lib", build)]);
+    for (project, class, body) in [
+        ("app", "AppTest", "assertEquals(3, 1 + 2);"),
+        ("lib", "LibTest", "assertEquals(4, 1 + 2);"),
+    ] {
+        let java = root.join(project).join("src/test/java/demo");
+        std::fs::create_dir_all(&java).unwrap();
+        std::fs::write(
+            java.join(format!("{class}.java")),
+            format!("package demo;\n\nimport static org.junit.jupiter.api.Assertions.assertEquals;\n\nimport org.junit.jupiter.api.Test;\n\nclass {class} {{\n    @Test\n    void checks() {{\n        {body}\n    }}\n}}\n"),
+        )
+        .unwrap();
+    }
+    let command = test_report::with_report(Tool::Gradle, "gradle test", &root);
+    let all = [
+        suite_test("AppTest", "checks()", Outcome::Passed),
+        suite_test("LibTest", "checks()", Outcome::Failed),
+    ];
+    let since = SystemTime::now();
+    let (_, output) = run(&root, &command);
+    assert_eq!(suite_tests(&junit(Tool::Gradle, &root, &root, since)), all);
+    assert!(
+        test_report::gradle_skipped_reports(&root, &output).is_empty(),
+        "{output}"
+    );
+    // 다시 돌리면 통과한 app은 최신이라 건너뛰고 보고서를 새로 쓰지 않는다.
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    let since = SystemTime::now();
+    let (_, output) = run(&root, &command);
+    let fresh = junit(Tool::Gradle, &root, &root, since);
+    assert_eq!(suite_tests(&fresh), all[1..], "{output}");
+    let skipped = test_report::gradle_skipped_reports(&root, &output);
+    assert_eq!(skipped.len(), 1, "{output}");
+    let mut cases = fresh;
+    cases.extend(test_report::read_report(&skipped[0]).unwrap());
+    assert_eq!(suite_tests(&cases), all);
+    assert_eq!(
+        cases
+            .iter()
+            .find(|c| c.suite == "demo.AppTest")
+            .unwrap()
+            .task
+            .as_deref(),
+        Some(":app:test")
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
 #[ignore = "Gradle로 TestNG 테스트(useTestNG)를 돌린다(의존성을 받는다). Java 17 이상과 gradle이 필요하다"]
 fn gradle_testng_매개변수_테스트를_줄마다_읽고_실패만_다시() {
     if !require("gradle --version") {

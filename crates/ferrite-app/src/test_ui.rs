@@ -287,9 +287,16 @@ impl TestPanel {
             Tool::Go => test_report::parse_go_json(&running.json),
             tool => {
                 let mut cases = Vec::new();
-                for file in
-                    test_report::report_files(tool, root, &running.report, running.started.0)
-                {
+                let mut files =
+                    test_report::report_files(tool, root, &running.report, running.started.0);
+                if tool == Tool::Gradle {
+                    for file in test_report::gradle_skipped_reports(root, &self.output) {
+                        if !files.contains(&file) {
+                            files.push(file);
+                        }
+                    }
+                }
+                for file in files {
                     match test_report::read_report(&file) {
                         Ok(found) => cases.extend(found),
                         Err(e) => push_limited(
