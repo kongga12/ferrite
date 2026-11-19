@@ -262,6 +262,29 @@ fn 보고서_옵션과_실패만_다시_돌리는_명령을_만든다() {
         with_report(Tool::Gradle, "gradle test --continue", dir),
         "gradle test --continue"
     );
+    // 건너뛴 작업을 알아보는 작업 줄을 숨기는 옵션은 뺀다(값 안의 빈칸과 다른 옵션은 그대로).
+    for quiet in [
+        "gradle -q test",
+        "gradle --quiet test",
+        "gradle -w test",
+        "gradle --warn test",
+        "gradle --console=rich test",
+        "gradle --console rich test",
+    ] {
+        assert_eq!(
+            with_report(Tool::Gradle, quiet, dir),
+            "gradle test --continue",
+            "{quiet}"
+        );
+    }
+    assert_eq!(
+        with_report(
+            Tool::Gradle,
+            "gradle test -q --tests \"a  b\" -Pq=-q --info --continue",
+            dir
+        ),
+        "gradle test --tests \"a  b\" -Pq=-q --info --continue"
+    );
     let pytest = with_report(Tool::Pytest, "python -m pytest", dir);
     assert!(
         pytest.starts_with("python -m pytest \"--junitxml=") && pytest.ends_with("pytest.xml\"")
