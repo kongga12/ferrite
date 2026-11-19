@@ -1723,6 +1723,14 @@ fn gradle_최신으로_건너뛴_프로젝트의_보고서도_다시_읽는다()
             .as_deref(),
         Some(":app:test")
     );
+    // 구성에 `-q`를 적어도 작업 줄이 남아 건너뛴 작업을 알아본다.
+    let quiet = test_report::with_report(Tool::Gradle, "gradle test -q", &root);
+    let (_, output) = run(&root, &quiet);
+    assert_eq!(
+        test_report::gradle_skipped_reports(&root, &output).len(),
+        1,
+        "{quiet}\n{output}"
+    );
     let _ = std::fs::remove_dir_all(&root);
 }
 

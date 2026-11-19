@@ -355,11 +355,34 @@ pub fn with_report(tool: Tool, command: &str, dir: &Path) -> String {
             format!("{command} --output-junit \"{}\"", path("ctest.xml"))
         }
         Tool::Go if !has(&["-json"]) => command.replacen("test", "test -json", 1),
-        Tool::Gradle if !has(&["--continue"]) => {
-            format!("{command} --continue")
+        Tool::Gradle => {
+            let line = gradle_with_task_lines(command);
+            if has(&["--continue"]) {
+                line
+            } else {
+                format!("{line} --continue")
+            }
         }
         _ => command.to_owned(),
     }
+}
+
+/// 건너뛴 작업을 알려 주는 작업 줄(`> Task :app:test UP-TO-DATE`)을 숨기는 옵션을 뺀다. `-q`·`-w`는 줄을 없애고,
+/// `--console`은 꼴을 바꾼다(출력을 파이프로 받으면 기본이 줄 단위다). 값 안의 빈칸을 그대로 두려고 한 칸씩 나눈다.
+fn gradle_with_task_lines(command: &str) -> String {
+    let mut kept = Vec::new();
+    let mut words = command.split(' ');
+    while let Some(word) = words.next() {
+        match word {
+            "-q" | "--quiet" | "-w" | "--warn" => {}
+            "--console" => {
+                words.next();
+            }
+            _ if word.starts_with("--console=") => {}
+            _ => kept.push(word),
+        }
+    }
+    kept.join(" ")
 }
 
 /// 종료 코드로 보아 보고서에 없는 실패(빌드 오류 등)가 있는지. Maven은 테스트 실패로는 빌드를 멈추지 않게
@@ -713,7 +736,7 @@ static GRADLE_SKIPPED_TASK: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?m)^> Task (\S+) (?:UP-TO-DATE|FROM-CACHE)\s*$").unwrap());
 
 /// Gradle이 최신으로 보고 건너뛴 테스트 작업의 보고서. 앞선 실행이 남긴 그대로라 시각으로 고르는
-/// `report_files`에 들지 않는다. 출력에 작업 줄이 없으면(`-q`) 찾지 못한다.
+/// `report_files`에 들지 않는다. 작업 줄은 `with_report`가 남긴다(`gradle.properties`로 줄인 출력은 예외).
 pub fn gradle_skipped_reports(root: &Path, output: &str) -> Vec<PathBuf> {
     let skipped: Vec<&str> = GRADLE_SKIPPED_TASK
         .captures_iter(output)

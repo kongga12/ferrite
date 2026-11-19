@@ -2344,7 +2344,14 @@
   - 까닭: 테스트 창은 이번 실행이 쓴 보고서만 읽는다(파일 시각). Gradle은 입력이 그대로이고 앞서 통과한 테스트 작업을 `UP-TO-DATE`로 건너뛰어 보고서를 새로 쓰지 않으므로, `실행`을 다시 누르면 통과한 프로젝트의 테스트가 사라졌다.
   - 고침(`test_report::gradle_skipped_reports`): Gradle 출력의 `> Task :app:test UP-TO-DATE`(`FROM-CACHE`도) 줄에서 건너뛴 작업을 찾아, 그 작업의 보고서도 시각과 상관없이 읽는다. 테스트를 다시 돌리게 만들지(`--rerun`·`cleanTest`) 않아 프로젝트의 증분 빌드를 그대로 둔다.
   - 검증: 단위 시험, 실제 도구(`test_tools`, 로컬과 CI의 3개 OS). 실제 앱(Windows, 두 프로젝트): `실행`을 두 번 눌러도 통과 1·실패 1(한 프로젝트만 실패)과 통과 2·실패 0(모두 통과)이 그대로 나왔다.
-  - 확인하지 못한 것: 출력에 작업 줄이 없는 명령(`gradle test -q`, 이때는 예전처럼 새 보고서만 읽는다), 출력이 너무 길어 앞부분이 잘린 실행.
+  - 확인하지 못한 것: 출력에 작업 줄이 없는 명령(`gradle test -q`, 이때는 예전처럼 새 보고서만 읽는다. 뒤에 백로그 "작업 줄을 숨기는 Gradle 옵션"(2026-11-19)에서 고쳤다), 출력이 너무 길어 앞부분이 잘린 실행.
+
+- [x] 작업 줄을 숨기는 Gradle 옵션(2026-11-19) — 작음
+  - 까닭: 위 "최신으로 건너뛴 Gradle 작업의 결과"는 출력의 작업 줄(`> Task :app:test UP-TO-DATE`)로 건너뛴 작업을 찾는다. 구성에 `-q`를 적으면 그 줄이 없어 통과한 프로젝트가 다시 사라진다.
+  - 찾기(실제 Gradle 9.2.0): `-q`·`--quiet`·`-w`·`--warn`·`--console=rich`·`--console=verbose`에서 작업 줄을 알아볼 수 없다. `-q`는 `-Dorg.gradle.logging.level=lifecycle`을 더해도, `--console=rich`는 뒤에 `--console=plain`을 더해도 그대로다. 그래서 더하지 않고 뺀다.
+  - 고침(`test_report::with_report`): 테스트 창이 돌리는 Gradle 명령에서 이 옵션들을 뺀다. 출력 탭에 줄이 더 보일 뿐 테스트는 같다. 파이프로 받으면 기본 콘솔이 줄 단위다.
+  - 검증: 단위 시험, 실제 도구(`test_tools`, 로컬과 CI의 3개 OS). 실제 앱(Windows, 두 프로젝트, `.ferrite/run.toml`의 `gradle test -q` 구성): `실행`을 두 번 눌러도 통과 1·실패 1이 그대로 나오고, 출력 탭의 명령은 `gradle test --continue`였다.
+  - 확인하지 못한 것: `gradle.properties`로 출력을 줄인 프로젝트(`org.gradle.logging.level=quiet`, `org.gradle.console=rich`. 이때는 예전처럼 새 보고서만 읽는다).
 
 - 살폈지만 넣지 않은 것: 임베디드(MCU 플래시·시리얼 모니터·장비 설정 파일), 프레임워크별 지원(React·Vue·Angular 등, JS·TS 언어 서버로 기본은 된다), 린터 개별 연동(언어 서버나 저장 시 작업으로 된다), 원격 개발·컨테이너·SFTP 배포, 로컬 AI 완성 모델, 계정 기반 설정 동기화. egov 개발과 거리가 멀거나 크기에 비해 쓰임이 적다.
 
