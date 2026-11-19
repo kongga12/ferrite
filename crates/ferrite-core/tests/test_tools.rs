@@ -755,6 +755,92 @@ fn maven_testng_xml로_돌린_테스트를_읽고_실패만_다시() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// 두 번째 메서드가 실패하는 `CalcTest`(`name`). `ok`면 통과하게 쓴다.
+fn write_calc_test(java: &Path, name: &str, ok: bool) {
+    std::fs::create_dir_all(java).unwrap();
+    let expected = if ok { 3 } else { 4 };
+    std::fs::write(
+        java.join("CalcTest.java"),
+        format!("package demo;\n\nimport static org.junit.jupiter.api.Assertions.assertEquals;\n\nimport org.junit.jupiter.api.Test;\n\nclass CalcTest {{\n    @Test\n    void adds() {{\n        assertEquals(3, 1 + 2);\n    }}\n\n    @Test\n    void {name}() {{\n        assertEquals({expected}, 1 + 2);\n    }}\n}}\n"),
+    )
+    .unwrap();
+}
+
+#[test]
+#[ignore = "Maven으로 JUnit 5 테스트를 돌린다(의존성을 받는다). Java 17 이상과 mvn이 필요하다"]
+fn maven_실패한_테스트의_이름을_바꾸면_실패만_다시는_아무것도_돌지_않는다() {
+    if !require("mvn -v") {
+        return;
+    }
+    let root = temp_dir("maven-renamed");
+    std::fs::write(
+        root.join("pom.xml"),
+        r#"<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>demo</groupId>
+  <artifactId>board</artifactId>
+  <version>1.0</version>
+  <properties>
+    <maven.compiler.release>17</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+  </properties>
+  <dependencies>
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <version>5.12.2</version>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+  <build>
+    <plugins>
+      <plugin>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <version>3.5.4</version>
+      </plugin>
+    </plugins>
+  </build>
+</project>
+"#,
+    )
+    .unwrap();
+    let java = root.join("src/test/java/demo");
+    write_calc_test(&java, "addsWrong", false);
+    let report = root.join("reports");
+    let command = "mvn -B -q test";
+    let since = SystemTime::now();
+    run(
+        &root,
+        &test_report::with_report(Tool::Maven, command, &report),
+    );
+    let cases = junit(Tool::Maven, &root, &report, since);
+    // 실패한 메서드의 이름을 바꿔 고쳤다.
+    write_calc_test(&java, "addsFixed", true);
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    let since = SystemTime::now();
+    let line = test_report::rerun(Tool::Maven, command, &failed(&cases)).unwrap();
+    let (ok, output) = run(
+        &root,
+        &test_report::with_report(Tool::Maven, &line, &report),
+    );
+    // 아무것도 돌지 않고 0으로 끝나 보고서가 없다. 테스트 창은 전체를 다시 돌린다.
+    assert!(ok, "{line}\n{output}");
+    assert!(test_report::report_files(Tool::Maven, &root, &report, since).is_empty());
+    let since = SystemTime::now();
+    run(
+        &root,
+        &test_report::with_report(Tool::Maven, command, &report),
+    );
+    assert_eq!(
+        outcomes(&junit(Tool::Maven, &root, &report, since)),
+        [
+            ("adds".to_owned(), Outcome::Passed),
+            ("addsFixed".to_owned(), Outcome::Passed),
+        ]
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 #[test]
 #[ignore = "Maven으로 JUnit 4 Suite로 묶은 테스트를 돌린다(의존성을 받는다). Java 17 이상과 mvn이 필요하다"]
 fn maven_junit4_suite로_묶어_돌려도_실제_클래스로_읽고_실패만_다시() {
@@ -1639,7 +1725,7 @@ fn gradle_일부_프로젝트만_묶음만_돌아도_전체를_다시_돌린_결
         &root,
         &test_report::with_report(Tool::Gradle, command, &root),
     );
-    let mut cases = junit(Tool::Gradle, &root, &root, since);
+    let cases = junit(Tool::Gradle, &root, &root, since);
     let all = [
         suite_test("AppTest", "starts()", Outcome::Passed),
         suite_test("BoardTest", "lists()", Outcome::Passed),
@@ -1657,17 +1743,19 @@ fn gradle_일부_프로젝트만_묶음만_돌아도_전체를_다시_돌린_결
         test_report::gradle_rerun_found_nothing(Tool::Gradle, &output),
         "{output}"
     );
-    // 전체를 다시 돌려도 통과한 app은 최신이라 건너뛰어 새 보고서가 없다. 앞 결과에 덮어 써야 남는다.
+    // 전체를 다시 돌려도 통과한 app은 최신이라 건너뛰어 새 보고서가 없다. 건너뛴 작업의 보고서까지 읽어야 남는다.
     std::thread::sleep(std::time::Duration::from_secs(3));
     let since = SystemTime::now();
-    run(
+    let (_, output) = run(
         &root,
         &test_report::with_report(Tool::Gradle, command, &root),
     );
-    let found = junit(Tool::Gradle, &root, &root, since);
+    let mut found = junit(Tool::Gradle, &root, &root, since);
     assert_eq!(suite_tests(&found), all[1..]);
-    test_report::merge_rerun(&mut cases, found);
-    assert_eq!(suite_tests(&cases), all);
+    for file in test_report::gradle_skipped_reports(&root, &output) {
+        found.extend(test_report::read_report(&file).unwrap());
+    }
+    assert_eq!(suite_tests(&found), all);
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -1742,6 +1830,54 @@ fn gradle_최신으로_건너뛴_프로젝트의_보고서도_다시_읽는다()
         test_report::gradle_skipped_reports(&root, &output).len(),
         1,
         "{plain}\n{output}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+#[ignore = "Gradle로 JUnit 5 테스트를 돌린다(의존성을 받는다). Java 17 이상과 gradle이 필요하다"]
+fn gradle_실패한_테스트의_이름을_바꾸면_실패만_다시가_테스트를_찾지_못한다() {
+    if !require("gradle --version") {
+        return;
+    }
+    let root = gradle_project(
+        "gradle-renamed",
+        &[(
+            "app",
+            "plugins {\n    java\n}\n\nrepositories {\n    mavenCentral()\n}\n\ndependencies {\n    testImplementation(\"org.junit.jupiter:junit-jupiter:5.12.2\")\n    testRuntimeOnly(\"org.junit.platform:junit-platform-launcher\")\n}\n\ntasks.test {\n    useJUnitPlatform()\n}\n",
+        )],
+    );
+    let java = root.join("app/src/test/java/demo");
+    write_calc_test(&java, "addsWrong", false);
+    let command = "gradle test";
+    let since = SystemTime::now();
+    run(
+        &root,
+        &test_report::with_report(Tool::Gradle, command, &root),
+    );
+    let cases = junit(Tool::Gradle, &root, &root, since);
+    write_calc_test(&java, "addsFixed", true);
+    let line = test_report::rerun(Tool::Gradle, command, &failed(&cases)).unwrap();
+    let line = test_report::with_report(Tool::Gradle, &line, &root);
+    let (ok, output) = run(&root, &format!("{line} 2>&1"));
+    // 묶음만 도는 설정과 같은 오류로 끝난다. 테스트 창은 전체를 다시 돌려 앞 결과를 바꾼다.
+    assert!(!ok, "{output}");
+    assert!(
+        test_report::gradle_rerun_found_nothing(Tool::Gradle, &output),
+        "{output}"
+    );
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    let since = SystemTime::now();
+    run(
+        &root,
+        &test_report::with_report(Tool::Gradle, command, &root),
+    );
+    assert_eq!(
+        outcomes(&junit(Tool::Gradle, &root, &root, since)),
+        [
+            ("adds()".to_owned(), Outcome::Passed),
+            ("addsFixed()".to_owned(), Outcome::Passed),
+        ]
     );
     let _ = std::fs::remove_dir_all(&root);
 }
