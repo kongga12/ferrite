@@ -133,10 +133,21 @@ jobs:
       - &jdk8
         name: JDK 8 받기(러너에 없으면)
         if: runner.os == 'Linux' && env.JAVA_HOME_8_X64 == ''
+        # api.adoptium.net이 압축 파일이 아닌 응답을 줄 때가 있다(2026-11-20 "not in gzip format"). 파일로 받아
+        # 풀어 보고, 안 되면 받은 것의 앞부분을 남기고 기다렸다 세 번까지 다시 한다.
         run: |
-          mkdir -p "$RUNNER_TEMP/jdk8"
-          curl -fsSL https://api.adoptium.net/v3/binary/latest/8/ga/linux/x64/jdk/hotspot/normal/eclipse \
-            | tar -xz -C "$RUNNER_TEMP/jdk8" --strip-components=1
+          archive="$RUNNER_TEMP/jdk8.tar.gz"
+          for try in 1 2 3; do
+            rm -rf "$RUNNER_TEMP/jdk8" && mkdir -p "$RUNNER_TEMP/jdk8"
+            if curl -fsSL -o "$archive" https://api.adoptium.net/v3/binary/latest/8/ga/linux/x64/jdk/hotspot/normal/eclipse \
+              && tar -xzf "$archive" -C "$RUNNER_TEMP/jdk8" --strip-components=1; then
+              break
+            fi
+            echo "::warning::JDK 8 받기 실패($try/3): $(head -c 120 "$archive" 2>/dev/null | tr -cd '[:print:]')"
+            [ "$try" = 3 ] && exit 1
+            sleep 30
+          done
+          rm -f "$archive"
           "$RUNNER_TEMP/jdk8/bin/javac" -version
           echo "JAVA_HOME_8_X64=$RUNNER_TEMP/jdk8" >> "$GITHUB_ENV"
       - run: cargo fmt --all --check
