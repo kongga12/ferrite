@@ -2422,7 +2422,7 @@
   - 고침
     - 모든 워크플로(`ci`·`adapters`·`package`·`servers`·`templates`)의 Rust 캐시를 기본 가지(main)의 실행만 저장한다(`save-if`). 다른 가지는 main의 것을 읽는다. `package`·`templates`는 main에서 저절로 돌지 않아 main에서 손으로 돌린 실행만 캐시를 남긴다.
     - `ci.yml`의 빌드는 디버그 정보를 줄 번호만 남긴다(`CARGO_PROFILE_DEV_DEBUG=line-tables-only`, 시험 프로필도 따른다). 패닉 위치는 그대로 보인다. `adapters.yml`은 codelldb 시험이 디버그 정보를 써서 그대로 둔다.
-  - 검증: PR의 CI가 이 설정으로 모두 통과하고 Rust 캐시를 저장하지 않는지 기록으로 본다. 머지 뒤 main의 push CI가 새 키로 저장한 캐시 크기를 앞 키와 견준다.
+  - 검증: PR의 CI가 이 설정으로 모두 통과하고 Rust 캐시를 저장하지 않았다(`save-if: false`). 머지 뒤 main에서 전체 CI를 손으로 돌려 새 키의 크기를 앞 키와 견주었다: full Linux 1602→1446MB, full Windows 1576→1418MB, full macOS 1305→1145MB, linux 1071→927MB, coverage 244→227MB. 디버그 정보 줄이기는 10%쯤만 줄였다(의존성의 rlib·메타데이터가 대부분이다). 큰 몫은 가지마다 저장하지 않는 쪽이다.
   - 확인하지 못한 것: 의존성을 바꾼 PR은 main에 맞는 캐시가 없어 앞 캐시에서 이어 빌드하므로 조금 느려진다(머지 뒤 main이 새로 저장한다). 앞 키의 캐시는 7일 쓰이지 않으면 GitHub이 지운다(손으로 지우지 않았다).
 
 - [x] Maven·JDK 8·JDBC 캐시도 main에서만 저장(2026-11-20) — 작음(CI만)
