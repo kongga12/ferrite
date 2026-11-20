@@ -323,7 +323,7 @@ impl TestPanel {
             } else {
                 // 지운 실패를 빼면 줄 번호가 바뀌므로 고른 테스트를 다시 찾는다(빠졌으면 첫 실패).
                 let chosen = self.selected.and_then(|i| self.cases.get(i)).cloned();
-                test_report::apply_rerun(running.tool, code, &mut self.cases, found);
+                test_report::apply_rerun(running.tool, code, &self.output, &mut self.cases, found);
                 self.selected = chosen
                     .and_then(|c| self.cases.iter().position(|x| x.same_test(&c)))
                     .or_else(|| self.cases.iter().position(|c| c.outcome == Outcome::Failed));

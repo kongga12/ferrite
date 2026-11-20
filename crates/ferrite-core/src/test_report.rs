@@ -72,13 +72,16 @@ pub struct Case {
     /// Maven Failsafe가 돌린 통합 테스트(`failsafe-reports`의 보고서). 실패만 다시 돌릴 때 Surefire의
     /// `-Dtest`가 아니라 `-Dit.test`로 거른다.
     pub integration: bool,
-    /// 이 테스트를 돌린 Gradle 테스트 작업(`:app:test`, `:app:integrationTest`). 보고서 폴더
-    /// (`<프로젝트>/build/test-results/<작업>`)에서 읽는다. 실패만 다시 돌릴 때 그 작업에 `--tests`를 붙인다.
+    /// 이 테스트를 돌린 곳. 보고서 폴더에서 읽는다.
+    /// - Gradle: 테스트 작업(`:app:test`, `:app:integrationTest`, `<프로젝트>/build/test-results/<작업>`). 실패만
+    ///   다시 돌릴 때 그 작업에 `--tests`를 붙인다.
+    /// - Maven: 모듈 이름(`<모듈>/target/surefire-reports`의 pom, `maven_module`). 실패만 다시에서 빌드가 깨진
+    ///   모듈의 실패를 남길 때 쓴다.
     pub task: Option<String>,
 }
 
 impl Case {
-    /// 같은 테스트인지: 묶음·이름과 돌린 곳(Failsafe, Gradle 작업)이 같다.
+    /// 같은 테스트인지: 묶음·이름과 돌린 곳(Failsafe, Gradle 작업, Maven 모듈)이 같다.
     pub fn same_test(&self, other: &Case) -> bool {
         self.suite == other.suite
             && self.name == other.name
@@ -119,14 +122,35 @@ pub fn merge_rerun(cases: &mut Vec<Case>, found: Vec<Case>) {
 
 /// 실패만 다시의 결과(`found`, 끝난 종료 코드 `code`)를 앞 결과에 넣는다. 다시 돌린 지난 실패가 결과에 없으면
 /// 지우거나 이름을 바꾼 것으로 보고 뺀다. 다만 그 테스트가 돌 자리가 돌지 못했으면(빌드 오류) 남긴다.
-/// - Maven: 테스트 실패로는 0으로 끝나게 돌리므로(`with_report`) 0이 아니면 빌드 오류다.
+/// - Maven: 테스트 실패로는 0으로 끝나게 돌리므로(`with_report`) 0이 아니면 어느 모듈의 빌드 오류다. 출력
+///   (`output`)의 모듈별 결과(Reactor Summary)에서 성공한 모듈의 실패는 뺀다. 결과가 없으면(`-q`, 모듈 하나)
+///   모두 남긴다.
 /// - Gradle: 그 테스트의 작업이 결과를 냈다(컴파일이 깨지면 작업이 돌지 않는다).
 /// - Go: 그 패키지가 빌드에 실패하지 않았다(`PACKAGE_CASE`).
 /// - pytest·CTest: 모으지 못한 파일은 결과에 오류로 남는다. pytest의 `--lf`는 지난 실패를 하나도 찾지 못하면
 ///   모두 돌리고, CTest의 `--rerun-failed`는 번호로 골라 이름을 바꾼 뒤 같은 번호의 다른 테스트를 돌린다.
-pub fn apply_rerun(tool: Tool, code: Option<i32>, cases: &mut Vec<Case>, found: Vec<Case>) {
+pub fn apply_rerun(
+    tool: Tool,
+    code: Option<i32>,
+    output: &str,
+    cases: &mut Vec<Case>,
+    found: Vec<Case>,
+) {
+    let built = match tool {
+        Tool::Maven if code != Some(0) => maven_built_modules(output).unwrap_or_default(),
+        _ => Vec::new(),
+    };
     let ran_there = |c: &Case| match tool {
-        Tool::Maven => code == Some(0),
+        Tool::Maven => {
+            code == Some(0)
+                || c.task.as_deref().is_some_and(|module| {
+                    // 모듈들의 판이 다르면 이름 뒤에 판을 붙인다(`common 1.0`).
+                    built.iter().any(|b| {
+                        b.strip_prefix(module)
+                            .is_some_and(|rest| rest.is_empty() || rest.starts_with(' '))
+                    })
+                })
+        }
         Tool::Gradle => c.task.is_some() && found.iter().any(|f| f.task == c.task),
         Tool::Go => !found
             .iter()
@@ -137,6 +161,29 @@ pub fn apply_rerun(tool: Tool, code: Option<i32>, cases: &mut Vec<Case>, found: 
         c.outcome != Outcome::Failed || found.iter().any(|f| f.same_test(c)) || !ran_there(c)
     });
     merge_rerun(cases, found);
+}
+
+/// Maven 출력 끝의 모듈별 결과(Reactor Summary) 줄(`[INFO] common ........ SUCCESS [  1.2 s]`).
+static MAVEN_REACTOR_LINE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^\[INFO\] (.+?) \.*\s*(SUCCESS|FAILURE|SKIPPED)(?:\s|$)").unwrap()
+});
+
+/// Maven 출력의 모듈별 결과에서 빌드에 성공한 모듈(`-fae`로 실패한 모듈과 그것에 기대 건너뛴 모듈은 뺀다).
+/// 이름은 pom의 `<name>`(없으면 `<artifactId>`)이고, 모듈들의 판이 다르면 뒤에 판이 붙는다. 결과가 없으면
+/// (`-q`, 모듈 하나) None.
+pub fn maven_built_modules(output: &str) -> Option<Vec<String>> {
+    static ANSI: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\x1b\[[0-9;]*m").unwrap());
+    let output = ANSI.replace_all(output, "");
+    let summary = output.rfind("Reactor Summary")?;
+    Some(
+        output[summary..]
+            .lines()
+            .skip(1)
+            .filter_map(|line| MAVEN_REACTOR_LINE.captures(line.trim_end()))
+            .filter(|c| &c[2] == "SUCCESS")
+            .map(|c| c[1].trim().to_owned())
+            .collect(),
+    )
 }
 
 /// Go 패키지 자체가 실패했을 때(빌드 실패 등)의 이름.
@@ -522,7 +569,7 @@ pub fn enable_tests(pom: &str) -> Option<String> {
 }
 
 /// 보고서 파일 하나(JUnit XML)를 읽는다. Maven Failsafe의 보고서(`failsafe-reports`)면 통합 테스트로 적고,
-/// Gradle의 보고서(`<프로젝트>/build/test-results/<작업>`)면 그것을 돌린 작업을 적는다.
+/// Gradle의 보고서(`<프로젝트>/build/test-results/<작업>`)면 그것을 돌린 작업을, Maven의 보고서면 모듈을 적는다.
 pub fn read_report(path: &Path) -> Result<Vec<Case>, String> {
     let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
     let mut cases = parse_junit(&String::from_utf8_lossy(&bytes))?;
@@ -530,12 +577,44 @@ pub fn read_report(path: &Path) -> Result<Vec<Case>, String> {
         .parent()
         .and_then(Path::file_name)
         .is_some_and(|dir| dir == "failsafe-reports");
-    let task = gradle_task(path);
+    let task = gradle_task(path).or_else(|| maven_module(path));
     for case in &mut cases {
         case.integration = integration;
         case.task.clone_from(&task);
     }
     Ok(cases)
+}
+
+/// Maven 보고서(`<모듈>/target/surefire-reports/TEST-….xml`, `failsafe-reports`)를 남긴 모듈의 이름: 그 pom의
+/// `<name>`, 없으면 `<artifactId>`(Maven이 모듈별 결과에 적는 이름. `<name>`은 물려받지 않는다). 식(`${…}`)을
+/// 쓴 `<name>`은 풀지 않고 `<artifactId>`로 갈음한다(그 모듈은 결과와 맞지 않아 실패를 남긴다).
+fn maven_module(path: &Path) -> Option<String> {
+    let reports = path.parent()?;
+    if !matches!(
+        reports.file_name()?.to_str()?,
+        "surefire-reports" | "failsafe-reports"
+    ) {
+        return None;
+    }
+    let target = reports.parent()?;
+    if target.file_name()? != "target" {
+        return None;
+    }
+    let pom = std::fs::read_to_string(target.parent()?.join("pom.xml")).ok()?;
+    let document = roxmltree::Document::parse(&pom).ok()?;
+    let child = |tag: &str| {
+        document
+            .root_element()
+            .children()
+            .find(|c| c.has_tag_name(tag))
+            .and_then(|c| c.text())
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+    };
+    child("name")
+        .filter(|name| !name.contains("${"))
+        .or_else(|| child("artifactId"))
+        .map(str::to_owned)
 }
 
 /// Gradle 보고서(`<프로젝트>/build/test-results/<작업>/TEST-….xml`)를 남긴 작업의 경로(`:app:test`, 루트
