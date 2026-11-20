@@ -19,6 +19,9 @@ concurrency:
 # 로컬에서 재현되지 않는 OS별 실패를 로그만으로 찾을 수 있게 패닉 위치를 남긴다.
 env:
   RUST_BACKTRACE: 1
+  # 시험 빌드의 디버그 정보를 줄 번호만 남긴다(패닉 위치는 그대로 보인다). Rust 캐시가 작업마다 1.1~1.6GB여서
+  # 저장소 캐시 한도(10GB)를 거의 채웠다(2026-11-20).
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
   # Maven Central에서 받다가 러너의 네트워크가 잠깐 끊기면 Maven·Gradle 시험이 한꺼번에 깨졌다(2026-11-18,
   # full ubuntu의 "Could not transfer artifact"). 모든 mvn(시험이 띄우는 것 포함, Maven 3.9 이상)이 읽는
   # MAVEN_ARGS로 받기를 더 여러 번 다시 한다. 이름은 resolver 판마다 다르다(1.x connector, 2.x transport).
@@ -88,7 +91,12 @@ jobs:
           components: rustfmt, clippy, rust-analyzer
           # 예제 WASM 플러그인 시험(examples/plugins)
           targets: wasm32-unknown-unknown
-      - uses: Swatinem/rust-cache@v2
+      # 기본 가지(main)의 실행만 저장하고 다른 가지는 main의 것을 읽는다. 가지마다 저장하면 의존성을 바꾼
+      # PR 하나로 작업마다 1GB 넘게 쌓였다.
+      - &rust-cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Linux 빌드 의존성 설치
         # fonts-nanum: 러너에 한글 폰트가 없어 UI 테스트가 한글 글리프 누락으로 실패하는 것을 막는다.
         run: |
@@ -185,7 +193,7 @@ jobs:
         with:
           components: clippy, rust-analyzer
           targets: wasm32-unknown-unknown
-      - uses: Swatinem/rust-cache@v2
+      - *rust-cache
       - name: Linux 빌드 의존성 설치
         if: runner.os == 'Linux'
         run: |
@@ -269,5 +277,5 @@ jobs:
         with:
           components: llvm-tools-preview
       - uses: taiki-e/install-action@cargo-llvm-cov
-      - uses: Swatinem/rust-cache@v2
+      - *rust-cache
       - run: cargo llvm-cov -p ferrite-core --fail-under-lines 70 --summary-only

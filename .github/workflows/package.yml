@@ -54,7 +54,11 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
+      # main의 실행만 저장한다(ci.yml과 같은 까닭: 저장소 캐시 한도 10GB). 이 워크플로는 main에서 저절로 돌지
+      # 않으므로 main에서 손으로 돌린 실행이 캐시를 남기고, 다른 실행(태그·PR)은 그것을 읽는다.
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Linux 빌드 의존성 설치
         if: runner.os == 'Linux'
         run: |
