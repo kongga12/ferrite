@@ -34,7 +34,10 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
+      # main의 실행만 저장한다(ci.yml과 같은 까닭: 저장소 캐시 한도 10GB).
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       # debugpy는 이 Python으로 가상환경을 만들고, 디버그 대상도 이 Python으로 띄운다.
       - uses: actions/setup-python@v7
         with:
