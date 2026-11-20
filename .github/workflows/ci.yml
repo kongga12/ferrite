@@ -133,10 +133,21 @@ jobs:
       - &jdk8
         name: JDK 8 받기(러너에 없으면)
         if: runner.os == 'Linux' && env.JAVA_HOME_8_X64 == ''
+        # api.adoptium.net이 압축 파일이 아닌 응답을 줄 때가 있다(2026-11-20 "not in gzip format"). 파일로 받아
+        # 풀어 보고, 안 되면 받은 것의 앞부분을 남기고 기다렸다 세 번까지 다시 한다.
         run: |
-          mkdir -p "$RUNNER_TEMP/jdk8"
-          curl -fsSL https://api.adoptium.net/v3/binary/latest/8/ga/linux/x64/jdk/hotspot/normal/eclipse \
-            | tar -xz -C "$RUNNER_TEMP/jdk8" --strip-components=1
+          archive="$RUNNER_TEMP/jdk8.tar.gz"
+          for try in 1 2 3; do
+            rm -rf "$RUNNER_TEMP/jdk8" && mkdir -p "$RUNNER_TEMP/jdk8"
+            if curl -fsSL -o "$archive" https://api.adoptium.net/v3/binary/latest/8/ga/linux/x64/jdk/hotspot/normal/eclipse \
+              && tar -xzf "$archive" -C "$RUNNER_TEMP/jdk8" --strip-components=1; then
+              break
+            fi
+            echo "::warning::JDK 8 받기 실패($try/3): $(head -c 120 "$archive" 2>/dev/null | tr -cd '[:print:]')"
+            [ "$try" = 3 ] && exit 1
+            sleep 30
+          done
+          rm -f "$archive"
           "$RUNNER_TEMP/jdk8/bin/javac" -version
           echo "JAVA_HOME_8_X64=$RUNNER_TEMP/jdk8" >> "$GITHUB_ENV"
       - run: cargo fmt --all --check
@@ -200,11 +211,20 @@ jobs:
         with:
           go-version: stable
           cache: false
-      # 로컬에서 확인한 판에 맞춘다. 캐시는 쓰지 않는다(시험 하나라 받는 것이 적다).
+      # 시험이 받는 Maven·Gradle 의존성을 캐시한다. Maven Central이 잠깐 답하지 않거나 "찾을 수 없음"으로 답해
+      # Maven·Gradle 시험이 한꺼번에 깨졌다(2026-11-19 #121, 2026-11-20 #127, 받기 재시도로도 막지 못함).
+      # 판은 시험 파일에 적혀 있어 그 파일로 키를 만든다. 바뀌면 앞 캐시에서 이어 받는다.
+      - name: Maven 의존성 캐시
+        uses: actions/cache@v5
+        with:
+          path: ~/.m2/repository
+          key: full-m2-${{ runner.os }}-${{ hashFiles('crates/ferrite-core/tests/test_tools.rs') }}
+          restore-keys: full-m2-${{ runner.os }}-
+      # 로컬에서 확인한 판에 맞춘다. Gradle 홈의 캐시는 setup-gradle이 맡는다(기본 가지 main의 실행만 저장하고
+      # 다른 가지는 읽기만 한다).
       - uses: gradle/actions/setup-gradle@v6
         with:
           gradle-version: '9.2.0'
-          cache-disabled: true
           add-job-summary: never
       # Gradle도 받기가 잠깐 끊겨도 더 여러 번, 더 길게 기다리며 다시 한다(기본 3번, 125ms부터).
       # 사용자 홈의 gradle.properties는 시험이 만드는 모든 빌드가 읽는다(Gradle 홈을 따로 준 시험은 빼고).
