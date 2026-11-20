@@ -914,12 +914,144 @@ fn maven_실패_둘_가운데_하나의_이름을_바꾸면_실패만_다시가_
         outcomes(&found),
         [("subtractsWrong".to_owned(), Outcome::Failed)]
     );
-    test_report::apply_rerun(Tool::Maven, Some(0), &mut cases, found);
+    test_report::apply_rerun(Tool::Maven, Some(0), "", &mut cases, found);
     assert_eq!(
         outcomes(&cases),
         [
             ("adds".to_owned(), Outcome::Passed),
             ("subtractsWrong".to_owned(), Outcome::Failed),
+        ]
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+#[ignore = "Maven으로 다중 모듈의 JUnit 5 테스트를 돌린다(의존성을 받는다). Java 17 이상과 mvn이 필요하다"]
+fn maven_다중_모듈에서_한_모듈의_컴파일만_깨지면_돈_모듈의_지운_실패만_뺀다() {
+    if !require("mvn -v") {
+        return;
+    }
+    let root = temp_dir("maven-module-broken");
+    let pom = |body: &str| {
+        format!(
+            "<project xmlns=\"http://maven.apache.org/POM/4.0.0\">\n  <modelVersion>4.0.0</modelVersion>\n{body}</project>\n"
+        )
+    };
+    std::fs::write(
+        root.join("pom.xml"),
+        pom(r#"  <groupId>com.example</groupId>
+  <artifactId>board-parent</artifactId>
+  <version>1.0</version>
+  <packaging>pom</packaging>
+  <modules>
+    <module>common</module>
+    <module>batch</module>
+  </modules>
+  <properties>
+    <maven.compiler.release>17</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+  </properties>
+  <dependencies>
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <version>5.12.2</version>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+  <build>
+    <plugins>
+      <plugin>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <version>3.5.4</version>
+      </plugin>
+    </plugins>
+  </build>
+"#),
+    )
+    .unwrap();
+    // common은 `<name>`을 두어 모듈별 결과에 그 이름이 나온다. batch는 `<artifactId>`로 나온다.
+    let module = |name: &str, extra: &str, class: &str, tests: &str| {
+        let dir = root.join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("pom.xml"),
+            pom(&format!("  <parent>\n    <groupId>com.example</groupId>\n    <artifactId>board-parent</artifactId>\n    <version>1.0</version>\n  </parent>\n  <artifactId>{name}</artifactId>\n{extra}")),
+        )
+        .unwrap();
+        let java = dir.join("src/test/java/com/example").join(name);
+        std::fs::create_dir_all(&java).unwrap();
+        std::fs::write(
+            java.join(format!("{class}.java")),
+            format!("package com.example.{name};\n\nimport static org.junit.jupiter.api.Assertions.assertEquals;\n\nimport org.junit.jupiter.api.Test;\n\nclass {class} {{\n{tests}}}\n"),
+        )
+        .unwrap();
+    };
+    let text = |wrong: &str| {
+        format!(
+            "    @Test\n    void trims() {{\n        assertEquals(\"a\", \" a \".trim());\n    }}\n\n    @Test\n    void {wrong}() {{\n        assertEquals(\"가나\", \"가\" + \"다\", \"잇기\");\n    }}\n"
+        )
+    };
+    let common_name = "  <name>Board Common</name>\n";
+    module("common", common_name, "TextTest", &text("joinsWrong"));
+    module(
+        "batch",
+        "",
+        "JobTest",
+        "    @Test\n    void countsWrong() {\n        assertEquals(3, 1 + 1, \"세기\");\n    }\n",
+    );
+    // 앱의 기본 명령처럼 `-q` 없이 돌려 끝에 모듈별 결과가 나온다.
+    let report = root.join("reports");
+    let command = "mvn -B test";
+    let since = SystemTime::now();
+    run(
+        &root,
+        &test_report::with_report(Tool::Maven, command, &report),
+    );
+    let mut cases = junit(Tool::Maven, &root, &report, since);
+    let module_of = |cases: &[Case], name: &str| {
+        cases
+            .iter()
+            .find(|c| c.name == name)
+            .and_then(|c| c.task.clone())
+    };
+    assert_eq!(
+        module_of(&cases, "joinsWrong").as_deref(),
+        Some("Board Common")
+    );
+    assert_eq!(module_of(&cases, "countsWrong").as_deref(), Some("batch"));
+
+    // common의 실패는 이름을 바꿔 고쳤고, batch는 테스트 컴파일이 깨졌다. 실패만 다시는 0이 아니게 끝나고
+    // 어느 모듈도 보고서를 새로 쓰지 않는다.
+    module("common", common_name, "TextTest", &text("joinsFixed"));
+    module(
+        "batch",
+        "",
+        "JobTest",
+        "    @Test\n    void countsWrong() {\n        깨진 줄\n    }\n",
+    );
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    let since = SystemTime::now();
+    let line = test_report::rerun(Tool::Maven, command, &failed(&cases)).unwrap();
+    let (ok, output) = run(
+        &root,
+        &test_report::with_report(Tool::Maven, &line, &report),
+    );
+    assert!(!ok, "batch의 컴파일이 깨져 실패한다\n{output}");
+    let built = test_report::maven_built_modules(&output).expect("모듈별 결과");
+    assert!(built.iter().any(|m| m == "Board Common"), "{built:?}");
+    assert!(!built.iter().any(|m| m == "batch"), "{built:?}");
+    let found = test_report::report_files(Tool::Maven, &root, &report, since)
+        .iter()
+        .flat_map(|f| test_report::read_report(f).unwrap())
+        .collect();
+    test_report::apply_rerun(Tool::Maven, Some(1), &output, &mut cases, found);
+    // 돈 common의 지운 실패는 빼고, 돌지 못한 batch의 실패는 남긴다.
+    assert_eq!(
+        outcomes(&cases),
+        [
+            ("countsWrong".to_owned(), Outcome::Failed),
+            ("trims".to_owned(), Outcome::Passed),
         ]
     );
     let _ = std::fs::remove_dir_all(&root);
@@ -2005,7 +2137,7 @@ fn gradle_실패_둘_가운데_하나의_이름을_바꾸면_실패만_다시가
         outcomes(&found),
         [("subtractsWrong()".to_owned(), Outcome::Failed)]
     );
-    test_report::apply_rerun(Tool::Gradle, Some(1), &mut cases, found);
+    test_report::apply_rerun(Tool::Gradle, Some(1), "", &mut cases, found);
     assert_eq!(
         outcomes(&cases),
         [
@@ -2623,7 +2755,7 @@ fn pytest_junitxml_보고서와_실패만_다시() {
     );
     // 테스트 창은 지난 실패(`test_fail`)를 빼고 이 결과를 넣는다.
     let mut shown = cases.clone();
-    test_report::apply_rerun(Tool::Pytest, Some(0), &mut shown, renamed);
+    test_report::apply_rerun(Tool::Pytest, Some(0), "", &mut shown, renamed);
     assert_eq!(
         outcomes(&shown),
         [
@@ -2765,7 +2897,7 @@ fn ctest_output_junit과_실패만_다시() {
         "{output}"
     );
     let mut shown = cases.clone();
-    test_report::apply_rerun(Tool::Ctest, Some(0), &mut shown, renamed);
+    test_report::apply_rerun(Tool::Ctest, Some(0), "", &mut shown, renamed);
     assert_eq!(
         outcomes(&shown),
         [
