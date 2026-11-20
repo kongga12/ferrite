@@ -3270,31 +3270,40 @@ mod tests {
                 .chain(again.map(Some));
             for (index, role) in roles.enumerate() {
                 let (stream, _) = listener.accept().unwrap();
+                // 세션 스레드와 아래 신호 스레드가 같은 연결에 쓴다. `write_message`는 머리글과 본문을 나눠
+                // 쓰므로 잠가 쓰지 않으면 두 메시지가 섞여 새 세션 요청이 사라진다(2026-11-20 CI에서 그렇게 깨졌다).
+                let writer =
+                    std::sync::Arc::new(std::sync::Mutex::new(stream.try_clone().unwrap()));
                 // 마지막 화면을 품은 세션: 신호가 오면 그 화면의 새 세션을 요청한다.
                 if index + 1 == last
                     && let Some(signal) = signal.take()
                 {
-                    let mut writer = stream.try_clone().unwrap();
+                    let writer = writer.clone();
                     thread::spawn(move || {
                         if signal.recv().is_ok() {
                             let request = json!({ "seq": 1000, "type": "request",
                                 "command": "startDebugging",
                                 "arguments": { "request": "launch", "configuration": {} } });
-                            let _ =
-                                write_message(&mut writer, &serde_json::to_vec(&request).unwrap());
+                            let _ = write_message(
+                                &mut *writer.lock().unwrap(),
+                                &serde_json::to_vec(&request).unwrap(),
+                            );
                         }
                     });
                 }
                 thread::spawn(move || {
                     let (blocks, cdp, stack) = role.unwrap_or_default();
                     let mut reader = std::io::BufReader::new(&stream);
-                    let mut writer = &stream;
                     let mut seq = 0;
                     let mut send = |message: Value| {
                         seq += 1;
                         let mut message = message;
                         message["seq"] = json!(seq);
-                        write_message(&mut writer, &serde_json::to_vec(&message).unwrap()).unwrap();
+                        write_message(
+                            &mut *writer.lock().unwrap(),
+                            &serde_json::to_vec(&message).unwrap(),
+                        )
+                        .unwrap();
                     };
                     while let Ok(Some(body)) = read_message(&mut reader) {
                         let request: Value = serde_json::from_slice(&body).unwrap();
