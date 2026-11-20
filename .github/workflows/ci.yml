@@ -112,11 +112,13 @@ jobs:
       # jar만 받는다: ojdbc6 POM의 의존(xdb 등)은 Maven Central에 없다.
       # maven.cubrid.org가 가끔 응답하지 않는다(2026-11-19 "Connect to maven.cubrid.org:443 … Read timed out"으로
       # 이 작업이 깨졌다). 받은 드라이버를 판으로 캐시해 두고, 캐시가 없을 때만 받되 몇 번 기다렸다 다시 해 본다.
+      # 이 파일의 캐시는 모두 읽기와 저장을 나눠 기본 가지(main)의 실행만 저장한다. 가지마다 저장하면 저장소 캐시
+      # 한도(10GB)를 채운다(2026-11-20, 머지된 가지 하나에 Maven 캐시만 1.8GB). 다른 가지는 main의 것을 읽는다.
       - name: JDBC 시험용 드라이버 캐시
         id: jdbc-drivers
-        uses: actions/cache@v5
+        uses: actions/cache/restore@v5
         with:
-          path: |
+          path: &jdbc-paths |
             ~/.m2/repository/com/oracle/database/jdbc/ojdbc6/11.2.0.4
             ~/.m2/repository/com/oracle/database/nls/orai18n/11.2.0.4
             ~/.m2/repository/cubrid/cubrid-jdbc/11.2.0.0035
@@ -135,6 +137,12 @@ jobs:
           get -Dartifact=com.oracle.database.jdbc:ojdbc6:11.2.0.4
           get -Dartifact=com.oracle.database.nls:orai18n:11.2.0.4
           get -Dartifact=cubrid:cubrid-jdbc:11.2.0.0035 -DremoteRepositories=https://maven.cubrid.org
+      - name: JDBC 시험용 드라이버 캐시 저장
+        if: github.ref == 'refs/heads/main' && steps.jdbc-drivers.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: *jdbc-paths
+          key: ${{ steps.jdbc-drivers.outputs.cache-primary-key }}
       # JDBC 사이드카를 JDK 8로도 컴파일하는 시험은 JDK 8을 `JAVA_HOME_8_X64`에서 찾는다. ubuntu-latest가
       # ubuntu-26.04 이미지로 바뀌며 JDK 8이 빠졌다(2026-11-16). 없을 때만 Temurin 8을 받아 그 변수만 알린다
       # (`JAVA_HOME`·`PATH`는 그대로 두어 다른 시험의 Java를 바꾸지 않는다).
@@ -144,7 +152,7 @@ jobs:
         name: JDK 8 캐시(러너에 없으면)
         id: jdk8
         if: runner.os == 'Linux' && env.JAVA_HOME_8_X64 == ''
-        uses: actions/cache@v5
+        uses: actions/cache/restore@v5
         with:
           path: ${{ runner.temp }}/jdk8
           key: jdk8-temurin-8u514b01-linux-x64
@@ -168,6 +176,14 @@ jobs:
           rm -f "$archive"
           "$RUNNER_TEMP/jdk8/bin/javac" -version
           echo "JAVA_HOME_8_X64=$RUNNER_TEMP/jdk8" >> "$GITHUB_ENV"
+      # 읽기 단계를 건너뛰었으면(러너에 JDK 8이 있음) 저장하지 않는다.
+      - &jdk8-save
+        name: JDK 8 캐시 저장
+        if: github.ref == 'refs/heads/main' && steps.jdk8.conclusion == 'success' && steps.jdk8.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: ${{ runner.temp }}/jdk8
+          key: ${{ steps.jdk8.outputs.cache-primary-key }}
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
@@ -211,6 +227,7 @@ jobs:
         run: brew install postgresql@17
       - *jdk8-cache
       - *jdk8
+      - *jdk8-save
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
       # npm으로 설치하는 웹 언어 서버: TypeScript 7 실행 파일과 Node로 도는 HTML·CSS·JSON 서버가 3개 OS에서
@@ -234,7 +251,8 @@ jobs:
       # Maven·Gradle 시험이 한꺼번에 깨졌다(2026-11-19 #121, 2026-11-20 #127, 받기 재시도로도 막지 못함).
       # 판은 시험 파일에 적혀 있어 그 파일로 키를 만든다. 바뀌면 앞 캐시에서 이어 받는다.
       - name: Maven 의존성 캐시
-        uses: actions/cache@v5
+        id: m2
+        uses: actions/cache/restore@v5
         with:
           path: ~/.m2/repository
           key: full-m2-${{ runner.os }}-${{ hashFiles('crates/ferrite-core/tests/test_tools.rs') }}
@@ -257,6 +275,12 @@ jobs:
           cat ~/.gradle/gradle.properties
       - name: 테스트 러너·정적 분석 시험(Maven·Gradle·pytest·Go·CTest·SpotBugs·PMD·Semgrep)
         run: cargo test -p ferrite-core --test test_tools -- --ignored --nocapture --test-threads=1
+      - name: Maven 의존성 캐시 저장
+        if: github.ref == 'refs/heads/main' && steps.m2.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: ~/.m2/repository
+          key: ${{ steps.m2.outputs.cache-primary-key }}
       - run: cargo build --release
       - name: 실행 파일 업로드 (OS별 수동 검증용)
         uses: actions/upload-artifact@v4
