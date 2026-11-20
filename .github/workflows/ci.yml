@@ -102,12 +102,31 @@ jobs:
         run: python -m pip install --disable-pip-version-check debugpy==1.8.22 ipykernel==7.4.0 pandas==3.1.0
       # 시험은 [받기]와 같은 판을 로컬 Maven 저장소에서 찾는다(Maven이 저장소의 체크섬을 확인한다).
       # jar만 받는다: ojdbc6 POM의 의존(xdb 등)은 Maven Central에 없다.
+      # maven.cubrid.org가 가끔 응답하지 않는다(2026-11-19 "Connect to maven.cubrid.org:443 … Read timed out"으로
+      # 이 작업이 깨졌다). 받은 드라이버를 판으로 캐시해 두고, 캐시가 없을 때만 받되 몇 번 기다렸다 다시 해 본다.
+      - name: JDBC 시험용 드라이버 캐시
+        id: jdbc-drivers
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.m2/repository/com/oracle/database/jdbc/ojdbc6/11.2.0.4
+            ~/.m2/repository/com/oracle/database/nls/orai18n/11.2.0.4
+            ~/.m2/repository/cubrid/cubrid-jdbc/11.2.0.0035
+          key: jdbc-drivers-ojdbc6-11.2.0.4-orai18n-11.2.0.4-cubrid-11.2.0.0035
       - name: JDBC 시험용 드라이버 받기
+        if: steps.jdbc-drivers.outputs.cache-hit != 'true'
         run: |
-          mvn -B -q dependency:get -Dtransitive=false -Dartifact=com.oracle.database.jdbc:ojdbc6:11.2.0.4
-          mvn -B -q dependency:get -Dtransitive=false -Dartifact=com.oracle.database.nls:orai18n:11.2.0.4
-          mvn -B -q dependency:get -Dtransitive=false -Dartifact=cubrid:cubrid-jdbc:11.2.0.0035 \
-            -DremoteRepositories=https://maven.cubrid.org
+          get() {
+            for try in 1 2 3; do
+              mvn -B -q dependency:get -Dtransitive=false "$@" && return 0
+              echo "::warning::드라이버 받기 실패($try/3): $*"
+              [ "$try" = 3 ] || sleep 30
+            done
+            return 1
+          }
+          get -Dartifact=com.oracle.database.jdbc:ojdbc6:11.2.0.4
+          get -Dartifact=com.oracle.database.nls:orai18n:11.2.0.4
+          get -Dartifact=cubrid:cubrid-jdbc:11.2.0.0035 -DremoteRepositories=https://maven.cubrid.org
       # JDBC 사이드카를 JDK 8로도 컴파일하는 시험은 JDK 8을 `JAVA_HOME_8_X64`에서 찾는다. ubuntu-latest가
       # ubuntu-26.04 이미지로 바뀌며 JDK 8이 빠졌다(2026-11-16). 없을 때만 Temurin 8을 받아 그 변수만 알린다
       # (`JAVA_HOME`·`PATH`는 그대로 두어 다른 시험의 Java를 바꾸지 않는다).
