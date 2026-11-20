@@ -130,16 +130,26 @@ jobs:
       # JDBC 사이드카를 JDK 8로도 컴파일하는 시험은 JDK 8을 `JAVA_HOME_8_X64`에서 찾는다. ubuntu-latest가
       # ubuntu-26.04 이미지로 바뀌며 JDK 8이 빠졌다(2026-11-16). 없을 때만 Temurin 8을 받아 그 변수만 알린다
       # (`JAVA_HOME`·`PATH`는 그대로 두어 다른 시험의 Java를 바꾸지 않는다).
+      # 받는 파일(GitHub 릴리스)이 CI에서 압축 파일 대신 저장소의 XML 목록(`<BlockList>`)을 줄 때가 있다
+      # (2026-11-20, 30초씩 세 번 다시 해도 같았다). 판을 고정해 푼 것을 캐시하고 캐시가 없을 때만 받는다.
+      - &jdk8-cache
+        name: JDK 8 캐시(러너에 없으면)
+        id: jdk8
+        if: runner.os == 'Linux' && env.JAVA_HOME_8_X64 == ''
+        uses: actions/cache@v5
+        with:
+          path: ${{ runner.temp }}/jdk8
+          key: jdk8-temurin-8u514b01-linux-x64
       - &jdk8
         name: JDK 8 받기(러너에 없으면)
         if: runner.os == 'Linux' && env.JAVA_HOME_8_X64 == ''
-        # api.adoptium.net이 압축 파일이 아닌 응답을 줄 때가 있다(2026-11-20 "not in gzip format"). 파일로 받아
-        # 풀어 보고, 안 되면 받은 것의 앞부분을 남기고 기다렸다 세 번까지 다시 한다.
+        # 받은 것이 압축 파일이 아니면 앞부분을 경고로 남기고 기다렸다 세 번까지 다시 한다.
         run: |
           archive="$RUNNER_TEMP/jdk8.tar.gz"
           for try in 1 2 3; do
+            [ "${{ steps.jdk8.outputs.cache-hit }}" = true ] && break
             rm -rf "$RUNNER_TEMP/jdk8" && mkdir -p "$RUNNER_TEMP/jdk8"
-            if curl -fsSL -o "$archive" https://api.adoptium.net/v3/binary/latest/8/ga/linux/x64/jdk/hotspot/normal/eclipse \
+            if curl -fsSL -o "$archive" https://github.com/adoptium/temurin8-binaries/releases/download/jdk8u514-b01/OpenJDK8U-jdk_x64_linux_hotspot_8u514b01.tar.gz \
               && tar -xzf "$archive" -C "$RUNNER_TEMP/jdk8" --strip-components=1; then
               break
             fi
@@ -191,6 +201,7 @@ jobs:
       - name: PostgreSQL 설치(macOS)
         if: runner.os == 'macOS'
         run: brew install postgresql@17
+      - *jdk8-cache
       - *jdk8
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
