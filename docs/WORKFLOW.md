@@ -2421,7 +2421,7 @@
   - 까닭: 위 "CI의 JDK 8 캐시"를 머지한 뒤 저장소 캐시가 10GB 한도 중 약 9GB였다. Rust 캐시(`Swatinem/rust-cache`)가 main에만 5개 5.8GB(작업마다 0.2~1.6GB)였고, 머지된 가지에도 1.6GB가 남아 있었다. 한도를 넘으면 GitHub이 오래 쓰지 않은 캐시부터 지워 Maven·Gradle·JDK 8 캐시가 밀려날 수 있다.
   - 고침
     - 모든 워크플로(`ci`·`adapters`·`package`·`servers`·`templates`)의 Rust 캐시를 기본 가지(main)의 실행만 저장한다(`save-if`). 다른 가지는 main의 것을 읽는다. `package`·`templates`는 main에서 저절로 돌지 않아 main에서 손으로 돌린 실행만 캐시를 남긴다.
-    - `ci.yml`의 빌드는 디버그 정보를 줄 번호만 남긴다(`CARGO_PROFILE_DEV_DEBUG=line-tables-only`, 시험 프로필도 따른다). 패닉 위치는 그대로 보인다. `adapters.yml`은 codelldb 시험이 디버그 정보를 써서 그대로 둔다.
+    - `ci.yml`의 빌드는 디버그 정보를 줄 번호만 남긴다(`CARGO_PROFILE_DEV_DEBUG=line-tables-only`, 시험 프로필도 따른다). 패닉 위치는 그대로 보인다. `adapters.yml`은 codelldb 시험이 디버그 정보를 써서 그대로 둔다(틀린 판단이었다. 그 시험은 예제를 `rustc -g`로 따로 빌드해 이 변수를 받지 않는다. 뒤에 백로그 "주간 워크플로의 Rust 캐시"(2026-11-23)에서 맞췄다).
   - 검증: PR의 CI가 이 설정으로 모두 통과하고 Rust 캐시를 저장하지 않았다(`save-if: false`). 머지 뒤 main에서 전체 CI를 손으로 돌려 새 키의 크기를 앞 키와 견주었다: full Linux 1602→1446MB, full Windows 1576→1418MB, full macOS 1305→1145MB, linux 1071→927MB, coverage 244→227MB. 디버그 정보 줄이기는 10%쯤만 줄였다(의존성의 rlib·메타데이터가 대부분이다). 큰 몫은 가지마다 저장하지 않는 쪽이다.
   - 확인하지 못한 것: 의존성을 바꾼 PR은 main에 맞는 캐시가 없어 앞 캐시에서 이어 빌드하므로 조금 느려진다(머지 뒤 main이 새로 저장한다). 앞 키의 캐시는 7일 쓰이지 않으면 GitHub이 지운다(손으로 지우지 않았다).
 
@@ -2441,6 +2441,12 @@
     - 같은 클래스가 두 모듈에 있으면 이제 따로 친다(같은 테스트인지에 모듈이 든다).
   - 검증: 단위 시험(모듈 성공·실패·건너뜀·모르는 모듈·`-q`·색·판이 붙은 이름, 보고서의 모듈 이름: `<name>`·`<artifactId>`·식). 실제 Maven 3.10(`test_tools`, 로컬 Windows): 두 모듈 가운데 `<name>`을 둔 common의 실패는 이름을 바꿔 고치고 batch의 테스트 컴파일을 깨뜨린 뒤 실패만 다시를 돌리니, 0이 아니게 끝나고 출력의 모듈별 결과에 common만 성공으로 나와 common의 지운 실패는 빠지고 batch의 실패는 남았다. 다른 Maven 실제 도구 시험도 모두 통과(TestNG 셋은 로컬 기본 Java가 8이라 JDK 21로 돌렸다).
   - 확인하지 못한 것: 실제 앱 화면(앱은 같은 `apply_rerun`에 테스트 창의 출력을 준다), 한글 `<name>`(출력 문자셋이 OS·JDK마다 달라 맞지 않으면 그 모듈의 실패를 남긴다), Maven 4의 출력.
+
+- [x] 주간 워크플로의 Rust 캐시(2026-11-23) — 작음(CI만)
+  - 까닭: 위 캐시 정리 뒤 처음 돈 주간 실행(2026-11-23 월요일)에서 `servers.yml`이 main에 Rust 캐시를 OS마다 0.8~0.9GB(합 2.6GB) 새로 저장해 main의 캐시가 51개 10.3GB로 한도(10GB)를 넘었다. 일주일에 한 번 도는 캐시는 7일 만료에 걸리고 한도를 넘으면 오래 안 쓴 것부터 지워져 거의 다시 쓰이지 않는다. `adapters.yml`도 같다.
+  - 고침: 두 워크플로가 `ci.yml` `full` 작업의 Rust 캐시를 읽기만 한다(`shared-key: full`, `save-if: false`). 그 작업이 작업 공간 전체 시험을 빌드해 두 워크플로가 쓰는 의존성을 모두 담는다. 캐시 키에 드는 환경 변수(`CARGO`·`RUST`로 시작)를 `ci.yml`과 맞춘다(`RUST_BACKTRACE`, `CARGO_PROFILE_DEV_DEBUG`). codelldb 시험은 예제를 `rustc -g`로 따로 빌드해 `CARGO_PROFILE_DEV_DEBUG`를 받지 않는다.
+  - 검증: 이 PR의 `adapters`(워크플로 파일을 바꿔 PR에서 돈다)와 가지에서 손으로 돌린 `servers`가 3개 OS에서 `full`의 캐시를 읽고 저장하지 않는지 기록으로 본다.
+  - 확인하지 못한 것: main에 이미 저장된 `servers`의 Rust 캐시(2.6GB)는 7일 쓰이지 않으면 GitHub이 지운다(손으로 지우지 않았다). `ci.yml`의 그 환경 변수를 바꾸면 두 워크플로도 함께 바꿔야 한다(주석에 적었다).
 
 - 살폈지만 넣지 않은 것: 임베디드(MCU 플래시·시리얼 모니터·장비 설정 파일), 프레임워크별 지원(React·Vue·Angular 등, JS·TS 언어 서버로 기본은 된다), 린터 개별 연동(언어 서버나 저장 시 작업으로 된다), 원격 개발·컨테이너·SFTP 배포, 로컬 AI 완성 모델, 계정 기반 설정 동기화. egov 개발과 거리가 멀거나 크기에 비해 쓰임이 적다.
 
