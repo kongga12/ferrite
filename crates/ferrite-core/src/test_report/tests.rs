@@ -449,9 +449,37 @@ fn gradle_보고서의_작업을_읽고_실패한_작업마다_다시_돌린다(
             .all(|c| c.task.as_deref() == Some(":app:integrationTest"))
     );
     assert_eq!(top[0].task.as_deref(), Some(":test"));
-    // Maven의 보고서나 다른 폴더의 것은 작업이 없다.
+    // Maven의 보고서는 그 모듈의 pom이 있으면 모듈 이름(`<name>`, 없거나 식이면 `<artifactId>`)을 적는다.
     let maven = write(&root.join("target/surefire-reports"), "MavenTest", &["x"]);
     assert_eq!(maven[0].task, None);
+    let module = root.join("web");
+    let pom = |name: &str| {
+        std::fs::write(
+            module.join("pom.xml"),
+            format!(
+                "<project xmlns=\"http://maven.apache.org/POM/4.0.0\">
+  <parent><artifactId>board-parent</artifactId><name>부모</name></parent>
+  <artifactId>web</artifactId>
+{name}</project>
+"
+            ),
+        )
+        .unwrap();
+    };
+    let read = |dir: &str| {
+        write(&module.join("target").join(dir), "WebTest", &["x"])[0]
+            .task
+            .clone()
+    };
+    std::fs::create_dir_all(&module).unwrap();
+    pom("");
+    assert_eq!(read("surefire-reports").as_deref(), Some("web"));
+    pom("  <name>게시판 화면</name>
+");
+    assert_eq!(read("failsafe-reports").as_deref(), Some("게시판 화면"));
+    pom("  <name>${project.artifactId}</name>
+");
+    assert_eq!(read("surefire-reports").as_deref(), Some("web"));
     std::fs::remove_dir_all(&root).unwrap();
 
     // `check`는 `--tests`를 받지 못한다. 작업 이름과 옛 `--tests`는 빼고 옵션은 둔 채 작업마다 붙인다.
@@ -864,11 +892,12 @@ fn 실패만_다시가_다시_돌리지_않은_지난_실패는_지운_것으로
             case("still", Outcome::Failed, task),
         ]
     };
-    let apply = |tool, code, task, found: Vec<Case>| {
+    let apply_out = |tool, code, output: &str, task, found: Vec<Case>| {
         let mut cases = before(task);
-        apply_rerun(tool, code, &mut cases, found);
+        apply_rerun(tool, code, output, &mut cases, found);
         names(&cases)
     };
+    let apply = |tool, code, task, found| apply_out(tool, code, "", task, found);
     let still = |task| vec![case("still", Outcome::Failed, task)];
     for (tool, code) in [
         (Tool::Maven, Some(0)),
@@ -891,6 +920,56 @@ fn 실패만_다시가_다시_돌리지_않은_지난_실패는_지운_것으로
     // Go의 그 패키지가 빌드에 실패했다.
     let kept = [pass("ok"), fail("gone"), fail("still")];
     assert_eq!(apply(Tool::Maven, Some(1), None, still(None)), kept);
+    // Maven 다중 모듈: 0이 아니게 끝나도 모듈별 결과에서 그 모듈이 성공했으면 돌았던 것이라 뺀다. 그 모듈이
+    // 깨졌거나 건너뛰었거나, 결과가 없거나(`-q`), 모듈을 모르면 남긴다.
+    let summary = |common: &str| {
+        format!(
+            "[ERROR] COMPILATION ERROR :
+[INFO] ------------------------------------------------------------------------
+[INFO] Reactor Summary for board-parent 1.0:
+[INFO] 
+[INFO] board-parent ....................................... SUCCESS [  0.004 s]
+[INFO] common ............................................. {common} [  1.234 s]
+[INFO] web ................................................ SKIPPED
+[INFO] batch .............................................. FAILURE [  0.512 s]
+[INFO] ------------------------------------------------------------------------
+[INFO] BUILD FAILURE
+"
+        )
+    };
+    let common = Some("common");
+    let ok = summary("SUCCESS");
+    assert_eq!(
+        apply_out(Tool::Maven, Some(1), &ok, common, still(common)),
+        [pass("ok"), fail("still")]
+    );
+    for broken in ["FAILURE", "SKIPPED"] {
+        assert_eq!(
+            apply_out(
+                Tool::Maven,
+                Some(1),
+                &summary(broken),
+                common,
+                still(common)
+            ),
+            kept
+        );
+    }
+    for module in [Some("web"), Some("batch"), Some("comm"), None] {
+        assert_eq!(
+            apply_out(Tool::Maven, Some(1), &ok, module, still(module)),
+            kept,
+            "{module:?}"
+        );
+    }
+    // 색이 든 출력과 판이 붙은 이름(모듈들의 판이 다를 때)도 읽는다.
+    let colored = ok
+        .replace(" SUCCESS [  1.234", " [1;32mSUCCESS[m [  1.234")
+        .replace("common ...", "common 2.0 ...");
+    assert_eq!(
+        apply_out(Tool::Maven, Some(1), &colored, common, still(common)),
+        [pass("ok"), fail("still")]
+    );
     assert_eq!(
         apply(Tool::Gradle, Some(1), task, still(Some(":lib:test"))),
         [pass("ok"), fail("gone"), fail("still"), fail("still")]
