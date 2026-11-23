@@ -2890,8 +2890,9 @@ fn pytest가_한_파일을_모으지_못해도_다른_파일은_돌고_그_파�
         ]
     );
 
-    // test_a의 실패는 이름을 바꿔 고쳤고, test_b는 문법 오류로 모을 수 없다.
-    test_a("test_fixed", 3);
+    // test_a의 실패는 이름을 바꿔 고쳤고, test_b는 문법 오류로 모을 수 없다. 새 이름은 길이를 달리 한다: 파일
+    // 크기와 고친 시각(초)이 같으면 pytest가 앞 실행의 바이트코드(`__pycache__`)를 그대로 써 옛 테스트를 돌린다.
+    test_a("test_fixed_sum", 3);
     std::fs::write(root.join("tests/test_b.py"), "def broken(:\n").unwrap();
     std::thread::sleep(std::time::Duration::from_secs(3));
     let since = SystemTime::now();
