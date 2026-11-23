@@ -341,6 +341,7 @@ impl TestPanel {
             test_report::gradle_path_problem(*tool, dir, &home, &self.cases, &self.output)
         });
         let count = |o| self.cases.iter().filter(|c| c.outcome == o).count();
+        let previous = self.cases.iter().filter(|c| c.previous).count();
         let (passed, failed, skipped) = (
             count(Outcome::Passed),
             count(Outcome::Failed),
@@ -349,11 +350,6 @@ impl TestPanel {
         let seconds = running.started.1.elapsed().as_secs_f64();
         let unreported =
             !running.stopped && test_report::unreported_failure(running.tool, code, failed);
-        let more = if unreported {
-            " · 보고서에 없는 실패가 있습니다(빌드 오류 등, 출력을 보세요)"
-        } else {
-            ""
-        };
         let code = code.map_or_else(|| "끊김".to_owned(), |c| c.to_string());
         let stopped = if running.stopped { "멈춤 · " } else { "" };
         // egov 템플릿은 pom이 테스트를 건너뛰게 해 보고서가 없다. 까닭을 알리고 켜기를 권한다.
@@ -371,14 +367,19 @@ impl TestPanel {
         // 실패만 다시가 새 보고서를 내지 못해도(빌드가 깨진 모듈만 남았다) 앞 결과는 고쳐 보이므로 그 수를 알린다.
         let kept = !found_any && running.rerun && !self.cases.is_empty();
         self.status = Some(if found_any || kept {
-            let fresh = if kept {
-                " · 이번에는 새 보고서가 없습니다"
+            // 알림은 하나만 붙인다(앞 결과를 남긴 것이 빌드 오류와 새 보고서가 없는 것을 함께 말한다).
+            let note = if previous > 0 {
+                format!(" · {previous}개는 빌드가 깨져 돌지 못해 앞 결과입니다(출력을 보세요)")
+            } else if unreported {
+                " · 보고서에 없는 실패가 있습니다(빌드 오류 등, 출력을 보세요)".to_owned()
+            } else if kept {
+                " · 이번에는 새 보고서가 없습니다".to_owned()
             } else {
-                ""
+                String::new()
             };
             (
                 format!(
-                    "{stopped}통과 {passed} · 실패 {failed} · 건너뜀 {skipped} · {seconds:.1}초 · 종료 코드 {code}{more}{fresh}"
+                    "{stopped}통과 {passed} · 실패 {failed} · 건너뜀 {skipped} · {seconds:.1}초 · 종료 코드 {code}{note}"
                 ),
                 failed > 0 || unreported || kept,
             )
@@ -751,9 +752,17 @@ fn push_limited(output: &mut String, text: &str) {
     }
 }
 
-/// 결과 트리에서 테스트 이름 뒤에 붙이는 돌린 곳: Maven 통합 테스트 단계(Failsafe)에서 돈 것.
-fn runner_tag(case: &Case) -> &'static str {
-    if case.integration { "  (통합)" } else { "" }
+/// 결과 트리에서 테스트 이름 뒤에 붙이는 표시: Maven 통합 테스트 단계(Failsafe)에서 돈 것, 이번에 돌지 못해
+/// (빌드가 깨짐) 앞 실행의 결과를 남긴 것.
+fn runner_tag(case: &Case) -> String {
+    let mut tag = String::new();
+    if case.integration {
+        tag.push_str("  (통합)");
+    }
+    if case.previous {
+        tag.push_str("  (앞 결과)");
+    }
+    tag
 }
 
 /// 프로세스와 그 자식을 모두 끝낸다(셸 → Maven → JVM).
@@ -785,6 +794,7 @@ mod tests {
             outcome,
             integration,
             task: task.map(str::to_owned),
+            previous: false,
             seconds: None,
             message: None,
             detail: String::new(),
@@ -828,5 +838,8 @@ mod tests {
         );
         assert_eq!(runner_tag(&cases[1]), "  (통합)");
         assert_eq!(runner_tag(&cases[0]), "");
+        let mut kept = cases[1].clone();
+        kept.previous = true;
+        assert_eq!(runner_tag(&kept), "  (통합)  (앞 결과)");
     }
 }
