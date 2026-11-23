@@ -317,7 +317,11 @@ impl TestPanel {
         }
         // 전체를 다시 돌린 결과는 앞 결과를 바꾼다(지운 테스트가 남지 않게). Gradle이 최신으로 건너뛴 작업의
         // 보고서도 위에서 읽었다. 실패만 다시의 결과는 앞 결과에 넣는다(지운 실패는 빼고, 멈췄으면 그대로 둔다).
-        if running.rerun && !running.whole {
+        // 실패만 다시에서 넘어간 전체 실행은 결과를 내지 못한 Gradle 작업(빌드가 깨짐)의 앞 결과를 남긴다.
+        if running.rerun && running.whole && !running.stopped {
+            test_report::apply_whole_rerun(running.tool, &mut self.cases, found);
+            self.selected = self.cases.iter().position(|c| c.outcome == Outcome::Failed);
+        } else if running.rerun && !running.whole {
             if running.stopped {
                 test_report::merge_rerun(&mut self.cases, found);
             } else {

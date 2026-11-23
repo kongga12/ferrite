@@ -1041,6 +1041,58 @@ fn 같은_테스트가_둘이면_실패한_것_하나로_모은다() {
 }
 
 #[test]
+fn 실패만_다시에서_넘어간_전체_실행은_결과를_내지_못한_gradle_작업의_앞_결과를_남긴다() {
+    let case = |name: &str, outcome, task: Option<&str>| Case {
+        suite: "demo.CalcTest".to_owned(),
+        name: name.to_owned(),
+        outcome,
+        seconds: None,
+        message: None,
+        detail: String::new(),
+        file: None,
+        line: None,
+        integration: false,
+        task: task.map(str::to_owned),
+    };
+    fn names(cases: &[Case]) -> Vec<(&str, Outcome)> {
+        cases.iter().map(|c| (c.name.as_str(), c.outcome)).collect()
+    }
+    let (app, lib) = (Some(":app:test"), Some(":lib:test"));
+    let before = || {
+        vec![
+            case("adds", Outcome::Passed, app),
+            case("addsWrong", Outcome::Failed, app),
+            case("subtractsWrong", Outcome::Failed, lib),
+            case("loose", Outcome::Failed, None),
+        ]
+    };
+    // app만 돌았다(lib은 컴파일이 깨졌다): app의 결과는 바꾸고 lib의 것은 남긴다. 작업을 모르는 것은 뺀다.
+    let found = || {
+        vec![
+            case("adds", Outcome::Passed, app),
+            case("addsFixed", Outcome::Passed, app),
+        ]
+    };
+    let mut cases = before();
+    apply_whole_rerun(Tool::Gradle, &mut cases, found());
+    assert_eq!(
+        names(&cases),
+        [
+            ("subtractsWrong", Outcome::Failed),
+            ("adds", Outcome::Passed),
+            ("addsFixed", Outcome::Passed),
+        ]
+    );
+    // 다른 도구는 모두 바꾼다.
+    let mut cases = before();
+    apply_whole_rerun(Tool::Maven, &mut cases, found());
+    assert_eq!(
+        names(&cases),
+        [("adds", Outcome::Passed), ("addsFixed", Outcome::Passed)]
+    );
+}
+
+#[test]
 fn 한글_windows의_maven이_cp949로_낸_모듈별_결과도_읽는다() {
     // 한글 Windows의 Maven(JDK 8·21 모두)이 `<name>게시판 공통</name>` 모듈을 이 바이트로 냈다(2026-11-23).
     // 테스트 창은 줄마다 UTF-8이 아니면 CP949로 푼다(`text_file::decode`).
