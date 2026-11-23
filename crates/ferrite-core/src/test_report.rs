@@ -197,6 +197,12 @@ pub fn apply_whole_rerun(tool: Tool, cases: &mut Vec<Case>, found: Vec<Case>) {
 const MAVEN_EVENT_LOGGER: &str =
     "org.slf4j.simpleLogger.log.org.apache.maven.cli.event.ExecutionEventLogger";
 
+/// Maven 4에서 같은 로거의 수준 속성. 로거가 `org.apache.maven.cling.event`로 옮겨졌고 속성 접두어가
+/// `maven.logger.`가 되었다(옛 접두어도 읽지만 경고를 낸다. 4.0.0-rc-7의 소스와 CI에서 확인). Maven 3은 모르는
+/// 시스템 속성이라 무시한다.
+const MAVEN4_EVENT_LOGGER: &str =
+    "maven.logger.log.org.apache.maven.cling.event.ExecutionEventLogger";
+
 /// Maven 출력 끝의 모듈별 결과(Reactor Summary) 줄(`[INFO] common ........ SUCCESS [  1.2 s]`).
 static MAVEN_REACTOR_LINE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^\[INFO\] (.+?) \.*\s*(SUCCESS|FAILURE|SKIPPED)(?:\s|$)").unwrap()
@@ -466,8 +472,10 @@ pub fn with_report(tool: Tool, command: &str, dir: &Path) -> String {
             if !command.contains("maven.test.failure.ignore") {
                 line.push_str(" -Dmaven.test.failure.ignore=true");
             }
-            if !command.contains(MAVEN_EVENT_LOGGER) {
-                line.push_str(&format!(" -D{MAVEN_EVENT_LOGGER}=info"));
+            for logger in [MAVEN_EVENT_LOGGER, MAVEN4_EVENT_LOGGER] {
+                if !command.contains(logger) {
+                    line.push_str(&format!(" -D{logger}=info"));
+                }
             }
             line
         }
