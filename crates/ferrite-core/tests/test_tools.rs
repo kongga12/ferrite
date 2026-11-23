@@ -931,7 +931,13 @@ fn maven_다중_모듈에서_한_모듈의_컴파일만_깨지면_돈_모듈의_
     if !require("mvn -v") {
         return;
     }
-    let root = temp_dir("maven-module-broken");
+    // 앱의 기본 명령처럼 `-q` 없이, 그리고 `-q`로(모듈별 결과를 `with_report`가 되살린다) 돌린다.
+    maven_module_broken("maven-module-broken", "mvn -B test");
+    maven_module_broken("maven-module-broken-quiet", "mvn -B -q test");
+}
+
+fn maven_module_broken(name: &str, command: &str) {
+    let root = temp_dir(name);
     let pom = |body: &str| {
         format!(
             "<project xmlns=\"http://maven.apache.org/POM/4.0.0\">\n  <modelVersion>4.0.0</modelVersion>\n{body}</project>\n"
@@ -1000,9 +1006,7 @@ fn maven_다중_모듈에서_한_모듈의_컴파일만_깨지면_돈_모듈의_
         "JobTest",
         "    @Test\n    void countsWrong() {\n        assertEquals(3, 1 + 1, \"세기\");\n    }\n",
     );
-    // 앱의 기본 명령처럼 `-q` 없이 돌려 끝에 모듈별 결과가 나온다.
     let report = root.join("reports");
-    let command = "mvn -B test";
     let since = SystemTime::now();
     run(
         &root,
@@ -1038,7 +1042,7 @@ fn maven_다중_모듈에서_한_모듈의_컴파일만_깨지면_돈_모듈의_
         &test_report::with_report(Tool::Maven, &line, &report),
     );
     assert!(!ok, "batch의 컴파일이 깨져 실패한다\n{output}");
-    let built = test_report::maven_built_modules(&output).expect("모듈별 결과");
+    let built = test_report::maven_built_modules(&output).expect(command);
     assert!(built.iter().any(|m| m == "Board Common"), "{built:?}");
     assert!(!built.iter().any(|m| m == "batch"), "{built:?}");
     let found = test_report::report_files(Tool::Maven, &root, &report, since)
