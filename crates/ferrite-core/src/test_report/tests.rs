@@ -1039,3 +1039,22 @@ fn 같은_테스트가_둘이면_실패한_것_하나로_모은다() {
         ]
     );
 }
+
+#[test]
+fn 한글_windows의_maven이_cp949로_낸_모듈별_결과도_읽는다() {
+    // 한글 Windows의 Maven(JDK 8·21 모두)이 `<name>게시판 공통</name>` 모듈을 이 바이트로 냈다(2026-11-23).
+    // 테스트 창은 줄마다 UTF-8이 아니면 CP949로 푼다(`text_file::decode`).
+    let lines: [&[u8]; 3] = [
+        b"[INFO] Reactor Summary for board-parent 1.0:",
+        b"[INFO] board-parent ....................................... SUCCESS [  0.003 s]",
+        b"[INFO] \xb0\xd4\xbd\xc3\xc6\xc7 \xb0\xf8\xc5\xeb ............................................. SUCCESS [  0.000 s]",
+    ];
+    let output: String = lines
+        .iter()
+        .map(|line| crate::text_file::decode(line).unwrap().text + "\n")
+        .collect();
+    assert_eq!(
+        maven_built_modules(&output).unwrap(),
+        ["board-parent", "게시판 공통"]
+    );
+}
