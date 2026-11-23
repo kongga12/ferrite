@@ -573,6 +573,7 @@ fn kotlin_scala_스택의_테스트_줄을_찾는다() {
         line: None,
         integration: false,
         task: None,
+        previous: false,
     };
     // Kotlin 백틱 이름은 빈칸이 들고, 그 안의 람다는 클래스 이름에도 든다.
     let kotlin = failed(
@@ -875,6 +876,7 @@ fn 실패만_다시가_다시_돌리지_않은_지난_실패는_지운_것으로
         line: None,
         integration: false,
         task: task.map(str::to_owned),
+        previous: false,
     };
     let names = |cases: &[Case]| {
         cases
@@ -990,6 +992,20 @@ fn 실패만_다시가_다시_돌리지_않은_지난_실패는_지운_것으로
         ),
         [pass("ok"), pass("fixed")]
     );
+    // 남긴 지난 실패는 앞 결과로 적는다(Maven 모듈이 깨짐). 다시 돈 결과는 앞 결과가 아니다.
+    let mut cases = before(common);
+    apply_rerun(
+        Tool::Maven,
+        Some(1),
+        &summary("FAILURE"),
+        &mut cases,
+        still(common),
+    );
+    let previous: Vec<(&str, bool)> = cases
+        .iter()
+        .map(|c| (c.name.as_str(), c.previous))
+        .collect();
+    assert_eq!(previous, [("ok", false), ("gone", true), ("still", false)]);
     // 다시 돈 실패가 이제 통과하면 덮어 쓴다.
     assert_eq!(
         apply(
@@ -1018,6 +1034,7 @@ fn 같은_테스트가_둘이면_실패한_것_하나로_모은다() {
         line: None,
         integration,
         task: None,
+        previous: false,
     };
     let found = dedup(vec![
         case("CalcTest", "adds", Outcome::Passed, false),
@@ -1053,6 +1070,7 @@ fn 실패만_다시에서_넘어간_전체_실행은_결과를_내지_못한_gra
         line: None,
         integration: false,
         task: task.map(str::to_owned),
+        previous: false,
     };
     fn names(cases: &[Case]) -> Vec<(&str, Outcome)> {
         cases.iter().map(|c| (c.name.as_str(), c.outcome)).collect()
@@ -1082,6 +1100,11 @@ fn 실패만_다시에서_넘어간_전체_실행은_결과를_내지_못한_gra
             ("adds", Outcome::Passed),
             ("addsFixed", Outcome::Passed),
         ]
+    );
+    // 남긴 것만 앞 결과다.
+    assert_eq!(
+        cases.iter().map(|c| c.previous).collect::<Vec<_>>(),
+        [true, false, false]
     );
     // 다른 도구는 모두 바꾼다.
     let mut cases = before();

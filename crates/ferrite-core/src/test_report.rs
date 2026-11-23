@@ -78,6 +78,9 @@ pub struct Case {
     /// - Maven: 모듈 이름(`<모듈>/target/surefire-reports`의 pom, `maven_module`). 실패만 다시에서 빌드가 깨진
     ///   모듈의 실패를 남길 때 쓴다.
     pub task: Option<String>,
+    /// 이번 실행에서 돌지 못해(그 모듈·작업의 빌드가 깨짐) 앞 실행의 결과를 남긴 것(`apply_rerun`,
+    /// `apply_whole_rerun`). 보고서에서 읽은 결과는 거짓이다. 같은 테스트인지에는 들지 않는다.
+    pub previous: bool,
 }
 
 impl Case {
@@ -157,8 +160,13 @@ pub fn apply_rerun(
             .any(|f| f.suite == c.suite && f.name == PACKAGE_CASE),
         Tool::Pytest | Tool::Ctest => true,
     };
-    cases.retain(|c| {
-        c.outcome != Outcome::Failed || found.iter().any(|f| f.same_test(c)) || !ran_there(c)
+    cases.retain_mut(|c| {
+        if c.outcome != Outcome::Failed || found.iter().any(|f| f.same_test(c)) {
+            return true;
+        }
+        // 다시 돈 결과에 없는 지난 실패: 돌 자리가 돌았으면 지운 것이라 빼고, 아니면 앞 결과로 남긴다.
+        c.previous = !ran_there(c);
+        c.previous
     });
     merge_rerun(cases, found);
 }
@@ -170,7 +178,10 @@ pub fn apply_rerun(
 /// 때만 넘어와(빌드가 깨지지 않았다) 모두 바꾼다.
 pub fn apply_whole_rerun(tool: Tool, cases: &mut Vec<Case>, found: Vec<Case>) {
     if tool == Tool::Gradle {
-        cases.retain(|c| c.task.is_some() && !found.iter().any(|f| f.task == c.task));
+        cases.retain_mut(|c| {
+            c.previous = c.task.is_some() && !found.iter().any(|f| f.task == c.task);
+            c.previous
+        });
     } else {
         cases.clear();
     }
@@ -284,6 +295,7 @@ pub fn parse_junit(xml: &str) -> Result<Vec<Case>, String> {
             line: node.attribute("line").and_then(|l| l.parse().ok()),
             integration: false,
             task: None,
+            previous: false,
         });
     }
     Ok(cases)
@@ -345,6 +357,7 @@ pub fn parse_go_json(output: &str) -> Vec<Case> {
                         line: None,
                         integration: false,
                         task: None,
+                        previous: false,
                     });
                 }
                 _ => {}
@@ -396,6 +409,7 @@ pub fn parse_go_json(output: &str) -> Vec<Case> {
                     line: None,
                     integration: false,
                     task: None,
+                    previous: false,
                 });
             }
             _ => {}
