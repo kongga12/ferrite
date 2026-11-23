@@ -242,8 +242,8 @@ fn go_test_json을_읽고_빌드_실패는_패키지로_보인다() {
 fn 보고서_옵션과_실패만_다시_돌리는_명령을_만든다() {
     let dir = Path::new("/tmp/r");
     // 모듈별 결과를 찍는 로거는 늘 되살린다(`-q`는 `.mvn/maven.config`·`MAVEN_ARGS`에도 적을 수 있다).
-    let events =
-        "-Dorg.slf4j.simpleLogger.log.org.apache.maven.cli.event.ExecutionEventLogger=info";
+    let events = "-Dorg.slf4j.simpleLogger.log.org.apache.maven.cli.event.ExecutionEventLogger=info \
+         -Dmaven.logger.log.org.apache.maven.cling.event.ExecutionEventLogger=info";
     for command in ["mvn test", "mvn -B -q test", "mvn --quiet test"] {
         assert_eq!(
             with_report(Tool::Maven, command, dir),
