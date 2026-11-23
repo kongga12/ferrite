@@ -282,6 +282,20 @@ jobs:
         with:
           path: ~/.m2/repository
           key: ${{ steps.m2.outputs.cache-primary-key }}
+      # Maven 4(2026-11 현재 rc)로도 다중 모듈 시험을 돌려, 실패만 다시가 읽는 모듈별 결과(Reactor Summary)와
+      # `-q`(명령 줄·`.mvn/maven.config`)에서 그 결과를 되살리는 로거 속성이 통하는지 본다. 출력 형식은 OS와
+      # 상관없어 Linux에서만 돈다. 위 캐시 저장 뒤에 두어 Maven 4가 받은 것은 캐시에 넣지 않는다.
+      - name: Maven 4 다중 모듈 시험(Linux)
+        if: runner.os == 'Linux'
+        run: |
+          version=4.0.0-rc-7
+          base="https://repo1.maven.org/maven2/org/apache/maven/apache-maven/$version/apache-maven-$version-bin.tar.gz"
+          curl -fsSL --retry 3 --retry-delay 30 -o "$RUNNER_TEMP/maven4.tar.gz" "$base"
+          echo "$(curl -fsSL --retry 3 "$base.sha512")  $RUNNER_TEMP/maven4.tar.gz" | sha512sum -c -
+          tar -xzf "$RUNNER_TEMP/maven4.tar.gz" -C "$RUNNER_TEMP"
+          export PATH="$RUNNER_TEMP/apache-maven-$version/bin:$PATH"
+          mvn -v
+          cargo test -p ferrite-core --test test_tools -- --ignored --nocapture maven_다중_모듈에서
       - run: cargo build --release
       - name: 실행 파일 업로드 (OS별 수동 검증용)
         uses: actions/upload-artifact@v4
