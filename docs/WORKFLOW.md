@@ -2480,13 +2480,13 @@
   - 까닭: 위 "한 모듈만 깨진 Maven의 실패만 다시"는 출력의 모듈별 결과(Reactor Summary)로 돈 모듈을 가린다. 실행 구성에 `-q`가 있으면 그 결과가 찍히지 않아 한 모듈만 깨져도 지운 실패를 모두 남겼다.
   - 고침(`test_report::with_report`): Maven 명령에 `-q`·`--quiet`가 있으면 `-Dorg.slf4j.simpleLogger.log.org.apache.maven.cli.event.ExecutionEventLogger=info`를 붙인다. Maven 3의 실행 사건(모듈 머리 줄과 모듈별 결과)을 찍는 로거만 INFO로 되살려, 받기 기록과 플러그인 출력은 그대로 감춘다(Gradle에서 `-q`를 뺀 것과 달리 사용자가 고른 조용함을 지킨다). 이미 있으면 다시 붙이지 않는다.
   - 검증: 단위 시험(`-q`·`--quiet`면 붙이고 없으면 안 붙임, 두 번 붙이지 않음). 실제 Maven 3.10(로컬 Windows): `mvn -B -q validate`는 아무것도 찍지 않고, 이 속성을 붙이면 모듈 머리 줄과 모듈별 결과(한글 모듈 이름 포함)만 찍었다. `test_tools`의 다중 모듈 시험을 `-q` 없이와 `-q`로 둘 다 돌려 통과했고, 다른 Maven 실제 도구 시험 14개(대부분 `-q`)도 통과했다. 앱 화면(Windows, 디버그 빌드): `.ferrite/run.toml`의 `mvn -q test` 구성으로 두 모듈 예제를 돌려 실패만 다시를 누르니 common의 지운 실패는 빠지고 batch의 `countsWrong (앞 결과)`가 남았다.
-  - 확인하지 못한 것: Maven 4(로거 이름이 다를 수 있다. 그때는 예전처럼 모두 남긴다), `.mvn/maven.config`·`MAVEN_ARGS`에 적은 `-q`(명령 줄에 없어 속성을 붙이지 않는다. 뒤에 백로그 "maven.config의 -q"(2026-11-23)에서 늘 붙인다).
+  - 확인하지 못한 것: Maven 4(로거 이름이 다를 수 있다. 그때는 예전처럼 모두 남긴다. 뒤에 백로그 "Maven 4의 모듈별 결과"(2026-11-23)에서 달라서 고쳤다), `.mvn/maven.config`·`MAVEN_ARGS`에 적은 `-q`(명령 줄에 없어 속성을 붙이지 않는다. 뒤에 백로그 "maven.config의 -q"(2026-11-23)에서 늘 붙인다).
 
 - [x] maven.config의 -q(2026-11-23) — 작음
   - 까닭: 위 "-q로 돌린 Maven의 모듈별 결과"는 명령 줄의 `-q`만 보았다. 프로젝트의 `.mvn/maven.config`나 `MAVEN_ARGS`에 적은 `-q`는 명령 줄에 없어 모듈별 결과를 되살리지 못했다.
   - 고침(`test_report::with_report`): Maven 명령에 그 로거 속성을 늘 붙인다. `-q`가 없으면 그 로거는 원래 INFO라 바뀌는 것이 없다. 설정 파일·환경 변수를 읽어 판별하는 것보다 짧고 놓치는 곳이 없다. 대신 출력 첫 줄의 명령이 길어진다.
   - 검증: 단위 시험(`-q` 유무와 상관없이 붙임, 사용자가 고른 실패 방식에도 붙임). 실제 Maven 3.10(`test_tools`, 로컬 Windows): 다중 모듈 시험을 `-q` 없이, `-q`로, `.mvn/maven.config`에 `-q`를 적고 돌려 모두 통과했다. 설정 파일의 `-q`는 속성 없이 돌리면 모듈별 결과가 정말 없는 것도 시험이 확인한다. 다른 Maven 실제 도구 시험 14개도 통과.
-  - 확인하지 못한 것: 앱 화면(앱은 같은 `with_report`로 명령을 만든다), `MAVEN_ARGS`의 `-q`(같은 방식으로 읽힐 것이나 돌려 보지 않았다), Maven 4.
+  - 확인하지 못한 것: 앱 화면(앱은 같은 `with_report`로 명령을 만든다), `MAVEN_ARGS`의 `-q`(같은 방식으로 읽힐 것이나 돌려 보지 않았다), Maven 4(뒤에 백로그 "Maven 4의 모듈별 결과"에서 보았다).
 
 - [x] Go 빌드 깨짐의 앞 결과(2026-11-23) — 작음(시험·문서만)
   - 까닭: 위 "남긴 앞 결과 표시"는 Maven·Gradle은 실제 도구와 앱 화면으로 보았지만 Go는 보지 못했다(로컬에 Go가 없다). 코드는 이미 Go 패키지의 빌드 실패(`(패키지)`)로 돌지 못한 곳을 가린다.
@@ -2506,6 +2506,15 @@
   - 까닭: 위 "Maven·JDK 8·JDBC 캐시도 main에서만 저장"에서 디버거 시험의 가짜 js-debug가 한 연결에 두 스레드로 잠그지 않고 써서 메시지가 섞였다고 보고 고쳤지만, 섞임을 재현하지는 못했다.
   - 재현(로컬 Windows, 임시 시험으로 돌리고 지웠다): 두 스레드가 한 TCP 연결을 `try_clone`으로 나눠 `write_message`로 2만 개씩 쓰고 받는 쪽이 `read_message`로 읽으니, 잠그지 않으면 4만 개 가운데 온전한 것이 0~2개였다(세 번). 한 번 섞이면 `Content-Length` 머리글이 어긋나 그 뒤가 모두 깨진다. 같은 쓰기를 `Mutex`로 잠그면 4만 개 모두 온전했다. `write_message`는 머리글(`write!`)과 본문을 따로 써서 다른 스레드의 쓰기가 그 사이에 끼어든다.
   - 제품 코드: 같은 일이 없다. LSP 클라이언트는 쓸 때마다 잠그고(`lock(stdin)`), DAP 클라이언트는 쓰기 끝을 세션이 `&mut self`로만 쓴다(읽기 스레드는 쓰지 않는다). 고칠 것은 없었다.
+
+- [x] Maven 4의 모듈별 결과(2026-11-23) — 작음
+  - 까닭: 위 Maven 항목들(한 모듈만 깨진 Maven, `-q`, maven.config의 `-q`)은 Maven 3.10으로만 보았다.
+  - 확인(CI): `ci.yml` `full` 작업(Linux)에 단계를 더해 Maven 4.0.0-rc-7(Maven Central의 최신 4.x, 2026-11 현재 GA 없음)을 받아 sha512로 확인하고 `test_tools`의 다중 모듈 시험을 돌린다. 출력 형식은 OS와 상관없어 Linux에서만 돈다. Maven 의존성 캐시 저장 뒤에 두어 Maven 4가 받은 것은 캐시에 넣지 않는다.
+    - 첫 실행: `-q` 없이는 통과했다(모듈별 결과의 꼴이 같다). `-q`로는 모듈별 결과가 나오지 않아 깨졌다.
+    - 원인(apache/maven `maven-4.0.0-rc-7` 소스): `-q`는 Maven 3처럼 기본 수준(`maven.logger.defaultLogLevel`)을 error로 두고 로거마다 따로 준 수준을 따른다. 다만 실행 사건 로거가 `org.apache.maven.cling.event.ExecutionEventLogger`로 옮겨졌고 수준 속성 접두어가 `maven.logger.log.`가 되었다(옛 `org.slf4j.simpleLogger.` 접두어도 읽지만 경고를 낸다).
+  - 고침(`test_report::with_report`): Maven 명령에 `-Dmaven.logger.log.org.apache.maven.cling.event.ExecutionEventLogger=info`도 붙인다. Maven 3은 모르는 시스템 속성이라 무시한다(로컬 Maven 3.10 다중 모듈 시험 통과).
+  - 검증: 고친 뒤 CI에서 Maven 4로 세 경우(`-q` 없이·`-q`·`.mvn/maven.config`의 `-q`) 모두 통과했고 옛 속성의 경고도 나오지 않았다. 전체 CI 3개 OS 통과.
+  - 확인하지 못한 것: Maven 4 정식판(rc 뒤에 바뀔 수 있다. 그 CI 단계의 판을 올리면 다시 본다), 앱 화면.
 
 - 살폈지만 넣지 않은 것: 임베디드(MCU 플래시·시리얼 모니터·장비 설정 파일), 프레임워크별 지원(React·Vue·Angular 등, JS·TS 언어 서버로 기본은 된다), 린터 개별 연동(언어 서버나 저장 시 작업으로 된다), 원격 개발·컨테이너·SFTP 배포, 로컬 AI 완성 모델, 계정 기반 설정 동기화. egov 개발과 거리가 멀거나 크기에 비해 쓰임이 적다.
 
