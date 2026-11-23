@@ -241,28 +241,24 @@ fn go_test_json을_읽고_빌드_실패는_패키지로_보인다() {
 #[test]
 fn 보고서_옵션과_실패만_다시_돌리는_명령을_만든다() {
     let dir = Path::new("/tmp/r");
-    assert_eq!(
-        with_report(Tool::Maven, "mvn test", dir),
-        "mvn test -fae -Dmaven.test.failure.ignore=true"
-    );
+    // 모듈별 결과를 찍는 로거는 늘 되살린다(`-q`는 `.mvn/maven.config`·`MAVEN_ARGS`에도 적을 수 있다).
+    let events =
+        "-Dorg.slf4j.simpleLogger.log.org.apache.maven.cli.event.ExecutionEventLogger=info";
+    for command in ["mvn test", "mvn -B -q test", "mvn --quiet test"] {
+        assert_eq!(
+            with_report(Tool::Maven, command, dir),
+            format!("{command} -fae -Dmaven.test.failure.ignore=true {events}")
+        );
+    }
     assert_eq!(
         with_report(
             Tool::Maven,
             "mvn -ff test -Dmaven.test.failure.ignore=false",
             dir
         ),
-        "mvn -ff test -Dmaven.test.failure.ignore=false",
+        format!("mvn -ff test -Dmaven.test.failure.ignore=false {events}"),
         "사용자가 고른 실패 방식은 그대로"
     );
-    // `-q`면 모듈별 결과를 찍는 로거만 되살린다.
-    let events =
-        "-Dorg.slf4j.simpleLogger.log.org.apache.maven.cli.event.ExecutionEventLogger=info";
-    for quiet in ["mvn -B -q test", "mvn --quiet test"] {
-        assert_eq!(
-            with_report(Tool::Maven, quiet, dir),
-            format!("{quiet} -fae -Dmaven.test.failure.ignore=true {events}")
-        );
-    }
     let again = with_report(Tool::Maven, "mvn -q test", dir);
     assert_eq!(
         with_report(Tool::Maven, &again, dir),
