@@ -931,13 +931,19 @@ fn maven_다중_모듈에서_한_모듈의_컴파일만_깨지면_돈_모듈의_
     if !require("mvn -v") {
         return;
     }
-    // 앱의 기본 명령처럼 `-q` 없이, 그리고 `-q`로(모듈별 결과를 `with_report`가 되살린다) 돌린다.
-    maven_module_broken("maven-module-broken", "mvn -B test");
-    maven_module_broken("maven-module-broken-quiet", "mvn -B -q test");
+    // 앱의 기본 명령처럼 `-q` 없이, `-q`로, 프로젝트의 `.mvn/maven.config`에 적은 `-q`로 돌린다(모듈별 결과를
+    // `with_report`가 되살린다).
+    maven_module_broken("maven-module-broken", "mvn -B test", None);
+    maven_module_broken("maven-module-broken-quiet", "mvn -B -q test", None);
+    maven_module_broken("maven-module-broken-config", "mvn -B test", Some("-q\n"));
 }
 
-fn maven_module_broken(name: &str, command: &str) {
+fn maven_module_broken(name: &str, command: &str, maven_config: Option<&str>) {
     let root = temp_dir(name);
+    if let Some(config) = maven_config {
+        std::fs::create_dir_all(root.join(".mvn")).unwrap();
+        std::fs::write(root.join(".mvn/maven.config"), config).unwrap();
+    }
     let pom = |body: &str| {
         format!(
             "<project xmlns=\"http://maven.apache.org/POM/4.0.0\">\n  <modelVersion>4.0.0</modelVersion>\n{body}</project>\n"
@@ -1006,6 +1012,11 @@ fn maven_module_broken(name: &str, command: &str) {
         "JobTest",
         "    @Test\n    void countsWrong() {\n        assertEquals(3, 1 + 1, \"세기\");\n    }\n",
     );
+    if maven_config.is_some() {
+        // 설정 파일의 `-q`가 정말 모듈별 결과를 감춘다(속성 없이 돌리면 없다).
+        let (_, plain) = run(&root, "mvn -B validate");
+        assert!(!plain.contains("Reactor Summary"), "{plain}");
+    }
     let report = root.join("reports");
     let since = SystemTime::now();
     run(
