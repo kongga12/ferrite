@@ -301,11 +301,17 @@ fn 보고서_옵션과_실패만_다시_돌리는_명령을_만든다() {
     );
     let pytest = with_report(Tool::Pytest, "python -m pytest", dir);
     assert!(
-        pytest.starts_with("python -m pytest \"--junitxml=") && pytest.ends_with("pytest.xml\"")
+        pytest.starts_with("python -m pytest \"--junitxml=")
+            && pytest.ends_with("pytest.xml\" --continue-on-collection-errors"),
+        "{pytest}"
     );
     assert_eq!(
-        with_report(Tool::Pytest, "pytest --junitxml=x.xml", dir),
-        "pytest --junitxml=x.xml"
+        with_report(
+            Tool::Pytest,
+            "pytest --junitxml=x.xml --continue-on-collection-errors",
+            dir
+        ),
+        "pytest --junitxml=x.xml --continue-on-collection-errors"
     );
     assert!(with_report(Tool::Ctest, "ctest --test-dir build", dir).contains("--output-junit \""));
     assert_eq!(
@@ -1123,6 +1129,49 @@ fn 실패만_다시에서_넘어간_전체_실행은_결과를_내지_못한_gra
     assert_eq!(
         names(&cases),
         [("adds", Outcome::Passed), ("addsFixed", Outcome::Passed)]
+    );
+}
+
+#[test]
+fn pytest가_모으지_못한_파일의_지난_실패는_앞_결과로_남긴다() {
+    let case = |suite: &str, name: &str, outcome| Case {
+        suite: suite.to_owned(),
+        name: name.to_owned(),
+        outcome,
+        seconds: None,
+        message: None,
+        detail: String::new(),
+        file: None,
+        line: None,
+        integration: false,
+        task: None,
+        previous: false,
+    };
+    let mut cases = vec![
+        case("tests.test_a", "test_add", Outcome::Passed),
+        case("tests.test_a", "test_wrong", Outcome::Failed),
+        case("tests.test_b", "test_b_wrong", Outcome::Failed),
+        case("tests.test_b.TestJob", "test_counts", Outcome::Failed),
+        case("tests.test_bb", "test_other", Outcome::Failed),
+    ];
+    // test_b를 모으지 못했다. test_a의 지난 실패는 돌았는데 없으니 지운 것이다. 이름이 겹치는 test_bb는 다른 파일이다.
+    let found = vec![
+        case("", "tests.test_b", Outcome::Failed),
+        case("tests.test_a", "test_add", Outcome::Passed),
+    ];
+    apply_rerun(Tool::Pytest, Some(1), "", &mut cases, found);
+    let seen: Vec<(&str, bool)> = cases
+        .iter()
+        .map(|c| (c.name.as_str(), c.previous))
+        .collect();
+    assert_eq!(
+        seen,
+        [
+            ("test_add", false),
+            ("test_b_wrong", true),
+            ("test_counts", true),
+            ("tests.test_b", false),
+        ]
     );
 }
 

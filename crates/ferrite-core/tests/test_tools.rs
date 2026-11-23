@@ -2852,6 +2852,75 @@ fn pytest_junitxml_보고서와_실패만_다시() {
 }
 
 #[test]
+#[ignore = "pytest가 필요하다"]
+fn pytest가_한_파일을_모으지_못해도_다른_파일은_돌고_그_파일의_실패는_앞_결과로_남는다() {
+    if !require("python -m pytest --version") {
+        return;
+    }
+    let root = temp_dir("pytest-collect-error");
+    std::fs::create_dir_all(root.join("tests")).unwrap();
+    let test_a = |name: &str, want: i32| {
+        std::fs::write(
+            root.join("tests/test_a.py"),
+            format!("def test_add():\n    assert 1 + 2 == 3\n\n\ndef {name}():\n    assert 1 + 2 == {want}\n"),
+        )
+        .unwrap();
+    };
+    test_a("test_wrong", 4);
+    std::fs::write(
+        root.join("tests/test_b.py"),
+        "def test_b_wrong():\n    assert \"a\" + \"b\" == \"ac\"\n",
+    )
+    .unwrap();
+    let report = root.join("reports");
+    std::fs::create_dir_all(&report).unwrap();
+    let command = "python -m pytest -q";
+    let since = SystemTime::now();
+    run(
+        &root,
+        &test_report::with_report(Tool::Pytest, command, &report),
+    );
+    let mut cases = junit(Tool::Pytest, &root, &report, since);
+    assert_eq!(
+        outcomes(&cases),
+        [
+            ("test_add".to_owned(), Outcome::Passed),
+            ("test_b_wrong".to_owned(), Outcome::Failed),
+            ("test_wrong".to_owned(), Outcome::Failed),
+        ]
+    );
+
+    // test_a의 실패는 이름을 바꿔 고쳤고, test_b는 문법 오류로 모을 수 없다. 새 이름은 길이를 달리 한다: 파일
+    // 크기와 고친 시각(초)이 같으면 pytest가 앞 실행의 바이트코드(`__pycache__`)를 그대로 써 옛 테스트를 돌린다.
+    test_a("test_fixed_sum", 3);
+    std::fs::write(root.join("tests/test_b.py"), "def broken(:\n").unwrap();
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    let since = SystemTime::now();
+    let line = test_report::rerun(Tool::Pytest, command, &failed(&cases)).unwrap();
+    let line = test_report::with_report(Tool::Pytest, &line, &report);
+    let (ok, output) = run(&root, &line);
+    assert!(!ok, "test_b를 모으지 못해 실패한다\n{line}\n{output}");
+    let found = junit(Tool::Pytest, &root, &report, since);
+    // 모으기 오류는 `classname`이 비고 이름이 모듈이다. 다른 파일(test_a)은 그래도 돌았다.
+    assert!(
+        found.iter().any(|c| c.suite.is_empty()
+            && c.name == "tests.test_b"
+            && c.outcome == Outcome::Failed),
+        "{found:?}\n{output}"
+    );
+    assert!(
+        found.iter().any(|c| c.suite == "tests.test_a"),
+        "{found:?}\n{output}"
+    );
+    test_report::apply_rerun(Tool::Pytest, Some(1), "", &mut cases, found);
+    // test_a의 지운 실패는 빠지고, 모으지 못한 test_b의 실패는 앞 결과로 남는다.
+    assert!(!cases.iter().any(|c| c.name == "test_wrong"), "{cases:?}");
+    let kept = cases.iter().find(|c| c.name == "test_b_wrong").unwrap();
+    assert!(kept.previous && kept.outcome == Outcome::Failed);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
 #[ignore = "Go가 필요하다"]
 fn go_test_json과_실패만_다시() {
     if !require("go version") {
