@@ -2913,6 +2913,83 @@ fn go_test_json과_실패만_다시() {
 }
 
 #[test]
+#[ignore = "Go가 필요하다"]
+fn go_한_패키지의_빌드만_깨지면_실패만_다시가_그_패키지의_실패를_앞_결과로_남긴다() {
+    if !require("go version") {
+        return;
+    }
+    let root = temp_dir("go-package-broken");
+    std::fs::write(root.join("go.mod"), "module example.com/board\n\ngo 1.21\n").unwrap();
+    for package in ["calc", "text"] {
+        std::fs::create_dir_all(root.join(package)).unwrap();
+    }
+    std::fs::write(
+        root.join("calc/calc.go"),
+        "package calc\n\nfunc Add(a, b int) int { return a + b }\n",
+    )
+    .unwrap();
+    let calc_test = |name: &str, want: i32| {
+        std::fs::write(
+            root.join("calc/calc_test.go"),
+            format!("package calc\n\nimport \"testing\"\n\nfunc TestAdd(t *testing.T) {{\n\tif Add(1, 2) != 3 {{\n\t\tt.Fatal(\"add\")\n\t}}\n}}\n\nfunc {name}(t *testing.T) {{\n\tif got := Add(1, 2); got != {want} {{\n\t\tt.Errorf(\"got %d, want {want}\", got)\n\t}}\n}}\n"),
+        )
+        .unwrap();
+    };
+    calc_test("TestWrong", 4);
+    std::fs::write(
+        root.join("text/text_test.go"),
+        "package text\n\nimport \"testing\"\n\nfunc TestJoinWrong(t *testing.T) {\n\tif \"a\"+\"b\" != \"ac\" {\n\t\tt.Error(\"join\")\n\t}\n}\n",
+    )
+    .unwrap();
+    let command = "go test ./...";
+    let (_, stdout) = run(&root, &test_report::with_report(Tool::Go, command, &root));
+    let mut cases = test_report::parse_go_json(&stdout);
+    assert_eq!(
+        outcomes(&cases),
+        [
+            ("TestAdd".to_owned(), Outcome::Passed),
+            ("TestJoinWrong".to_owned(), Outcome::Failed),
+            ("TestWrong".to_owned(), Outcome::Failed),
+        ]
+    );
+
+    // calc의 실패는 이름을 바꿔 고쳤고, text는 테스트 파일이 깨져 빌드되지 않는다.
+    calc_test("TestFixed", 3);
+    std::fs::write(
+        root.join("text/text_test.go"),
+        "package text\n\nfunc broken( {\n",
+    )
+    .unwrap();
+    let rerun = test_report::rerun(Tool::Go, command, &failed(&cases)).unwrap();
+    let (ok, stdout) = run(&root, &rerun);
+    assert!(!ok, "text의 빌드가 깨져 실패한다\n{rerun}\n{stdout}");
+    let found = test_report::parse_go_json(&stdout);
+    assert!(
+        found
+            .iter()
+            .any(|c| c.suite == "example.com/board/text" && c.name == test_report::PACKAGE_CASE),
+        "{stdout}"
+    );
+    test_report::apply_rerun(Tool::Go, Some(1), "", &mut cases, found);
+    // 돈 calc의 지운 실패는 빼고, 빌드가 깨진 text의 실패는 앞 결과로 남긴다(패키지의 빌드 실패도 더한다).
+    assert_eq!(
+        outcomes(&cases),
+        [
+            (test_report::PACKAGE_CASE.to_owned(), Outcome::Failed),
+            ("TestAdd".to_owned(), Outcome::Passed),
+            ("TestJoinWrong".to_owned(), Outcome::Failed),
+        ]
+    );
+    let previous: Vec<&str> = cases
+        .iter()
+        .filter(|c| c.previous)
+        .map(|c| c.name.as_str())
+        .collect();
+    assert_eq!(previous, ["TestJoinWrong"]);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
 #[ignore = "CMake 3.21 이상이 필요하다"]
 fn ctest_output_junit과_실패만_다시() {
     if !require("ctest --version") {
