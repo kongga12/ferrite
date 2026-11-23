@@ -21,7 +21,9 @@ concurrency:
   cancel-in-progress: true
 
 env:
+  # ci.yml과 같게 둔다. Rust 캐시 키에 들어 다르면 ci.yml의 캐시를 읽지 못한다.
   RUST_BACKTRACE: 1
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
 
 jobs:
   adapters:
@@ -34,10 +36,13 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
-      # main의 실행만 저장한다(ci.yml과 같은 까닭: 저장소 캐시 한도 10GB).
+      # ci.yml `full` 작업의 Rust 캐시를 읽기만 한다(그 작업이 작업 공간 전체 시험을 빌드해 여기서 쓰는 의존성을
+      # 모두 담는다). 따로 저장하면 OS마다 0.8~0.9GB씩 더 들어 저장소 캐시 한도(10GB)를 넘었다(2026-11-23).
+      # 키가 같아지게 Rust 캐시 키에 드는 환경 변수(`CARGO`·`RUST`로 시작)를 ci.yml과 맞춘다(위 `env`).
       - uses: Swatinem/rust-cache@v2
         with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          shared-key: full
+          save-if: false
       # debugpy는 이 Python으로 가상환경을 만들고, 디버그 대상도 이 Python으로 띄운다.
       - uses: actions/setup-python@v7
         with:
