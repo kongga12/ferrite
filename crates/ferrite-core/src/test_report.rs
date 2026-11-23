@@ -126,8 +126,8 @@ pub fn merge_rerun(cases: &mut Vec<Case>, found: Vec<Case>) {
 /// 실패만 다시의 결과(`found`, 끝난 종료 코드 `code`)를 앞 결과에 넣는다. 다시 돌린 지난 실패가 결과에 없으면
 /// 지우거나 이름을 바꾼 것으로 보고 뺀다. 다만 그 테스트가 돌 자리가 돌지 못했으면(빌드 오류) 남긴다.
 /// - Maven: 테스트 실패로는 0으로 끝나게 돌리므로(`with_report`) 0이 아니면 어느 모듈의 빌드 오류다. 출력
-///   (`output`)의 모듈별 결과(Reactor Summary)에서 성공한 모듈의 실패는 뺀다. 결과가 없으면(`-q`, 모듈 하나)
-///   모두 남긴다.
+///   (`output`)의 모듈별 결과(Reactor Summary)에서 성공한 모듈의 실패는 뺀다. 결과가 없으면(모듈 하나) 모두
+///   남긴다. `-q`면 `with_report`가 그 결과를 되살린다.
 /// - Gradle: 그 테스트의 작업이 결과를 냈다(컴파일이 깨지면 작업이 돌지 않는다).
 /// - Go: 그 패키지가 빌드에 실패하지 않았다(`PACKAGE_CASE`).
 /// - pytest·CTest: 모으지 못한 파일은 결과에 오류로 남는다. pytest의 `--lf`는 지난 실패를 하나도 찾지 못하면
@@ -187,6 +187,11 @@ pub fn apply_whole_rerun(tool: Tool, cases: &mut Vec<Case>, found: Vec<Case>) {
     }
     cases.extend(found);
 }
+
+/// Maven 3의 실행 사건(모듈 머리 줄과 모듈별 결과)을 찍는 로거의 수준 속성. `-q`(모두 ERROR)여도 이 로거만
+/// INFO로 두면 받기 기록이나 플러그인 출력은 감춘 채 모듈별 결과가 남는다(Maven 3.10에서 확인).
+const MAVEN_EVENT_LOGGER: &str =
+    "org.slf4j.simpleLogger.log.org.apache.maven.cli.event.ExecutionEventLogger";
 
 /// Maven 출력 끝의 모듈별 결과(Reactor Summary) 줄(`[INFO] common ........ SUCCESS [  1.2 s]`).
 static MAVEN_REACTOR_LINE: LazyLock<Regex> = LazyLock::new(|| {
@@ -424,6 +429,7 @@ pub fn parse_go_json(output: &str) -> Vec<Case> {
 /// 테스트가 없는 하위 프로젝트도 "No tests found"로 실패한다). Maven도 첫 모듈의 실패에서 멈춘다.
 /// `-fae`만으로는 실패한 모듈에 기대는 모듈을 건너뛰므로, 테스트 실패로는 모듈을 실패시키지 않게 하고
 /// (`maven.test.failure.ignore`, 결과는 보고서로 가린다) 빌드 오류에도 상관없는 모듈은 돌게 `-fae`를 붙인다.
+/// Maven의 `-q`는 모듈별 결과(Reactor Summary)도 감추므로 그 줄을 찍는 로거만 되살린다(`MAVEN_EVENT_LOGGER`).
 pub fn with_report(tool: Tool, command: &str, dir: &Path) -> String {
     let path = |name: &str| dir.join(name).to_string_lossy().into_owned();
     let has = |flags: &[&str]| command.split_whitespace().any(|w| flags.contains(&w));
@@ -442,6 +448,9 @@ pub fn with_report(tool: Tool, command: &str, dir: &Path) -> String {
             }
             if !command.contains("maven.test.failure.ignore") {
                 line.push_str(" -Dmaven.test.failure.ignore=true");
+            }
+            if has(&["-q", "--quiet"]) && !command.contains(MAVEN_EVENT_LOGGER) {
+                line.push_str(&format!(" -D{MAVEN_EVENT_LOGGER}=info"));
             }
             line
         }

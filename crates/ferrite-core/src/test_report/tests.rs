@@ -254,6 +254,21 @@ fn 보고서_옵션과_실패만_다시_돌리는_명령을_만든다() {
         "mvn -ff test -Dmaven.test.failure.ignore=false",
         "사용자가 고른 실패 방식은 그대로"
     );
+    // `-q`면 모듈별 결과를 찍는 로거만 되살린다.
+    let events =
+        "-Dorg.slf4j.simpleLogger.log.org.apache.maven.cli.event.ExecutionEventLogger=info";
+    for quiet in ["mvn -B -q test", "mvn --quiet test"] {
+        assert_eq!(
+            with_report(Tool::Maven, quiet, dir),
+            format!("{quiet} -fae -Dmaven.test.failure.ignore=true {events}")
+        );
+    }
+    let again = with_report(Tool::Maven, "mvn -q test", dir);
+    assert_eq!(
+        with_report(Tool::Maven, &again, dir),
+        again,
+        "두 번 붙이지 않는다"
+    );
     // 작업 줄을 남기는 옵션(`gradle.properties`의 출력 설정을 덮는다)을 끝에 붙인다.
     let lines = "--console=plain -Dorg.gradle.logging.level=lifecycle";
     assert_eq!(
