@@ -364,12 +364,19 @@ impl TestPanel {
                 self.skipping = Some(pom);
             }
         }
-        self.status = Some(if found_any {
+        // 실패만 다시가 새 보고서를 내지 못해도(빌드가 깨진 모듈만 남았다) 앞 결과는 고쳐 보이므로 그 수를 알린다.
+        let kept = !found_any && running.rerun && !self.cases.is_empty();
+        self.status = Some(if found_any || kept {
+            let fresh = if kept {
+                " · 이번에는 새 보고서가 없습니다"
+            } else {
+                ""
+            };
             (
                 format!(
-                    "{stopped}통과 {passed} · 실패 {failed} · 건너뜀 {skipped} · {seconds:.1}초 · 종료 코드 {code}{more}"
+                    "{stopped}통과 {passed} · 실패 {failed} · 건너뜀 {skipped} · {seconds:.1}초 · 종료 코드 {code}{more}{fresh}"
                 ),
-                failed > 0 || unreported,
+                failed > 0 || unreported || kept,
             )
         } else if self.skipping.is_some() {
             (
