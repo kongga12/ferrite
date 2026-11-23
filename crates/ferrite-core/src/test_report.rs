@@ -163,6 +163,20 @@ pub fn apply_rerun(
     merge_rerun(cases, found);
 }
 
+/// 실패만 다시가 돌 테스트를 찾지 못해 전체를 다시 돌린 결과(`found`)로 앞 결과를 바꾼다. Gradle은 결과를 낸
+/// 작업(이번에 돈 것과 최신이라 건너뛴 것)의 앞 결과만 바꾸고, 결과를 내지 못한 작업(컴파일이 깨진 하위 프로젝트)의
+/// 앞 결과는 남긴다. 실패만 다시를 누른 사람에게 그 실패가 사라지면 고친 뒤 다시 돌릴 수 없다. Gradle의 "No tests
+/// found"는 다른 하위 프로젝트의 빌드가 깨져도 나므로 이렇게 넘어온다. 다른 도구는 실패만 다시가 0으로 끝났을
+/// 때만 넘어와(빌드가 깨지지 않았다) 모두 바꾼다.
+pub fn apply_whole_rerun(tool: Tool, cases: &mut Vec<Case>, found: Vec<Case>) {
+    if tool == Tool::Gradle {
+        cases.retain(|c| c.task.is_some() && !found.iter().any(|f| f.task == c.task));
+    } else {
+        cases.clear();
+    }
+    cases.extend(found);
+}
+
 /// Maven 출력 끝의 모듈별 결과(Reactor Summary) 줄(`[INFO] common ........ SUCCESS [  1.2 s]`).
 static MAVEN_REACTOR_LINE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^\[INFO\] (.+?) \.*\s*(SUCCESS|FAILURE|SKIPPED)(?:\s|$)").unwrap()

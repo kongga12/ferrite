@@ -2149,6 +2149,75 @@ fn gradle_실패_둘_가운데_하나의_이름을_바꾸면_실패만_다시가
 }
 
 #[test]
+#[ignore = "Gradle로 두 프로젝트의 JUnit 5 테스트를 돌린다(의존성을 받는다). Java 17 이상과 gradle이 필요하다"]
+fn gradle_한_프로젝트의_컴파일만_깨져도_전체를_다시_돌린_결과에_그_프로젝트의_실패가_남는다() {
+    if !require("gradle --version") {
+        return;
+    }
+    let build = "plugins {\n    java\n}\n\nrepositories {\n    mavenCentral()\n}\n\ndependencies {\n    testImplementation(\"org.junit.jupiter:junit-jupiter:5.12.2\")\n    testRuntimeOnly(\"org.junit.platform:junit-platform-launcher\")\n}\n\ntasks.test {\n    useJUnitPlatform()\n}\n";
+    let root = gradle_project("gradle-project-broken", &[("app", build), ("lib", build)]);
+    let app = root.join("app/src/test/java/demo");
+    let lib = root.join("lib/src/test/java/demo");
+    write_calc_test(&app, "addsWrong", false);
+    std::fs::create_dir_all(&lib).unwrap();
+    write_minus_test(&lib);
+    let command = "gradle test";
+    let since = SystemTime::now();
+    run(
+        &root,
+        &test_report::with_report(Tool::Gradle, command, &root),
+    );
+    let mut cases = junit(Tool::Gradle, &root, &root, since);
+    assert_eq!(
+        outcomes(&cases),
+        [
+            ("adds()".to_owned(), Outcome::Passed),
+            ("addsWrong()".to_owned(), Outcome::Failed),
+            ("subtractsWrong()".to_owned(), Outcome::Failed),
+        ]
+    );
+
+    // app의 실패는 이름을 바꿔 고쳤고, lib은 테스트 컴파일이 깨졌다. 실패만 다시는 app에서 "No tests found"로
+    // 끝나 테스트 창이 전체를 다시 돌린다.
+    write_calc_test(&app, "addsFixed", true);
+    std::fs::write(
+        lib.join("MinusTest.java"),
+        "package demo;\n\nclass MinusTest {\n    깨진 줄\n}\n",
+    )
+    .unwrap();
+    let line = test_report::rerun(Tool::Gradle, command, &failed(&cases)).unwrap();
+    let line = test_report::with_report(Tool::Gradle, &line, &root);
+    let (ok, output) = run(&root, &format!("{line} 2>&1"));
+    assert!(!ok, "{output}");
+    assert!(
+        test_report::gradle_rerun_found_nothing(Tool::Gradle, &output),
+        "{output}"
+    );
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    let since = SystemTime::now();
+    let (ok, output) = run(
+        &root,
+        &test_report::with_report(Tool::Gradle, command, &root),
+    );
+    assert!(!ok, "lib의 컴파일이 깨져 실패한다\n{output}");
+    let mut found = junit(Tool::Gradle, &root, &root, since);
+    for file in test_report::gradle_skipped_reports(&root, &output) {
+        found.extend(test_report::read_report(&file).unwrap());
+    }
+    test_report::apply_whole_rerun(Tool::Gradle, &mut cases, found);
+    // 돈 app의 결과는 바꾸고(지운 실패는 빠진다), 돌지 못한 lib의 실패는 남긴다.
+    assert_eq!(
+        outcomes(&cases),
+        [
+            ("adds()".to_owned(), Outcome::Passed),
+            ("addsFixed()".to_owned(), Outcome::Passed),
+            ("subtractsWrong()".to_owned(), Outcome::Failed),
+        ]
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
 #[ignore = "Gradle로 TestNG 테스트(useTestNG)를 돌린다(의존성을 받는다). Java 17 이상과 gradle이 필요하다"]
 fn gradle_testng_매개변수_테스트를_줄마다_읽고_실패만_다시() {
     if !require("gradle --version") {
