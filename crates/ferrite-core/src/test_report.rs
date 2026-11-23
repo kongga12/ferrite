@@ -130,8 +130,10 @@ pub fn merge_rerun(cases: &mut Vec<Case>, found: Vec<Case>) {
 ///   남긴다. `-q`여도 `with_report`가 그 결과를 되살린다.
 /// - Gradle: 그 테스트의 작업이 결과를 냈다(컴파일이 깨지면 작업이 돌지 않는다).
 /// - Go: 그 패키지가 빌드에 실패하지 않았다(`PACKAGE_CASE`).
-/// - pytest·CTest: 모으지 못한 파일은 결과에 오류로 남는다. pytest의 `--lf`는 지난 실패를 하나도 찾지 못하면
-///   모두 돌리고, CTest의 `--rerun-failed`는 번호로 골라 이름을 바꾼 뒤 같은 번호의 다른 테스트를 돌린다.
+/// - pytest: 그 테스트의 파일을 모으지 못하지 않았다(문법 오류 등, `pytest_collect_error`). 다른 파일은
+///   `with_report`가 붙인 `--continue-on-collection-errors`로 돈다. `--lf`는 지난 실패를 하나도 찾지 못하면
+///   모두 돌린다.
+/// - CTest: 늘 돈 것으로 본다. `--rerun-failed`는 번호로 골라 이름을 바꾼 뒤 같은 번호의 다른 테스트를 돌린다.
 pub fn apply_rerun(
     tool: Tool,
     code: Option<i32>,
@@ -158,7 +160,8 @@ pub fn apply_rerun(
         Tool::Go => !found
             .iter()
             .any(|f| f.suite == c.suite && f.name == PACKAGE_CASE),
-        Tool::Pytest | Tool::Ctest => true,
+        Tool::Pytest => !found.iter().any(|f| pytest_collect_error(f, c)),
+        Tool::Ctest => true,
     };
     cases.retain_mut(|c| {
         if c.outcome != Outcome::Failed || found.iter().any(|f| f.same_test(c)) {
@@ -215,6 +218,18 @@ pub fn maven_built_modules(output: &str) -> Option<Vec<String>> {
             .map(|c| c[1].trim().to_owned())
             .collect(),
     )
+}
+
+/// `error`가 `case`의 파일을 모으지 못한 오류인지. pytest의 JUnit 보고서는 모으기 오류를 `classname`이 비고
+/// `name`이 모듈(`tests.test_b`)인 실패로 적는다. 그 파일의 테스트는 `classname`이 그 모듈(클래스 안이면
+/// `tests.test_b.TestX`)이다.
+fn pytest_collect_error(error: &Case, case: &Case) -> bool {
+    error.suite.is_empty()
+        && error.outcome == Outcome::Failed
+        && case
+            .suite
+            .strip_prefix(error.name.as_str())
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('.'))
 }
 
 /// Go 패키지 자체가 실패했을 때(빌드 실패 등)의 이름.
@@ -456,8 +471,16 @@ pub fn with_report(tool: Tool, command: &str, dir: &Path) -> String {
             }
             line
         }
-        Tool::Pytest if !command.contains("--junitxml") => {
-            format!("{command} \"--junitxml={}\"", path("pytest.xml"))
+        Tool::Pytest => {
+            let mut line = command.to_owned();
+            if !command.contains("--junitxml") {
+                line.push_str(&format!(" \"--junitxml={}\"", path("pytest.xml")));
+            }
+            // 한 파일을 모으지 못하면(문법 오류 등) 기본은 세션을 멈춰 아무 테스트도 돌지 않는다. 다른 파일은 돌게 한다.
+            if !has(&["--continue-on-collection-errors"]) {
+                line.push_str(" --continue-on-collection-errors");
+            }
+            line
         }
         Tool::Ctest if !command.contains("--output-junit") => {
             format!("{command} --output-junit \"{}\"", path("ctest.xml"))
