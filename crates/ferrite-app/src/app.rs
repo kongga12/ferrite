@@ -1291,6 +1291,7 @@ impl FerriteApp {
             Command::CodeAction => self.request_at_cursor(LspRequest::CodeActions),
             Command::SendRequest => {}
             Command::Run => self.open_run_picker(ctx),
+            Command::RunTest => self.run_test_at_cursor(ctx),
             Command::Debug => self.debug_continue_or_start(ctx),
             Command::DebugStop => self.debugger.stop(),
             Command::DebugPause => self.debugger.pause(),
@@ -2773,13 +2774,13 @@ impl FerriteApp {
                         ui.close();
                         dock::show(&mut self.layout, Pane::Tests);
                     }
+                    let item = egui::Button::new("커서의 테스트 돌리기")
+                        .shortcut_text(self.keys.text(&ctx, Command::RunTest));
                     if ui
-                        .add_enabled(
-                            project && self.active.is_some(),
-                            egui::Button::new("커서의 테스트 돌리기"),
-                        )
+                        .add_enabled(project && self.active.is_some(), item)
                         .on_hover_text(
-                            "에디터 커서가 든 테스트 메서드(Java·Kotlin @Test, Python test_ 함수, Go TestX)만 돌린다",
+                            "에디터 커서가 든 테스트 메서드(Java·Kotlin @Test, Python test_ 함수, Go TestX)만 돌린다. \
+                             메서드 밖이면 그 테스트 클래스(Python은 파일, Go는 패키지) 전체를 돌린다",
                         )
                         .clicked()
                     {

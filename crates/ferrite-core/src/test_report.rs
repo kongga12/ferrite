@@ -149,6 +149,22 @@ pub fn apply_rerun(
     apply_selected(tool, code, output, cases, found, &targets);
 }
 
+/// `case`가 돌려 달라고 한 `target`에 드는지. 이름이 빈 것은 그 묶음(클래스와 그 안쪽 클래스, 모듈과 그 안의
+/// 클래스, 패키지) 전체다. 돌린 곳(Gradle 작업·Maven 모듈)을 모르는 것(에디터에서 고름)은 돌린 곳을 따지지 않는다.
+fn targeted(target: &Case, case: &Case) -> bool {
+    let place = target.task.is_none() || target.task == case.task;
+    if target.name.is_empty() {
+        place
+            && case
+                .suite
+                .strip_prefix(target.suite.as_str())
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with(['.', '$']))
+    } else {
+        target.same_test(case)
+            || (target.task.is_none() && target.suite == case.suite && target.name == case.name)
+    }
+}
+
 /// 고른 테스트(`targets`)만 돌린 결과를 앞 결과에 넣는다(`run_only`). 실패만 다시(`apply_rerun`)와 같되, 결과에
 /// 없으면 지운 것으로 볼 테스트가 지난 실패가 아니라 고른 테스트다. 고르지 않은 테스트는 그대로 둔다.
 pub fn apply_selected(
@@ -182,7 +198,7 @@ pub fn apply_selected(
         Tool::Ctest => true,
     };
     cases.retain_mut(|c| {
-        if !targets.iter().any(|t| t.same_test(c)) || found.iter().any(|f| f.same_test(c)) {
+        if !targets.iter().any(|t| targeted(t, c)) || found.iter().any(|f| f.same_test(c)) {
             return true;
         }
         // 다시 돌린 테스트가 결과에 없다: 돌 자리가 돌았으면 지운 것이라 빼고, 아니면 앞 결과로 남긴다.
@@ -966,9 +982,13 @@ pub fn run_only(tool: Tool, command: &str, cases: &[&Case], dir: &Path) -> Optio
                     line
                 }
                 None => {
+                    // 이름이 빈 것(묶음 전체)은 묶음의 끝 마디(모듈·클래스 이름)로 거른다.
                     let names: Vec<String> = cases
                         .iter()
-                        .map(|c| c.name.split('[').next().unwrap_or(&c.name).to_owned())
+                        .map(|c| match c.name.split('[').next().unwrap_or(&c.name) {
+                            "" => c.suite.rsplit('.').next().unwrap_or(&c.suite).to_owned(),
+                            name => name.to_owned(),
+                        })
                         .collect();
                     format!("{command} -k \"{}\"", dedup_strings(names).join(" or "))
                 }
@@ -1008,8 +1028,11 @@ fn pytest_node_id(case: &Case, dir: &Path) -> Option<String> {
                 id.push_str("::");
                 id.push_str(class);
             }
-            id.push_str("::");
-            id.push_str(&case.name);
+            // 이름이 빈 것은 그 파일·클래스 전체다.
+            if !case.name.is_empty() {
+                id.push_str("::");
+                id.push_str(&case.name);
+            }
             id
         })
     })
@@ -1023,6 +1046,14 @@ pub fn rerun(tool: Tool, command: &str, failed: &[&Case]) -> Option<String> {
     }
     // JUnit 5의 매개변수 테스트 이름(`adds(int)[1]`)과 Gradle의 `()`를 뺀다.
     let method = |name: &str| name.split(['(', '[']).next().unwrap_or(name).to_owned();
+    // Gradle `--tests`의 거르기. 이름이 빈 것(묶음 전체, `run_only`)은 클래스만.
+    let gradle_test = |case: &Case| {
+        if case.name.is_empty() {
+            case.suite.clone()
+        } else {
+            format!("{}.{}", case.suite, method(&case.name))
+        }
+    };
     Some(match tool {
         Tool::Maven => {
             // `클래스#메서드+메서드,…`(Surefire·Failsafe의 거르기 꼴).
@@ -1038,9 +1069,16 @@ pub fn rerun(tool: Tool, command: &str, failed: &[&Case]) -> Option<String> {
                         None => classes.push((class, vec![name])),
                     }
                 }
+                // 이름이 빈 것(클래스 전체, `run_only`)이 있으면 그 클래스를 통째로.
                 classes
                     .iter()
-                    .map(|(class, names)| format!("{class}#{}", names.join("+")))
+                    .map(|(class, names)| {
+                        if names.iter().any(String::is_empty) {
+                            class.clone()
+                        } else {
+                            format!("{class}#{}", names.join("+"))
+                        }
+                    })
                     .collect::<Vec<_>>()
                     .join(",")
             };
@@ -1075,7 +1113,7 @@ pub fn rerun(tool: Tool, command: &str, failed: &[&Case]) -> Option<String> {
             let mut tasks: Vec<(&str, Vec<String>)> = Vec::new();
             for case in failed {
                 let task = case.task.as_deref().unwrap_or_default();
-                let test = format!("{}.{}", case.suite, method(&case.name));
+                let test = gradle_test(case);
                 match tasks.iter_mut().find(|(t, _)| *t == task) {
                     Some((_, tests)) if !tests.contains(&test) => tests.push(test),
                     Some(_) => {}
@@ -1094,11 +1132,7 @@ pub fn rerun(tool: Tool, command: &str, failed: &[&Case]) -> Option<String> {
         Tool::Gradle => {
             let mut line = command.to_owned();
             for case in failed {
-                line.push_str(&format!(
-                    " --tests \"{}.{}\"",
-                    case.suite,
-                    method(&case.name)
-                ));
+                line.push_str(&format!(" --tests \"{}\"", gradle_test(case)));
             }
             line
         }
@@ -1112,7 +1146,8 @@ pub fn rerun(tool: Tool, command: &str, failed: &[&Case]) -> Option<String> {
                     packages.push(&case.suite);
                 }
                 let top = case.name.split('/').next().unwrap_or(&case.name);
-                if case.name != PACKAGE_CASE && !names.contains(&top) {
+                // 이름이 빈 것(패키지 전체, `run_only`)은 거르지 않는다.
+                if case.name != PACKAGE_CASE && !top.is_empty() && !names.contains(&top) {
                     names.push(top);
                 }
             }

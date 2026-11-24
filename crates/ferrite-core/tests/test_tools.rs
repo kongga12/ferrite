@@ -1149,6 +1149,32 @@ fn maven_에디터_커서가_든_테스트만_돌린다() {
         [("addsWrong".to_owned(), Outcome::Failed)],
         "커서의 테스트만 돈다({line})"
     );
+    // 커서가 클래스 줄(메서드 밖)이면 그 클래스 전체가 돈다.
+    let class_line = text
+        .lines()
+        .position(|l| l.contains("class CalcTest"))
+        .unwrap();
+    let at = ferrite_core::test_at::test_at(&file, &text, class_line, &root).expect("클래스");
+    assert_eq!((at.suite.as_str(), at.name.as_str()), ("demo.CalcTest", ""));
+    let whole = Case {
+        name: String::new(),
+        ..case
+    };
+    let line = test_report::run_only(Tool::Maven, "mvn -B -q test", &[&whole], &root).unwrap();
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    let since = SystemTime::now();
+    run(
+        &root,
+        &test_report::with_report(Tool::Maven, &line, &report),
+    );
+    assert_eq!(
+        outcomes(&junit(Tool::Maven, &root, &report, since)),
+        [
+            ("adds".to_owned(), Outcome::Passed),
+            ("addsWrong".to_owned(), Outcome::Failed),
+        ],
+        "클래스 전체가 돈다({line})"
+    );
     let _ = std::fs::remove_dir_all(&root);
 }
 

@@ -645,7 +645,7 @@ impl TestPanel {
         let tool = Tool::of(&config.command).ok_or("테스트 구성이 아닙니다")?;
         let dir = config.working_directory(root);
         let found = test_at(path, text, line, &dir)
-            .ok_or("커서가 테스트 메서드(함수) 안에 있지 않습니다")?;
+            .ok_or("이 파일에서 테스트(@Test 메서드, test 함수, TestX)를 찾지 못했습니다")?;
         let case = Case {
             suite: found.suite,
             name: found.name,
