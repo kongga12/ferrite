@@ -1317,6 +1317,41 @@ fn 고른_테스트만_돌린_결과는_고른_것만_지운_것으로_본다() 
 }
 
 #[test]
+fn 테스트_소스_파일의_gradle_테스트_작업() {
+    let root = std::env::temp_dir().join(format!("ferrite-gradle-task-at-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let file = |path: &str| {
+        let path = root.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "").unwrap();
+        path
+    };
+    file("settings.gradle.kts");
+    std::fs::write(root.join("settings.gradle.kts"), "include(\"app\")\n").unwrap();
+    file("build.gradle.kts");
+    file("app/build.gradle.kts");
+    assert_eq!(
+        gradle_test_task(&file("app/src/test/java/demo/CalcTest.java")).as_deref(),
+        Some(":app:test")
+    );
+    assert_eq!(
+        gradle_test_task(&file("app/src/integrationTest/kotlin/demo/SaveIT.kt")).as_deref(),
+        Some(":app:integrationTest")
+    );
+    assert_eq!(
+        gradle_test_task(&file("src/test/java/RootTest.java")).as_deref(),
+        Some(":test")
+    );
+    // `src` 밖이나 빌드 파일 없는 곳은 모른다.
+    assert_eq!(gradle_test_task(&file("app/scripts/Tool.java")), None);
+    assert_eq!(
+        gradle_test_task(&std::env::temp_dir().join("Loose.java")),
+        None
+    );
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
 fn 한글_windows의_maven이_cp949로_낸_모듈별_결과도_읽는다() {
     // 한글 Windows의 Maven(JDK 8·21 모두)이 `<name>게시판 공통</name>` 모듈을 이 바이트로 냈다(2026-11-23).
     // 테스트 창은 줄마다 UTF-8이 아니면 CP949로 푼다(`text_file::decode`).

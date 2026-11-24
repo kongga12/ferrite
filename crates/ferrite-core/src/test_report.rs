@@ -721,6 +721,24 @@ fn maven_module(path: &Path) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// 테스트 소스 파일(`<프로젝트>/src/<소스 세트>/…`)을 돌리는 Gradle 테스트 작업의 경로(`:app:test`, 소스 세트가
+/// `integrationTest`면 `:app:integrationTest`, 루트 프로젝트면 `:test`). 테스트 작업은 소스 세트 이름을 따른다고
+/// 본다(java 플러그인의 `test`, `jvm-test-suite`의 스위트). 프로젝트는 위로 가장 가까운 `build.gradle(.kts)`가
+/// 있는 폴더다. 그 아래 `src/<소스 세트>/` 안이 아니면 None.
+pub fn gradle_test_task(file: &Path) -> Option<String> {
+    let project = file
+        .ancestors()
+        .skip(1)
+        .find(|d| d.join("build.gradle").is_file() || d.join("build.gradle.kts").is_file())?;
+    let mut parts = file.strip_prefix(project).ok()?.components();
+    if parts.next()?.as_os_str() != "src" {
+        return None;
+    }
+    let set = parts.next()?.as_os_str().to_str()?.to_owned();
+    parts.next()?;
+    Some(format!("{}:{set}", gradle_project_path(project)?))
+}
+
 /// Gradle 보고서(`<프로젝트>/build/test-results/<작업>/TEST-….xml`)를 남긴 작업의 경로(`:app:test`, 루트
 /// 프로젝트면 `:test`).
 fn gradle_task(path: &Path) -> Option<String> {

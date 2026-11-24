@@ -2339,6 +2339,60 @@ fn gradle_한_프로젝트의_컴파일만_깨져도_전체를_다시_돌린_결
 }
 
 #[test]
+#[ignore = "Gradle로 두 프로젝트의 JUnit 5 테스트를 돌린다(의존성을 받는다). Java 17 이상과 gradle이 필요하다"]
+fn gradle_에디터_커서의_테스트는_그_프로젝트의_테스트_작업만_돌린다() {
+    if !require("gradle --version") {
+        return;
+    }
+    let build = "plugins {\n    java\n}\n\nrepositories {\n    mavenCentral()\n}\n\ndependencies {\n    testImplementation(\"org.junit.jupiter:junit-jupiter:5.12.2\")\n    testRuntimeOnly(\"org.junit.platform:junit-platform-launcher\")\n}\n\ntasks.test {\n    useJUnitPlatform()\n}\n";
+    let root = gradle_project("gradle-test-at", &[("app", build), ("lib", build)]);
+    let app = root.join("app/src/test/java/demo");
+    write_calc_test(&app, "addsWrong", false);
+    let lib = root.join("lib/src/test/java/demo");
+    std::fs::create_dir_all(&lib).unwrap();
+    write_minus_test(&lib);
+    let file = app.join("CalcTest.java");
+    let text = std::fs::read_to_string(&file).unwrap();
+    let line = text
+        .lines()
+        .position(|l| l.contains("assertEquals(4"))
+        .unwrap();
+    let at = ferrite_core::test_at::test_at(&file, &text, line, &root).expect("커서의 테스트");
+    let case = Case {
+        suite: at.suite,
+        name: at.name,
+        outcome: Outcome::Passed,
+        seconds: None,
+        message: None,
+        detail: String::new(),
+        file: None,
+        line: None,
+        integration: false,
+        task: test_report::gradle_test_task(&file),
+        previous: false,
+    };
+    assert_eq!(case.task.as_deref(), Some(":app:test"));
+    // `check`는 `--tests`를 받지 못한다. 작업을 알아 그 작업에만 붙인다(lib은 돌지 않는다).
+    let line = test_report::run_only(Tool::Gradle, "gradle check", &[&case], &root).unwrap();
+    assert_eq!(line, "gradle :app:test --tests \"demo.CalcTest.addsWrong\"");
+    let since = SystemTime::now();
+    let (ok, output) = run(
+        &root,
+        &format!(
+            "{} 2>&1",
+            test_report::with_report(Tool::Gradle, &line, &root)
+        ),
+    );
+    assert!(!ok, "실패한 테스트라 실패로 끝난다\n{output}");
+    assert_eq!(
+        outcomes(&junit(Tool::Gradle, &root, &root, since)),
+        [("addsWrong()".to_owned(), Outcome::Failed)],
+        "{output}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
 #[ignore = "Gradle로 TestNG 테스트(useTestNG)를 돌린다(의존성을 받는다). Java 17 이상과 gradle이 필요하다"]
 fn gradle_testng_매개변수_테스트를_줄마다_읽고_실패만_다시() {
     if !require("gradle --version") {
