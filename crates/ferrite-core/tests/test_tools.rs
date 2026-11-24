@@ -2921,6 +2921,61 @@ fn pytest가_한_파일을_모으지_못해도_다른_파일은_돌고_그_파�
 }
 
 #[test]
+#[ignore = "pytest가 필요하다"]
+fn pytest_결과에서_고른_테스트만_노드_id로_돌린다() {
+    if !require("python -m pytest --version") {
+        return;
+    }
+    let root = temp_dir("pytest-run-only");
+    std::fs::create_dir_all(root.join("tests")).unwrap();
+    std::fs::write(
+        root.join("tests/test_calc.py"),
+        "def test_add():\n    assert 1 + 2 == 3\n\n\ndef test_wrong():\n    assert 1 + 2 == 4\n\n\nclass TestMore:\n    def test_sub(self):\n        assert 3 - 1 == 2\n",
+    )
+    .unwrap();
+    let report = root.join("reports");
+    std::fs::create_dir_all(&report).unwrap();
+    let command = "python -m pytest -q";
+    let since = SystemTime::now();
+    run(
+        &root,
+        &test_report::with_report(Tool::Pytest, command, &report),
+    );
+    let mut cases = junit(Tool::Pytest, &root, &report, since);
+    assert_eq!(cases.len(), 3, "{cases:?}");
+    // 클래스 안의 통과한 테스트 하나만 고른다.
+    let sub = cases.iter().find(|c| c.name == "test_sub").unwrap().clone();
+    let line = test_report::run_only(Tool::Pytest, command, &[&sub], &root).unwrap();
+    assert!(
+        line.ends_with("\"tests/test_calc.py::TestMore::test_sub\""),
+        "{line}"
+    );
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    let since = SystemTime::now();
+    run(
+        &root,
+        &test_report::with_report(Tool::Pytest, &line, &report),
+    );
+    let found = junit(Tool::Pytest, &root, &report, since);
+    assert_eq!(
+        outcomes(&found),
+        [("test_sub".to_owned(), Outcome::Passed)],
+        "고른 테스트만 돈다"
+    );
+    // 고르지 않은 실패(test_wrong)는 그대로 남는다.
+    test_report::apply_selected(Tool::Pytest, Some(0), "", &mut cases, found, &[sub]);
+    assert_eq!(
+        outcomes(&cases),
+        [
+            ("test_add".to_owned(), Outcome::Passed),
+            ("test_sub".to_owned(), Outcome::Passed),
+            ("test_wrong".to_owned(), Outcome::Failed),
+        ]
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
 #[ignore = "Go가 필요하다"]
 fn go_test_json과_실패만_다시() {
     if !require("go version") {
