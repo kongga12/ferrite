@@ -1670,11 +1670,7 @@ impl FerriteApp {
             return;
         };
         if at.lang == TestLang::Jvm {
-            // java-debug는 jdt.ls에 실린 번들이라 붙을 때 jdt.ls가 있어야 한다. 없으면 테스트 JVM이 헛되이 기다린다.
-            if !self.hub.is_ready(JDTLS) {
-                self.status = "Java·Kotlin 테스트 디버그는 jdt.ls로 붙습니다. Java 파일을 열어 jdt.ls가 준비되면 \
-                               다시 하세요"
-                    .into();
+            if !self.jdtls_ready_for_test_debug() {
                 return;
             }
             dock::show(&mut self.layout, Pane::Tests);
@@ -1684,6 +1680,59 @@ impl FerriteApp {
         match debug_config(&at, &path, &root) {
             Some(config) => self.start_debug(&config, ctx),
             None => self.status = "이 테스트를 디버거로 띄우지 못했습니다".into(),
+        }
+    }
+
+    /// java-debug는 jdt.ls에 실린 번들이라 붙을 때 jdt.ls가 있어야 한다. 없으면 테스트 JVM이 헛되이 기다리므로 알린다.
+    fn jdtls_ready_for_test_debug(&mut self) -> bool {
+        let ready = self.hub.is_ready(JDTLS);
+        if !ready {
+            self.status = "Java·Kotlin 테스트 디버그는 jdt.ls로 붙습니다. Java 파일을 열어 jdt.ls가 준비되면 \
+                           다시 하세요"
+                .into();
+        }
+        ready
+    }
+
+    /// 테스트 창 결과 트리의 테스트(`case`, 도구 `tool`로 `dir`에서 돌린 것)를 디버거로 띄운다. Maven·Gradle은 테스트
+    /// 창이 디버거를 기다리게 다시 돌리고(`logic`이 붙는다), pytest·Go는 커서의 테스트 디버그와 같은 구성을 쓴다.
+    fn debug_test_from_results(
+        &mut self,
+        case: ferrite_core::test_report::Case,
+        tool: ferrite_core::test_report::Tool,
+        dir: &Path,
+        ctx: &egui::Context,
+    ) {
+        use ferrite_core::test_at::{TestLang, debug_config, debug_target};
+        use ferrite_core::test_report::Tool;
+        let Some(root) = self.tree.as_ref().map(|t| t.root().to_path_buf()) else {
+            return;
+        };
+        if self.debugger.is_active() {
+            self.status = "디버그 중입니다. 멈춘 뒤에 다시 하세요".into();
+            return;
+        }
+        let lang = match tool {
+            Tool::Maven | Tool::Gradle => {
+                if self.jdtls_ready_for_test_debug() {
+                    self.tests.debug_case(ctx, &root, case);
+                }
+                return;
+            }
+            Tool::Pytest => TestLang::Python,
+            Tool::Go => TestLang::Go,
+            Tool::Ctest => return,
+        };
+        match debug_target(lang, &case.suite, &case.name, dir)
+            .and_then(|(at, file)| debug_config(&at, &file, dir))
+        {
+            Some(config) => self.start_debug(&config, ctx),
+            None => {
+                self.status = format!(
+                    "{}의 소스 파일을 찾지 못해 디버거로 띄우지 못했습니다",
+                    case.suite
+                )
+            }
         }
     }
 
@@ -4247,6 +4296,9 @@ impl eframe::App for FerriteApp {
         // 테스트 창이 디버그로 띄운 테스트 JVM이 기다린다.
         if self.tests.take_attach_ready() {
             self.start_debug(&ferrite_core::test_at::jvm_attach_config(), ctx);
+        }
+        if let Some((case, tool, dir)) = self.tests.take_debug_request() {
+            self.debug_test_from_results(case, tool, &dir, ctx);
         }
         self.finish_server_jobs();
         self.sync_language_servers();

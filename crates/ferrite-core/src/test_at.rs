@@ -366,6 +366,55 @@ pub fn debug_config(at: &TestAt, path: &Path, dir: &Path) -> Option<DebugConfig>
     })
 }
 
+/// 결과 트리의 테스트(묶음 `suite`·이름 `name`, 테스트를 돌린 폴더 `dir`)를 `debug_config`로 띄울 때 넘길 것: 커서의
+/// 테스트와 같은 꼴과 그 파일. Python은 묶음(`tests.test_a.TestX`)의 앞쪽과 맞는 `dir` 아래 `.py` 파일(가장 긴 것),
+/// Go는 `go.mod`의 모듈 경로를 뺀 패키지 폴더의 `_test.go` 파일(`debug_config`는 그 폴더만 쓴다). Go 패키지 결과
+/// (`PACKAGE_CASE`)는 패키지 전체다. 못 찾으면 None. Java·Kotlin은 테스트 창이 띄우므로 None.
+pub fn debug_target(
+    lang: TestLang,
+    suite: &str,
+    name: &str,
+    dir: &Path,
+) -> Option<(TestAt, std::path::PathBuf)> {
+    let file = match lang {
+        TestLang::Python => {
+            let parts: Vec<&str> = suite.split('.').collect();
+            (1..=parts.len())
+                .rev()
+                .map(|k| dir.join(format!("{}.py", parts[..k].join("/"))))
+                .find(|f| f.is_file())?
+        }
+        TestLang::Go => {
+            let root = dir.ancestors().find(|d| d.join("go.mod").is_file())?;
+            let text = std::fs::read_to_string(root.join("go.mod")).ok()?;
+            let module = &GO_MODULE.captures(&text)?[1];
+            let rest = suite.strip_prefix(module)?;
+            if !(rest.is_empty() || rest.starts_with('/')) {
+                return None;
+            }
+            let folder = root.join(rest.trim_start_matches('/'));
+            std::fs::read_dir(folder)
+                .ok()?
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .find(|p| p.to_string_lossy().ends_with("_test.go"))?
+        }
+        TestLang::Jvm => return None,
+    };
+    let name = if name == crate::test_report::PACKAGE_CASE {
+        ""
+    } else {
+        name
+    };
+    Some((
+        TestAt {
+            lang,
+            suite: suite.to_owned(),
+            name: name.to_owned(),
+        },
+        file,
+    ))
+}
+
 /// 디버거를 기다리는 테스트 JVM(`test_report::with_jvm_debug`)에 java-debug로 붙는 구성.
 pub fn jvm_attach_config() -> DebugConfig {
     DebugConfig {
@@ -534,6 +583,63 @@ class CalcTest {
         let attach = jvm_attach_config();
         assert!(attach.attach());
         assert_eq!(attach.arguments["port"], crate::run::JDWP_PORT);
+    }
+
+    #[test]
+    fn 결과의_테스트를_디버거로_띄울_파일() {
+        let dir = std::env::temp_dir().join(format!("ferrite-debug-target-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("tests")).unwrap();
+        std::fs::create_dir_all(dir.join("calc")).unwrap();
+        std::fs::write(dir.join("tests/test_calc.py"), "").unwrap();
+        std::fs::write(
+            dir.join("go.mod"),
+            "module example.com/board
+",
+        )
+        .unwrap();
+        std::fs::write(dir.join("calc/calc_test.go"), "").unwrap();
+        std::fs::write(dir.join("calc/calc.go"), "").unwrap();
+        // Python: 클래스까지 든 묶음에서 파일을 찾고, 노드 ID가 커서의 것과 같다.
+        let (at, file) = debug_target(
+            TestLang::Python,
+            "tests.test_calc.TestCalc",
+            "test_sub",
+            &dir,
+        )
+        .unwrap();
+        assert_eq!(file, dir.join("tests/test_calc.py"));
+        let config = debug_config(&at, &file, &dir).unwrap();
+        assert_eq!(
+            config.arguments["args"],
+            json!(["tests/test_calc.py::TestCalc::test_sub"])
+        );
+        assert_eq!(
+            debug_target(TestLang::Python, "tests.test_none", "t", &dir),
+            None
+        );
+        // Go: 모듈 경로를 뺀 폴더. 패키지 결과는 패키지 전체.
+        let (at, file) =
+            debug_target(TestLang::Go, "example.com/board/calc", "TestAdd", &dir).unwrap();
+        assert_eq!(file, dir.join("calc/calc_test.go"));
+        assert_eq!(
+            debug_config(&at, &file, &dir).unwrap().arguments["args"],
+            json!(["-test.run", "^TestAdd$"])
+        );
+        let (at, _) = debug_target(
+            TestLang::Go,
+            "example.com/board/calc",
+            crate::test_report::PACKAGE_CASE,
+            &dir,
+        )
+        .unwrap();
+        assert_eq!(at.name, "");
+        assert_eq!(
+            debug_target(TestLang::Go, "example.com/boardx", "TestA", &dir),
+            None
+        );
+        assert_eq!(debug_target(TestLang::Jvm, "a.B", "c", &dir), None);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

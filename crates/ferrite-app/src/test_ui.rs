@@ -43,6 +43,18 @@ fn jdwp_listening() -> bool {
     TcpStream::connect_timeout(&jdwp_address(), Duration::from_millis(200)).is_ok()
 }
 
+/// 다른 것(실행의 "디버그 5005" 등)이 그 포트를 쓰면 테스트 JVM이 뜨지 못하고 그것에 붙고 만다.
+fn jdwp_free() -> Result<(), String> {
+    if jdwp_listening() {
+        return Err(format!(
+            "{} 포트를 이미 쓰고 있습니다(실행의 \"디버그 {}\" 등). 그것을 끝낸 뒤 다시 하세요",
+            ferrite_core::run::JDWP_PORT,
+            ferrite_core::run::JDWP_PORT
+        ));
+    }
+    Ok(())
+}
+
 /// 테스트 JVM이 기다리기 시작하면 `listening`을 세운다. 실행이 끝나 `listening`을 버리면 그만둔다.
 fn watch_jdwp(listening: Weak<AtomicBool>, ctx: egui::Context) {
     thread::spawn(move || {
@@ -124,6 +136,8 @@ pub struct TestPanel {
     path_problem: Option<GradlePathProblem>,
     /// 결과 트리에서 고른 테스트만 돌려 달라는 요청(다음 그리기에서 띄운다).
     run_request: Option<Vec<Case>>,
+    /// 결과 트리에서 고른 테스트를 디버거로 띄워 달라는 요청과 그 테스트를 돌린 도구·폴더(앱이 가져간다).
+    debug_request: Option<(Case, Tool, PathBuf)>,
 }
 
 /// Gradle 홈이 한글 경로일 때의 안내(`{home}`에 그 경로가 든다).
@@ -667,6 +681,23 @@ impl TestPanel {
         }
     }
 
+    /// 결과 트리에서 고른 테스트를 마지막 구성으로 돌리되 테스트 JVM이 디버거를 기다리게 띄운다(Maven·Gradle).
+    pub fn debug_case(&mut self, ctx: &egui::Context, root: &Path, case: Case) {
+        if self.is_running() {
+            return;
+        }
+        if let Err(e) = jdwp_free() {
+            self.status = Some((e, true));
+            return;
+        }
+        self.run_only(ctx, root, vec![case], true);
+    }
+
+    /// 결과 트리에서 [이 테스트 디버그]를 눌렀다(한 번만).
+    pub fn take_debug_request(&mut self) -> Option<(Case, Tool, PathBuf)> {
+        self.debug_request.take()
+    }
+
     /// 디버그로 띄운 테스트 JVM이 디버거를 기다리기 시작했는가(한 번만 참). 창이 가려져도 앱이 늘 묻는다.
     pub fn take_attach_ready(&mut self) -> bool {
         let Some(running) = &mut self.running else {
@@ -700,13 +731,8 @@ impl TestPanel {
         if debug && lang != TestLang::Jvm {
             return Err("테스트 창은 Java·Kotlin 테스트만 디버거를 기다리게 띄웁니다".into());
         }
-        // 다른 것(실행의 "디버그 5005" 등)이 그 포트를 쓰면 테스트 JVM이 뜨지 못하고 그것에 붙고 만다.
-        if debug && jdwp_listening() {
-            return Err(format!(
-                "{} 포트를 이미 쓰고 있습니다(실행의 \"디버그 {}\" 등). 그것을 끝낸 뒤 다시 하세요",
-                ferrite_core::run::JDWP_PORT,
-                ferrite_core::run::JDWP_PORT
-            ));
+        if debug {
+            jdwp_free()?;
         }
         let fits = |tool: Tool| match lang {
             TestLang::Jvm => matches!(tool, Tool::Maven | Tool::Gradle),
@@ -793,6 +819,11 @@ impl TestPanel {
     /// 테스트 줄로 간다. 오른쪽 단추로 그 테스트나 묶음만 돌린다.
     fn tree_ui(&mut self, ui: &mut egui::Ui, root: &Path) -> Option<TestAction> {
         let can_run = !self.is_running() && self.last.is_some();
+        let can_debug = can_run
+            && self
+                .last
+                .as_ref()
+                .is_some_and(|(_, tool, _)| *tool != Tool::Ctest);
         let mut suites: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
         for (i, case) in self.cases.iter().enumerate() {
             suites.entry(&case.suite).or_default().push(i);
@@ -800,6 +831,7 @@ impl TestPanel {
         let mut picked = None;
         let mut jump = None;
         let mut run: Option<Vec<usize>> = None;
+        let mut debug = None;
         for (suite, indices) in suites {
             let failed = indices
                 .iter()
@@ -842,6 +874,13 @@ impl TestPanel {
                                     run = Some(vec![i]);
                                     ui.close();
                                 }
+                                if ui
+                                    .add_enabled(can_debug, egui::Button::new("이 테스트 디버그"))
+                                    .clicked()
+                                {
+                                    debug = Some(i);
+                                    ui.close();
+                                }
                             });
                         });
                     }
@@ -862,6 +901,10 @@ impl TestPanel {
         }
         if let Some(i) = picked {
             self.selected = Some(i);
+        }
+        if let (Some(i), Some((_, tool, dir))) = (debug, &self.last) {
+            self.debug_request = Some((self.cases[i].clone(), *tool, dir.clone()));
+            ui.ctx().request_repaint();
         }
         let i = jump?;
         let case = &self.cases[i];

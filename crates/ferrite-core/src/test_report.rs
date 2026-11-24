@@ -962,12 +962,16 @@ pub fn report_files(tool: Tool, root: &Path, dir: &Path, since: SystemTime) -> V
 }
 
 /// 테스트 JVM이 시작에서 멈춰 디버거를 기다리게(JDWP, `run::JDWP_PORT`) 고친 명령(`line`은 `run_only`의 것).
-/// Maven은 Surefire의 `maven.surefire.debug`, Gradle은 테스트 작업 옵션 `--debug-jvm`이고 둘 다 기본이 5005에서
+/// Maven은 Surefire의 `maven.surefire.debug`(통합 테스트면 Failsafe의 `maven.failsafe.debug`), Gradle은 테스트 작업 옵션 `--debug-jvm`이고 둘 다 기본이 5005에서
 /// 기다리는 것이다. `--debug-jvm`은 앞 작업에 붙으므로 작업과 `--tests` 뒤인 끝에 둔다. Gradle은 같은 거르기로 앞서
 /// 통과한 작업을 최신으로 건너뛰어 JVM을 띄우지 않으므로 `--rerun-tasks`도 붙인다. 다른 도구는 None.
 // ponytail: --rerun-tasks는 그 작업이 기대는 컴파일까지 다시 한다. Gradle 7.6+만 받는 작업 옵션 --rerun이면 테스트만.
 pub fn with_jvm_debug(tool: Tool, line: &str) -> Option<String> {
     match tool {
+        // 통합 테스트(`-Dit.test`, 결과 트리에서 고른 것)는 Failsafe가 띄운다. 그때 Surefire에는 걸러 돌 것이 없다.
+        Tool::Maven if line.contains(" -Dit.test=") => {
+            Some(format!("{line} -Dmaven.failsafe.debug"))
+        }
         Tool::Maven => Some(format!("{line} -Dmaven.surefire.debug")),
         Tool::Gradle => Some(format!("{line} --debug-jvm --rerun-tasks")),
         _ => None,

@@ -1397,5 +1397,14 @@ fn 커서의_jvm_테스트를_디버거를_기다리게_띄운다() {
         with_jvm_debug(Tool::Gradle, &gradle).unwrap(),
         "gradle :app:test --tests \"com.example.CalcTest.adds\" --debug-jvm --rerun-tasks"
     );
+    let integration = Case {
+        integration: true,
+        ..case.clone()
+    };
+    let failsafe = run_only(Tool::Maven, "mvn -B verify", &[&integration], dir).unwrap();
+    assert_eq!(
+        with_jvm_debug(Tool::Maven, &failsafe).unwrap(),
+        format!("{failsafe} -Dmaven.failsafe.debug")
+    );
     assert_eq!(with_jvm_debug(Tool::Pytest, "pytest"), None);
 }
