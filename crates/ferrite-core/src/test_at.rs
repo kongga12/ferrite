@@ -315,7 +315,8 @@ fn go(path: &Path, lines: &[&str], line: usize) -> Option<TestAt> {
 
 /// 커서의 테스트(`at`, `path` 파일)를 디버거로 띄우는 구성. Python은 debugpy로 pytest 모듈을 노드 ID와 함께
 /// 띄우고(작업 폴더는 `dir`, 디버그 대상 Python은 어댑터가 사용자의 것으로 채운다), Go는 delve의 test 모드로 그
-/// 패키지 폴더를 `-test.run`과 함께 띄운다. 이름이 빈 것(묶음 전체)은 거르지 않는다. Java·Kotlin은 아직 없다(None).
+/// 패키지 폴더를 `-test.run`과 함께 띄운다. 이름이 빈 것(묶음 전체)은 거르지 않는다. Java·Kotlin은 None이다: 테스트
+/// 창이 테스트 JVM을 디버거를 기다리게 띄우고(`test_report::with_jvm_debug`) `jvm_attach_config`로 붙는다.
 pub fn debug_config(at: &TestAt, path: &Path, dir: &Path) -> Option<DebugConfig> {
     let (name, adapter, arguments) = match at.lang {
         TestLang::Python => {
@@ -363,6 +364,17 @@ pub fn debug_config(at: &TestAt, path: &Path, dir: &Path) -> Option<DebugConfig>
         arguments,
         build: None,
     })
+}
+
+/// 디버거를 기다리는 테스트 JVM(`test_report::with_jvm_debug`)에 java-debug로 붙는 구성.
+pub fn jvm_attach_config() -> DebugConfig {
+    DebugConfig {
+        name: format!("테스트 디버그: Java({} 포트에 붙기)", crate::run::JDWP_PORT),
+        adapter: "java-debug".to_owned(),
+        request: "attach".to_owned(),
+        arguments: json!({ "hostName": "127.0.0.1", "port": crate::run::JDWP_PORT }),
+        build: None,
+    }
 }
 
 #[cfg(test)]
@@ -519,6 +531,9 @@ class CalcTest {
             ..go
         };
         assert_eq!(debug_config(&jvm, Path::new("/p/A.java"), dir), None);
+        let attach = jvm_attach_config();
+        assert!(attach.attach());
+        assert_eq!(attach.arguments["port"], crate::run::JDWP_PORT);
     }
 
     #[test]

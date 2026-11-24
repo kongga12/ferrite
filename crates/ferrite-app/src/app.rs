@@ -1645,9 +1645,10 @@ impl FerriteApp {
         self.tests.run_at(ctx, &root, &path, &text, line);
     }
 
-    /// 활성 문서에서 커서가 든 테스트를 디버거로 띄운다(Python은 debugpy로 pytest, Go는 delve test 모드).
+    /// 활성 문서에서 커서가 든 테스트를 디버거로 띄운다(Python은 debugpy로 pytest, Go는 delve test 모드). Java·Kotlin은
+    /// 테스트 창이 테스트 JVM을 디버거를 기다리게 띄우고, 기다리기 시작하면 java-debug로 붙는다(`logic`).
     fn debug_test_at_cursor(&mut self, ctx: &egui::Context) {
-        use ferrite_core::test_at::{debug_config, test_at};
+        use ferrite_core::test_at::{TestLang, debug_config, test_at};
         let (Some(i), Some(root)) = (
             self.active,
             self.tree.as_ref().map(|t| t.root().to_path_buf()),
@@ -1668,14 +1669,21 @@ impl FerriteApp {
                 "이 파일에서 테스트(@Test 메서드, test 함수, TestX)를 찾지 못했습니다".into();
             return;
         };
+        if at.lang == TestLang::Jvm {
+            // java-debug는 jdt.ls에 실린 번들이라 붙을 때 jdt.ls가 있어야 한다. 없으면 테스트 JVM이 헛되이 기다린다.
+            if !self.hub.is_ready(JDTLS) {
+                self.status = "Java·Kotlin 테스트 디버그는 jdt.ls로 붙습니다. Java 파일을 열어 jdt.ls가 준비되면 \
+                               다시 하세요"
+                    .into();
+                return;
+            }
+            dock::show(&mut self.layout, Pane::Tests);
+            self.tests.debug_at(ctx, &root, &path, &text, line);
+            return;
+        }
         match debug_config(&at, &path, &root) {
             Some(config) => self.start_debug(&config, ctx),
-            None => {
-                self.status = format!(
-                    "Java·Kotlin 테스트 디버그는 아직 없습니다. 실행의 \"디버그 {}\"로 띄운 뒤 붙으세요",
-                    ferrite_core::run::JDWP_PORT
-                )
-            }
+            None => self.status = "이 테스트를 디버거로 띄우지 못했습니다".into(),
         }
     }
 
@@ -4236,6 +4244,10 @@ impl eframe::App for FerriteApp {
             .tick(ctx, self.docs.iter().map(|d| d.path.clone()).collect());
         self.process_fs_events();
         self.process_debug_notices();
+        // 테스트 창이 디버그로 띄운 테스트 JVM이 기다린다.
+        if self.tests.take_attach_ready() {
+            self.start_debug(&ferrite_core::test_at::jvm_attach_config(), ctx);
+        }
         self.finish_server_jobs();
         self.sync_language_servers();
         if dock::is_shown(&self.layout, Pane::Endpoints)

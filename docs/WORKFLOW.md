@@ -2558,7 +2558,17 @@
     - `test_at::debug_config`: 커서의 테스트(`test_at`)를 띄우는 디버그 구성. Python은 debugpy `launch`로 `module = "pytest"`, `args = [노드 ID]`(`tests/test_calc.py::TestCalc::test_sub`, 묶음 전체면 파일·클래스까지), `cwd`는 프로젝트 루트. 디버그 대상 Python은 어댑터가 사용자의 것으로 채운다(`complete_arguments`). Go는 delve `mode = "test"`, `program`은 그 패키지 폴더, `args = ["-test.run", "^TestX$"]`(패키지 전체면 없음). Java·Kotlin은 아직 없다.
     - `실행 > 커서의 테스트 디버그`, 단축키 `Ctrl+Shift+F9`(`run.debugTestAtCursor`). 디버그 중이면 막고, Java·Kotlin이면 "디버그 5005"로 띄운 뒤 붙으라고 알린다.
   - 검증: 단위 시험(노드 ID·클래스·묶음 전체, Go 인자·패키지 전체, Java는 None). 실제 어댑터(`adapters` 시험, CI 3개 OS. 로컬에는 debugpy·pytest·Go가 없다): debugpy로 커서의 `test_add`를 pytest로 띄워 테스트가 부르는 `add`의 `return` 줄 중단점에서 멈춰 a=41·b=1·total=42를 읽는다. delve test 모드로 커서의 `TestAdd`를 띄워 같은 값을 읽는다(같은 패키지의 다른 테스트는 거른다). `adapters.yml`에 pytest 설치를 더했다. 앱 화면(Windows): 메뉴와 단축키가 보이고 Java 파일에서는 안내가 나온다.
-  - 확인하지 못한 것: 앱 화면에서 실제로 멈추기(로컬에 도구가 없다), Java·Kotlin 테스트 디버그(Maven `-Dmaven.surefire.debug`·Gradle `--debug-jvm`으로 띄워 5005에 붙는 길이 있다), 테스트 구성의 작업 폴더가 루트가 아닌 pytest.
+  - 확인하지 못한 것: 앱 화면에서 실제로 멈추기(로컬에 도구가 없다), 테스트 구성의 작업 폴더가 루트가 아닌 pytest. Java·Kotlin은 아래 항목에서 했다.
+
+- [x] 커서의 테스트 디버그 — Java·Kotlin(2026-11-24) — 중간
+  - 까닭: 위 항목은 Python·Go만 했다. Java·Kotlin은 "디버그 5005" 실행 구성을 띄운 뒤 손으로 붙어야 했고, 그 구성은 테스트 하나만 고르지 못했다.
+  - 고침
+    - `test_report::with_jvm_debug`: 커서의 테스트만 고른 명령(`run_only`)에 테스트 JVM이 시작에서 멈춰 5005에서 디버거를 기다리게 하는 인자를 붙인다. Maven은 ` -Dmaven.surefire.debug`, Gradle은 그 테스트 작업 뒤 ` --debug-jvm --rerun-tasks`(같은 거르기로 앞서 통과했으면 작업을 최신으로 건너뛰어 JVM이 뜨지 않는다).
+    - 테스트 창 `debug_at`: `run_at`과 같게 돌리되 위 인자를 붙인다. 5005를 이미 누가 쓰면(실행의 "디버그 5005" 등) 띄우지 않고 알린다. 띄운 뒤 백그라운드 스레드가 250ms마다 `127.0.0.1:5005`에 연결해 보고, 받아 주면 앱이 `test_at::jvm_attach_config`(java-debug `attach`, `127.0.0.1:5005`)로 붙는다. 실행이 끝나면 스레드도 그만둔다.
+    - 기다리는 줄("Listening for transport dt_socket") 대신 연결해 보는 까닭: Surefire 3.5.4는 그 줄을 디버거가 붙은 *뒤에야* 낸다(실제 Maven으로 확인). Gradle 9.2는 바로 낸다. JDWP는 인사 없이 끊은 연결을 버리고 계속 기다린다(JDK 8·21에서 확인). 출력에 "Debugger failed to attach: handshake failed" 한 줄이 남는다.
+    - 앱 `debug_test_at_cursor`: Java·Kotlin이면 jdt.ls가 준비됐는지 먼저 본다(java-debug가 jdt.ls에 실린 번들이라, 없으면 테스트 JVM이 헛되이 기다린다). `LspHub::is_ready`를 더했다. 붙지 못하면 JVM이 기다리므로 출력에 [멈춤] 안내를 남긴다. 디버거를 기다리지 않고 끝나면(Surefire `forkCount=0` 등) 그것도 알린다.
+  - 검증: 단위 시험(Maven·Gradle 명령, 붙기 구성). 실제 도구(로컬, JDK 21): Maven 3.10·Surefire 3.5.4와 Gradle 9.2로 위 명령을 띄우니 5005에서 기다렸고, 연결해 본 뒤 jdb로 붙어 이어 가니 테스트가 통과했다(JDK 8도 연결해 본 뒤 붙었다). 실제 어댑터(`adapters` 시험 `java_debug로_커서의_maven_테스트에_붙는다`, CI 3개 OS): jdt.ls에 Maven 프로젝트를 띄우고 커서의 `adds`만 위 명령으로 띄워 기다림을 본 뒤 java-debug로 붙어 테스트가 부르는 `add`의 `return` 줄에서 a=41·b=1·total=42를 읽는다. 같은 클래스의 다른 테스트는 돌지 않는다. `locals_at_breakpoint`는 붙기도 받게 넓혔다(`locals_at`).
+  - 확인하지 못한 것: 앱 화면에서 실제로 멈추기(로컬에 jdt.ls가 없다), Gradle을 java-debug로(로컬 jdb만), Kotlin 테스트, 5005가 `::1`에만 열리는 환경.
 
 - 살폈지만 넣지 않은 것: 임베디드(MCU 플래시·시리얼 모니터·장비 설정 파일), 프레임워크별 지원(React·Vue·Angular 등, JS·TS 언어 서버로 기본은 된다), 린터 개별 연동(언어 서버나 저장 시 작업으로 된다), 원격 개발·컨테이너·SFTP 배포, 로컬 AI 완성 모델, 계정 기반 설정 동기화. egov 개발과 거리가 멀거나 크기에 비해 쓰임이 적다.
 

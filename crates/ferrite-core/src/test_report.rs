@@ -961,6 +961,19 @@ pub fn report_files(tool: Tool, root: &Path, dir: &Path, since: SystemTime) -> V
     files
 }
 
+/// 테스트 JVM이 시작에서 멈춰 디버거를 기다리게(JDWP, `run::JDWP_PORT`) 고친 명령(`line`은 `run_only`의 것).
+/// Maven은 Surefire의 `maven.surefire.debug`, Gradle은 테스트 작업 옵션 `--debug-jvm`이고 둘 다 기본이 5005에서
+/// 기다리는 것이다. `--debug-jvm`은 앞 작업에 붙으므로 작업과 `--tests` 뒤인 끝에 둔다. Gradle은 같은 거르기로 앞서
+/// 통과한 작업을 최신으로 건너뛰어 JVM을 띄우지 않으므로 `--rerun-tasks`도 붙인다. 다른 도구는 None.
+// ponytail: --rerun-tasks는 그 작업이 기대는 컴파일까지 다시 한다. Gradle 7.6+만 받는 작업 옵션 --rerun이면 테스트만.
+pub fn with_jvm_debug(tool: Tool, line: &str) -> Option<String> {
+    match tool {
+        Tool::Maven => Some(format!("{line} -Dmaven.surefire.debug")),
+        Tool::Gradle => Some(format!("{line} --debug-jvm --rerun-tasks")),
+        _ => None,
+    }
+}
+
 /// Gradle 출력의 건너뛴 작업 줄(`> Task :app:test UP-TO-DATE`).
 static GRADLE_SKIPPED_TASK: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?m)^> Task (\S+) (?:UP-TO-DATE|FROM-CACHE)\s*$").unwrap());

@@ -1369,3 +1369,33 @@ fn 한글_windows의_maven이_cp949로_낸_모듈별_결과도_읽는다() {
         ["board-parent", "게시판 공통"]
     );
 }
+
+#[test]
+fn 커서의_jvm_테스트를_디버거를_기다리게_띄운다() {
+    let case = Case {
+        suite: "com.example.CalcTest".into(),
+        name: "adds".into(),
+        outcome: Outcome::Passed,
+        seconds: None,
+        message: None,
+        detail: String::new(),
+        file: None,
+        line: None,
+        integration: false,
+        task: Some(":app:test".into()),
+        previous: false,
+    };
+    let dir = Path::new("/p");
+    let maven = run_only(Tool::Maven, "mvn -B test", &[&case], dir).unwrap();
+    assert_eq!(
+        with_jvm_debug(Tool::Maven, &maven).unwrap(),
+        format!("{maven} -Dmaven.surefire.debug")
+    );
+    // `--debug-jvm`은 앞 작업(`:app:test`)에 붙는다.
+    let gradle = run_only(Tool::Gradle, "gradle test", &[&case], dir).unwrap();
+    assert_eq!(
+        with_jvm_debug(Tool::Gradle, &gradle).unwrap(),
+        "gradle :app:test --tests \"com.example.CalcTest.adds\" --debug-jvm --rerun-tasks"
+    );
+    assert_eq!(with_jvm_debug(Tool::Pytest, "pytest"), None);
+}
