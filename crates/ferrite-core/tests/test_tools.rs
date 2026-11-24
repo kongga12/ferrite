@@ -1073,6 +1073,86 @@ fn maven_module_broken(name: &str, command: &str, maven_config: Option<&str>) {
 }
 
 #[test]
+#[ignore = "Maven으로 JUnit 5 테스트를 돌린다(의존성을 받는다). Java 17 이상과 mvn이 필요하다"]
+fn maven_에디터_커서가_든_테스트만_돌린다() {
+    if !require("mvn -v") {
+        return;
+    }
+    let root = temp_dir("maven-test-at");
+    std::fs::write(
+        root.join("pom.xml"),
+        r#"<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>demo</groupId>
+  <artifactId>board</artifactId>
+  <version>1.0</version>
+  <properties>
+    <maven.compiler.release>17</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+  </properties>
+  <dependencies>
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <version>5.12.2</version>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+  <build>
+    <plugins>
+      <plugin>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <version>3.5.4</version>
+      </plugin>
+    </plugins>
+  </build>
+</project>
+"#,
+    )
+    .unwrap();
+    let java = root.join("src/test/java/demo");
+    write_calc_test(&java, "addsWrong", false);
+    let file = java.join("CalcTest.java");
+    let text = std::fs::read_to_string(&file).unwrap();
+    // 커서는 `addsWrong`의 몸 안(assertEquals 줄)에 있다.
+    let line = text
+        .lines()
+        .position(|l| l.contains("assertEquals(4"))
+        .unwrap();
+    let at = ferrite_core::test_at::test_at(&file, &text, line, &root).expect("커서의 테스트");
+    assert_eq!(
+        (at.suite.as_str(), at.name.as_str()),
+        ("demo.CalcTest", "addsWrong")
+    );
+    let case = Case {
+        suite: at.suite,
+        name: at.name,
+        outcome: Outcome::Passed,
+        seconds: None,
+        message: None,
+        detail: String::new(),
+        file: None,
+        line: None,
+        integration: false,
+        task: None,
+        previous: false,
+    };
+    let report = root.join("reports");
+    let line = test_report::run_only(Tool::Maven, "mvn -B -q test", &[&case], &root).unwrap();
+    let since = SystemTime::now();
+    run(
+        &root,
+        &test_report::with_report(Tool::Maven, &line, &report),
+    );
+    assert_eq!(
+        outcomes(&junit(Tool::Maven, &root, &report, since)),
+        [("addsWrong".to_owned(), Outcome::Failed)],
+        "커서의 테스트만 돈다({line})"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
 #[ignore = "Maven으로 JUnit 4 Suite로 묶은 테스트를 돌린다(의존성을 받는다). Java 17 이상과 mvn이 필요하다"]
 fn maven_junit4_suite로_묶어_돌려도_실제_클래스로_읽고_실패만_다시() {
     if !require("mvn -v") {
@@ -2972,6 +3052,55 @@ fn pytest_결과에서_고른_테스트만_노드_id로_돌린다() {
             ("test_wrong".to_owned(), Outcome::Failed),
         ]
     );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+#[ignore = "pytest가 필요하다"]
+fn pytest_에디터_커서가_든_테스트만_돌린다() {
+    if !require("python -m pytest --version") {
+        return;
+    }
+    let root = temp_dir("pytest-test-at");
+    std::fs::create_dir_all(root.join("tests")).unwrap();
+    let file = root.join("tests/test_calc.py");
+    let text = "def test_add():\n    assert 1 + 2 == 3\n\n\nclass TestMore:\n    def test_sub(self):\n        assert 3 - 1 == 1  # 커서\n";
+    std::fs::write(&file, text).unwrap();
+    let line = text.lines().position(|l| l.contains("# 커서")).unwrap();
+    let at = ferrite_core::test_at::test_at(&file, text, line, &root).expect("커서의 테스트");
+    assert_eq!(
+        (at.suite.as_str(), at.name.as_str()),
+        ("tests.test_calc.TestMore", "test_sub")
+    );
+    let case = Case {
+        suite: at.suite,
+        name: at.name,
+        outcome: Outcome::Passed,
+        seconds: None,
+        message: None,
+        detail: String::new(),
+        file: None,
+        line: None,
+        integration: false,
+        task: None,
+        previous: false,
+    };
+    let report = root.join("reports");
+    std::fs::create_dir_all(&report).unwrap();
+    let line = test_report::run_only(Tool::Pytest, "python -m pytest -q", &[&case], &root).unwrap();
+    let since = SystemTime::now();
+    run(
+        &root,
+        &test_report::with_report(Tool::Pytest, &line, &report),
+    );
+    let found = junit(Tool::Pytest, &root, &report, since);
+    assert_eq!(
+        outcomes(&found),
+        [("test_sub".to_owned(), Outcome::Failed)],
+        "커서의 테스트만 돈다({line})"
+    );
+    // 돈 결과의 묶음이 커서에서 알아본 것과 같다(다음 실패만 다시·고른 테스트만이 맞춘다).
+    assert_eq!(found[0].suite, "tests.test_calc.TestMore");
     let _ = std::fs::remove_dir_all(&root);
 }
 
