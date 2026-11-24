@@ -1,5 +1,6 @@
 //! 에디터 커서가 든 테스트(메서드·함수)를 소스 글만 보고 알아본다(언어 서버 없이). 테스트 창이 그것만 돌린다
-//! (`test_report::run_only`). 돌릴 때의 묶음(`suite`)과 이름은 그 도구의 보고서가 적는 꼴에 맞춘다.
+//! (`test_report::run_only`). 돌릴 때의 묶음(`suite`)과 이름은 그 도구의 보고서가 적는 꼴에 맞춘다. 커서가 테스트
+//! 메서드 밖이면 묶음 전체(이름이 빈 것)다: Java·Kotlin은 클래스, Python은 품은 `Test` 클래스나 파일, Go는 패키지.
 //! - Java·Kotlin: `@Test`류 어노테이션이 붙은 메서드. 묶음은 `패키지.클래스`(커서 위로 가장 가까운 클래스).
 //! - Python: `test`로 시작하는 함수. 묶음은 돌린 폴더 기준 모듈(`tests.test_a`)과 품은 클래스(`.TestX`).
 //! - Go: `func TestX(t *testing.T)`. 묶음은 `go.mod`의 모듈 경로와 폴더(`example.com/board/calc`).
@@ -35,11 +36,12 @@ impl TestLang {
 pub struct TestAt {
     pub lang: TestLang,
     pub suite: String,
+    /// 빈 글이면 묶음 전체다.
     pub name: String,
 }
 
 /// `path` 파일(글 `text`)의 `line`(0부터) 줄이 든 테스트. Python의 모듈 이름은 테스트를 돌릴 폴더(`dir`) 기준이다.
-/// 테스트 메서드·함수 안이 아니면 None.
+/// 테스트 메서드·함수 밖이면 그 묶음 전체다. 파일에 테스트가 없으면 None.
 pub fn test_at(path: &Path, text: &str, line: usize, dir: &Path) -> Option<TestAt> {
     let lines: Vec<&str> = text.lines().collect();
     if line >= lines.len() {
@@ -64,8 +66,45 @@ static PACKAGE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\s*package\s+([
 static CLASS: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\b(?:class|object)\s+([A-Za-z_]\w*)").unwrap());
 
-/// Java·Kotlin: 커서 위로 가장 가까운 메서드가 커서를 품고 테스트 어노테이션이 붙었으면 그 테스트.
+/// Java·Kotlin: 커서 위로 가장 가까운 메서드가 커서를 품고 테스트 어노테이션이 붙었으면 그 테스트. 아니면 커서 위로
+/// 가장 가까운 클래스(위에 없으면 파일의 첫 클래스) 전체다. 파일에 테스트 어노테이션이 없으면 None.
 fn jvm(lines: &[&str], line: usize) -> Option<TestAt> {
+    if !lines.iter().any(|l| TEST_ANNOTATION.is_match(l)) {
+        return None;
+    }
+    let class_above = |end: usize| {
+        lines[..=end]
+            .iter()
+            .rev()
+            .find_map(|l| CLASS.captures(l).map(|c| c[1].to_owned()))
+    };
+    let (class, name) = match jvm_test_method(lines, line) {
+        Some((start, name)) => (class_above(start)?, name),
+        None => (
+            class_above(line).or_else(|| {
+                lines
+                    .iter()
+                    .find_map(|l| CLASS.captures(l).map(|c| c[1].to_owned()))
+            })?,
+            String::new(),
+        ),
+    };
+    let package = lines
+        .iter()
+        .find_map(|l| PACKAGE.captures(l).map(|c| c[1].to_owned()));
+    Some(TestAt {
+        lang: TestLang::Jvm,
+        suite: match package {
+            Some(package) => format!("{package}.{class}"),
+            None => class,
+        },
+        name,
+    })
+}
+
+/// 커서를 품은 테스트 메서드의 (시작 줄, 이름). 커서 위로 가장 가까운 메서드가 중괄호로 커서를 품고 그 줄이나 위의
+/// 어노테이션·주석·빈 줄에 테스트 어노테이션이 있어야 한다.
+fn jvm_test_method(lines: &[&str], line: usize) -> Option<(usize, String)> {
     let (start, name) = (0..=line).rev().find_map(|i| {
         let m = JAVA_METHOD
             .captures(lines[i])
@@ -75,7 +114,6 @@ fn jvm(lines: &[&str], line: usize) -> Option<TestAt> {
     if block_end(lines, start)? < line {
         return None;
     }
-    // 어노테이션은 메서드 줄이나 그 위의 어노테이션·주석·빈 줄에 있다.
     let mut annotated = TEST_ANNOTATION.is_match(lines[start]);
     for above in lines[..start].iter().rev() {
         let trimmed = above.trim();
@@ -89,24 +127,7 @@ fn jvm(lines: &[&str], line: usize) -> Option<TestAt> {
         }
         annotated |= TEST_ANNOTATION.is_match(trimmed);
     }
-    if !annotated {
-        return None;
-    }
-    let class = lines[..start]
-        .iter()
-        .rev()
-        .find_map(|l| CLASS.captures(l).map(|c| c[1].to_owned()))?;
-    let package = lines
-        .iter()
-        .find_map(|l| PACKAGE.captures(l).map(|c| c[1].to_owned()));
-    Some(TestAt {
-        lang: TestLang::Jvm,
-        suite: match package {
-            Some(package) => format!("{package}.{class}"),
-            None => class,
-        },
-        name,
-    })
+    annotated.then_some((start, name))
 }
 
 /// `start` 줄에서 처음 여는 중괄호의 블록이 닫히는 줄. 글자열·글자·주석 안의 중괄호는 세지 않는다(Java·Kotlin·Go).
@@ -166,8 +187,15 @@ fn indent(line: &str) -> usize {
     line.len() - line.trim_start().len()
 }
 
-/// Python: 커서를 품은 가장 안쪽 `def`가 `test`로 시작하면 그 테스트. 품은 클래스들을 묶음에 붙인다.
+/// Python: 커서를 품은 가장 안쪽 `def`가 `test`로 시작하면 그 테스트(품은 클래스들을 묶음에 붙인다). 아니면 커서를
+/// 품은 가장 안쪽 클래스가 `Test`로 시작하면 그 클래스 전체, 아니면 파일 전체다. 파일에 `test` 함수가 없으면 None.
 fn python(path: &Path, lines: &[&str], line: usize, dir: &Path) -> Option<TestAt> {
+    if !lines
+        .iter()
+        .any(|l| PY_DEF.captures(l).is_some_and(|c| c[2].starts_with("test")))
+    {
+        return None;
+    }
     // 커서 줄부터 위로, 커서를 품는(들여쓰기가 더 얕은) 첫 `def`.
     let mut limit = usize::MAX;
     let mut found = None;
@@ -185,14 +213,42 @@ fn python(path: &Path, lines: &[&str], line: usize, dir: &Path) -> Option<TestAt
         }
         limit = limit.min(depth);
     }
-    let (start, depth, name) = found?;
-    if !name.starts_with("test") {
-        return None;
+    let mut module = python_module(path, dir);
+    match found {
+        Some((start, depth, name)) if name.starts_with("test") => {
+            module.extend(python_classes(lines, start, depth));
+            Some(TestAt {
+                lang: TestLang::Python,
+                suite: module.join("."),
+                name,
+            })
+        }
+        _ => {
+            // 커서 줄(빈 줄이면 들여쓰기를 모른다)을 품은 클래스들.
+            let depth = lines[..=line]
+                .iter()
+                .rev()
+                .find(|l| !l.trim().is_empty())
+                .map_or(0, |l| indent(l) + 1);
+            let mut classes = python_classes(lines, line + 1, depth);
+            while classes.last().is_some_and(|c| !c.starts_with("Test")) {
+                classes.pop();
+            }
+            module.extend(classes);
+            Some(TestAt {
+                lang: TestLang::Python,
+                suite: module.join("."),
+                name: String::new(),
+            })
+        }
     }
-    // 품은 클래스들(바깥부터).
+}
+
+/// `end` 줄 앞에서 들여쓰기 `depth`보다 얕게 품은 클래스들(바깥부터).
+fn python_classes(lines: &[&str], end: usize, depth: usize) -> Vec<String> {
     let mut classes = Vec::new();
     let mut outer = depth;
-    for text in lines[..start].iter().rev() {
+    for text in lines[..end].iter().rev() {
         if outer == 0 {
             break;
         }
@@ -208,31 +264,35 @@ fn python(path: &Path, lines: &[&str], line: usize, dir: &Path) -> Option<TestAt
         }
     }
     classes.reverse();
-    let relative = path.strip_prefix(dir).unwrap_or(path).with_extension("");
-    let mut module: Vec<String> = relative
+    classes
+}
+
+/// 돌릴 폴더(`dir`) 기준 모듈 이름의 마디(`tests`, `test_calc`).
+fn python_module(path: &Path, dir: &Path) -> Vec<String> {
+    path.strip_prefix(dir)
+        .unwrap_or(path)
+        .with_extension("")
         .components()
         .map(|c| c.as_os_str().to_string_lossy().into_owned())
-        .collect();
-    module.extend(classes);
-    Some(TestAt {
-        lang: TestLang::Python,
-        suite: module.join("."),
-        name,
-    })
+        .collect()
 }
 
 static GO_TEST: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^func\s+(Test\w*)\s*\(\s*\w+\s+\*testing\.T\s*\)").unwrap());
 static GO_MODULE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?m)^module\s+(\S+)").unwrap());
 
-/// Go: 커서를 품은 `func TestX(t *testing.T)`. 묶음은 `go.mod`의 모듈 경로에 그 폴더를 붙인 패키지 경로다.
+/// Go: 커서를 품은 `func TestX(t *testing.T)`. 아니면 패키지 전체다. 묶음은 `go.mod`의 모듈 경로에 그 폴더를 붙인
+/// 패키지 경로다. 파일에 테스트 함수가 없으면 None.
 fn go(path: &Path, lines: &[&str], line: usize) -> Option<TestAt> {
-    let (start, name) = (0..=line)
-        .rev()
-        .find_map(|i| GO_TEST.captures(lines[i]).map(|c| (i, c[1].to_owned())))?;
-    if block_end(lines, start)? < line {
+    if !lines.iter().any(|l| GO_TEST.is_match(l)) {
         return None;
     }
+    let name = (0..=line)
+        .rev()
+        .find_map(|i| GO_TEST.captures(lines[i]).map(|c| (i, c[1].to_owned())))
+        .filter(|(start, _)| block_end(lines, *start).is_some_and(|end| end >= line))
+        .map(|(_, name)| name)
+        .unwrap_or_default();
     let dir = path.parent()?;
     let root = dir.ancestors().find(|d| d.join("go.mod").is_file())?;
     let text = std::fs::read_to_string(root.join("go.mod")).ok()?;
@@ -301,10 +361,20 @@ class CalcTest {
         assert_eq!(at("CalcTest.java", JAVA, "닫힘 아님", dir), case("adds"));
         assert_eq!(at("CalcTest.java", JAVA, "void adds", dir), case("adds"));
         assert_eq!(at("CalcTest.java", JAVA, "// B", dir), case("param"));
-        // 테스트가 아닌 메서드, 메서드 밖.
-        assert_eq!(at("CalcTest.java", JAVA, "// C", dir), None);
-        assert_eq!(at("CalcTest.java", JAVA, "// D", dir), None);
-        assert_eq!(at("CalcTest.java", JAVA, "import", dir), None);
+        // 테스트가 아닌 메서드, 메서드 밖, 클래스 위(import)는 클래스 전체.
+        for marker in ["// C", "// D", "import", "class CalcTest"] {
+            assert_eq!(at("CalcTest.java", JAVA, marker, dir), case(""), "{marker}");
+        }
+        // 테스트 어노테이션이 없는 파일은 아니다.
+        assert_eq!(
+            at(
+                "Calc.java",
+                "class Calc {\n    void add() {\n    }\n}\n",
+                "add",
+                dir
+            ),
+            None
+        );
     }
 
     #[test]
@@ -344,9 +414,14 @@ class CalcTest {
             at(file, text, "# C", dir),
             case("tests.test_calc.TestCalc", "test_sub")
         );
-        assert_eq!(at(file, text, "# D", dir), None);
-        assert_eq!(at(file, text, "# E", dir), None);
-        assert_eq!(at(file, text, "import", dir), None);
+        // 클래스 안 도우미는 그 클래스 전체, 파일의 다른 곳은 파일 전체.
+        assert_eq!(
+            at(file, text, "# D", dir),
+            case("tests.test_calc.TestCalc", "")
+        );
+        assert_eq!(at(file, text, "# E", dir), case("tests.test_calc", ""));
+        assert_eq!(at(file, text, "import", dir), case("tests.test_calc", ""));
+        assert_eq!(at(file, "def helper():\n    pass\n", "pass", dir), None);
     }
 
     #[test]
@@ -365,7 +440,14 @@ class CalcTest {
                 name: "TestAdd".to_owned(),
             })
         );
-        assert_eq!(test_at(&file, text, line("// B"), &root), None);
+        assert_eq!(
+            test_at(&file, text, line("// B"), &root),
+            Some(TestAt {
+                lang: TestLang::Go,
+                suite: "example.com/board/calc".to_owned(),
+                name: String::new(),
+            })
+        );
         std::fs::remove_dir_all(&root).unwrap();
     }
 }

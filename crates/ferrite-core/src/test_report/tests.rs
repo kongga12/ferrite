@@ -1219,6 +1219,37 @@ fn 고른_테스트만_돌리는_명령을_만든다() {
         rerun(Tool::Maven, "mvn test", &[&calc])
     );
     assert_eq!(run_only(Tool::Maven, "mvn test", &[], &dir), None);
+    // 이름이 빈 것은 묶음 전체다.
+    let whole = case("demo.CalcTest", "");
+    assert!(
+        run_only(Tool::Maven, "mvn test", &[&whole, &calc], &dir)
+            .unwrap()
+            .contains("-Dtest=CalcTest ")
+    );
+    assert_eq!(
+        run_only(Tool::Gradle, "gradle test", &[&whole], &dir).unwrap(),
+        "gradle test --tests \"demo.CalcTest\""
+    );
+    let module = case("tests.test_a", "");
+    let class = case("tests.test_a.TestCalc", "");
+    assert_eq!(
+        run_only(Tool::Pytest, "pytest", &[&module, &class], &dir).unwrap(),
+        "pytest \"tests/test_a.py\" \"tests/test_a.py::TestCalc\""
+    );
+    assert_eq!(
+        run_only(Tool::Pytest, "pytest", &[&case("pkg.test_b", "")], &dir).unwrap(),
+        "pytest -k \"test_b\""
+    );
+    assert_eq!(
+        run_only(
+            Tool::Go,
+            "go test ./...",
+            &[&case("example.com/board/calc", "")],
+            &dir
+        )
+        .unwrap(),
+        "go test -json example.com/board/calc"
+    );
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -1262,6 +1293,27 @@ fn 고른_테스트만_돌린_결과는_고른_것만_지운_것으로_본다() 
             ("other", Outcome::Failed)
         ]
     );
+    // 클래스 전체(이름이 빈 것)를 돌리면 그 클래스의 결과에 없는 것은 모두 지운 것이다. 돌린 곳을 모르는 고름은
+    // 돌린 곳(Maven 모듈)이 적힌 결과에도 든다.
+    let mut cases = vec![
+        Case {
+            task: Some("common".to_owned()),
+            ..case("adds", Outcome::Passed)
+        },
+        case("wrong", Outcome::Failed),
+        Case {
+            suite: "demo.OtherTest".to_owned(),
+            ..case("other", Outcome::Failed)
+        },
+    ];
+    let whole = vec![case("", Outcome::Passed)];
+    let found = vec![Case {
+        task: Some("common".to_owned()),
+        ..case("adds", Outcome::Passed)
+    }];
+    apply_selected(Tool::Maven, Some(0), "", &mut cases, found, &whole);
+    let seen: Vec<&str> = cases.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(seen, ["adds", "other"]);
 }
 
 #[test]

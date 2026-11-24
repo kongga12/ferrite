@@ -38,6 +38,7 @@ pub enum Command {
     CodeAction,
     SendRequest,
     Run,
+    RunTest,
     Debug,
     DebugStop,
     DebugPause,
@@ -246,6 +247,14 @@ const TABLE: &[Row] = &[
         "실행",
         &["Control+F5"],
         &["Ctrl+F11"],
+    ),
+    // 커서가 든 테스트 메서드(밖이면 그 클래스·파일)만 돌린다.
+    (
+        Command::RunTest,
+        "run.testAtCursor",
+        "커서의 테스트 돌리기",
+        &["Ctrl+Shift+F10"],
+        &["Ctrl+Shift+F10"],
     ),
     (
         Command::Debug,
