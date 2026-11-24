@@ -9,6 +9,9 @@ use std::path::Path;
 use std::sync::LazyLock;
 
 use regex::Regex;
+use serde_json::json;
+
+use crate::debug_config::DebugConfig;
 
 /// 커서의 테스트가 쓰는 테스트 도구의 갈래.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -310,6 +313,58 @@ fn go(path: &Path, lines: &[&str], line: usize) -> Option<TestAt> {
     })
 }
 
+/// 커서의 테스트(`at`, `path` 파일)를 디버거로 띄우는 구성. Python은 debugpy로 pytest 모듈을 노드 ID와 함께
+/// 띄우고(작업 폴더는 `dir`, 디버그 대상 Python은 어댑터가 사용자의 것으로 채운다), Go는 delve의 test 모드로 그
+/// 패키지 폴더를 `-test.run`과 함께 띄운다. 이름이 빈 것(묶음 전체)은 거르지 않는다. Java·Kotlin은 아직 없다(None).
+pub fn debug_config(at: &TestAt, path: &Path, dir: &Path) -> Option<DebugConfig> {
+    let (name, adapter, arguments) = match at.lang {
+        TestLang::Python => {
+            let module = python_module(path, dir).len();
+            let mut id = path
+                .strip_prefix(dir)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            for class in at.suite.split('.').skip(module) {
+                id.push_str("::");
+                id.push_str(class);
+            }
+            if !at.name.is_empty() {
+                id.push_str("::");
+                id.push_str(&at.name);
+            }
+            let arguments = json!({
+                "module": "pytest",
+                "args": [id],
+                "cwd": dir,
+                "console": "internalConsole",
+                "justMyCode": true,
+            });
+            (id, "debugpy", arguments)
+        }
+        TestLang::Go => {
+            let mut arguments = json!({ "mode": "test", "program": path.parent()? });
+            if !at.name.is_empty() {
+                arguments["args"] = json!(["-test.run", format!("^{}$", at.name)]);
+            }
+            let name = if at.name.is_empty() {
+                at.suite.clone()
+            } else {
+                format!("{} {}", at.suite, at.name)
+            };
+            (name, "delve", arguments)
+        }
+        TestLang::Jvm => return None,
+    };
+    Some(DebugConfig {
+        name: format!("테스트 디버그: {name}"),
+        adapter: adapter.to_owned(),
+        request: "launch".to_owned(),
+        arguments,
+        build: None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -422,6 +477,48 @@ class CalcTest {
         assert_eq!(at(file, text, "# E", dir), case("tests.test_calc", ""));
         assert_eq!(at(file, text, "import", dir), case("tests.test_calc", ""));
         assert_eq!(at(file, "def helper():\n    pass\n", "pass", dir), None);
+    }
+
+    #[test]
+    fn 커서의_테스트를_디버거로_띄우는_구성() {
+        let dir = Path::new("/p");
+        let python = |suite: &str, name: &str| TestAt {
+            lang: TestLang::Python,
+            suite: suite.to_owned(),
+            name: name.to_owned(),
+        };
+        let file = Path::new("/p/tests/test_calc.py");
+        let config =
+            debug_config(&python("tests.test_calc.TestCalc", "test_sub"), file, dir).unwrap();
+        assert_eq!(config.adapter, "debugpy");
+        assert_eq!(config.arguments["module"], "pytest");
+        assert_eq!(
+            config.arguments["args"],
+            json!(["tests/test_calc.py::TestCalc::test_sub"])
+        );
+        // 묶음 전체는 파일까지.
+        let whole = debug_config(&python("tests.test_calc", ""), file, dir).unwrap();
+        assert_eq!(whole.arguments["args"], json!(["tests/test_calc.py"]));
+        let go = TestAt {
+            lang: TestLang::Go,
+            suite: "example.com/board/calc".to_owned(),
+            name: "TestAdd".to_owned(),
+        };
+        let config = debug_config(&go, Path::new("/p/calc/calc_test.go"), dir).unwrap();
+        assert_eq!(config.adapter, "delve");
+        assert_eq!(config.arguments["mode"], "test");
+        assert_eq!(config.arguments["args"], json!(["-test.run", "^TestAdd$"]));
+        let package = TestAt {
+            name: String::new(),
+            ..go.clone()
+        };
+        let config = debug_config(&package, Path::new("/p/calc/calc_test.go"), dir).unwrap();
+        assert!(config.arguments.get("args").is_none());
+        let jvm = TestAt {
+            lang: TestLang::Jvm,
+            ..go
+        };
+        assert_eq!(debug_config(&jvm, Path::new("/p/A.java"), dir), None);
     }
 
     #[test]

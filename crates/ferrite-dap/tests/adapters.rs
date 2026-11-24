@@ -319,6 +319,83 @@ fn delve를_설치해_go를_디버그한다() {
     let _ = std::fs::remove_dir_all(&project);
 }
 
+/// 앱의 "커서의 테스트 디버그"와 같은 구성: 파일 글에서 `marker` 줄의 테스트를 알아보고(`test_at`) 디버거로
+/// 띄울 인자를 만든다(`debug_config`).
+fn test_debug_arguments(file: &Path, marker: &str, dir: &Path) -> Value {
+    let text = std::fs::read_to_string(file).unwrap();
+    let line = text.lines().position(|l| l.contains(marker)).unwrap();
+    let at = ferrite_core::test_at::test_at(file, &text, line, dir).expect("커서의 테스트");
+    ferrite_core::test_at::debug_config(&at, file, dir)
+        .expect("디버그 구성")
+        .arguments
+}
+
+#[test]
+#[ignore = "PyPI에서 debugpy(약 5MB)를 받아 가상환경에 설치한다. Python과 pytest가 필요하다"]
+fn debugpy로_커서의_pytest_테스트를_디버그한다() {
+    let python = if cfg!(windows) { "python" } else { "python3" };
+    let pytest = Command::new(python)
+        .args(["-m", "pytest", "--version"])
+        .output()
+        .is_ok_and(|o| o.status.success());
+    if !require("pytest", pytest) {
+        return;
+    }
+    let (servers, project) = (temp_dir("debugpy-test-servers"), temp_dir("debugpy-test"));
+    std::fs::create_dir_all(project.join("tests")).unwrap();
+    let source = project.join("tests/test_calc.py");
+    std::fs::write(
+        &source,
+        // 이어 간 뒤에도 잠시 돌아야 실행 중에 보낸 식의 답을 받는다(다른 예제와 같다).
+        "def add(a, b):\n    total = a + b\n    return total\n\n\ndef test_add():\n    assert add(41, 1) == 42  # 커서\n    import time\n    time.sleep(4)\n",
+    )
+    .unwrap();
+    let arguments = test_debug_arguments(&source, "# 커서", &project);
+    assert_eq!(arguments["args"], json!(["tests/test_calc.py::test_add"]));
+    let adapter = install_adapter(&servers, "debugpy", &project);
+    assert_locals(&locals_at_breakpoint(
+        &adapter, "debugpy", arguments, &source, 3,
+    ));
+    let _ = std::fs::remove_dir_all(&servers);
+    let _ = std::fs::remove_dir_all(&project);
+}
+
+#[test]
+#[ignore = "go install로 delve를 받아 빌드한다. Go가 필요하다"]
+fn delve로_커서의_go_테스트를_디버그한다() {
+    if !require("Go", find_program("go").is_some()) {
+        return;
+    }
+    let (servers, project) = (temp_dir("delve-test-servers"), temp_dir("delve-test"));
+    std::fs::write(
+        project.join("go.mod"),
+        "module example.com/demo\n\ngo 1.21\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(project.join("calc")).unwrap();
+    let source = project.join("calc/calc.go");
+    std::fs::write(
+        &source,
+        "package calc\n\nfunc add(a, b int) int {\n\ttotal := a + b\n\treturn total\n}\n",
+    )
+    .unwrap();
+    let test = project.join("calc/calc_test.go");
+    std::fs::write(
+        &test,
+        // 이어 간 뒤에도 잠시 돌아야 실행 중에 보낸 식의 답을 받는다(다른 예제와 같다).
+        "package calc\n\nimport (\n\t\"testing\"\n\t\"time\"\n)\n\nfunc TestAdd(t *testing.T) {\n\tif add(41, 1) != 42 { // 커서\n\t\tt.Fatal(\"add\")\n\t}\n\ttime.Sleep(4 * time.Second)\n}\n\nfunc TestOther(t *testing.T) {\n\tt.Fatal(\"돌면 안 된다\")\n}\n",
+    )
+    .unwrap();
+    let arguments = test_debug_arguments(&test, "// 커서", &project);
+    assert_eq!(arguments["args"], json!(["-test.run", "^TestAdd$"]));
+    let adapter = install_adapter(&servers, "delve", &project);
+    assert_locals(&locals_at_breakpoint(
+        &adapter, "delve", arguments, &source, 5,
+    ));
+    let _ = std::fs::remove_dir_all(&servers);
+    let _ = std::fs::remove_dir_all(&project);
+}
+
 /// PHP에 Xdebug 확장이 켜져 있는지.
 fn php_with_xdebug() -> bool {
     Command::new("php")
