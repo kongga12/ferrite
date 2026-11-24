@@ -1626,6 +1626,23 @@ impl FerriteApp {
         });
     }
 
+    /// 활성 문서에서 커서가 든 테스트만 테스트 창에서 돌린다.
+    fn run_test_at_cursor(&mut self, ctx: &egui::Context) {
+        let (Some(i), Some(root)) = (
+            self.active,
+            self.tree.as_ref().map(|t| t.root().to_path_buf()),
+        ) else {
+            return;
+        };
+        let doc = &self.docs[i];
+        let rope = doc.buffer.rope();
+        let line = rope.char_to_line(doc.buffer.selection().head);
+        let text = rope.to_string();
+        let path = doc.path.clone();
+        dock::show(&mut self.layout, Pane::Tests);
+        self.tests.run_at(ctx, &root, &path, &text, line);
+    }
+
     fn request_at_cursor(&mut self, kind: LspRequest) {
         if let Some(i) = self.active {
             let pos = self.docs[i].buffer.selection().head;
@@ -2755,6 +2772,19 @@ impl FerriteApp {
                     {
                         ui.close();
                         dock::show(&mut self.layout, Pane::Tests);
+                    }
+                    if ui
+                        .add_enabled(
+                            project && self.active.is_some(),
+                            egui::Button::new("커서의 테스트 돌리기"),
+                        )
+                        .on_hover_text(
+                            "에디터 커서가 든 테스트 메서드(Java·Kotlin @Test, Python test_ 함수, Go TestX)만 돌린다",
+                        )
+                        .clicked()
+                    {
+                        ui.close();
+                        self.run_test_at_cursor(&ctx);
                     }
                     ui.separator();
                     let debugging = self.debugger.is_active();

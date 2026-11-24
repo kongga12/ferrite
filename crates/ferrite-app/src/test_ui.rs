@@ -596,6 +596,74 @@ impl TestPanel {
         action
     }
 
+    /// 에디터 커서가 든 테스트(`path` 파일의 `line` 줄, 0부터)만 돌린다. 구성은 마지막에 쓴 것이 그 파일의 도구면
+    /// 그것을, 아니면 그 도구의 첫 테스트 구성을 쓴다. 돌리지 못하면 까닭을 상태에 알린다.
+    pub fn run_at(
+        &mut self,
+        ctx: &egui::Context,
+        root: &Path,
+        path: &Path,
+        text: &str,
+        line: usize,
+    ) {
+        if let Err(e) = self.try_run_at(ctx, root, path, text, line) {
+            self.status = Some((e, true));
+        }
+    }
+
+    fn try_run_at(
+        &mut self,
+        ctx: &egui::Context,
+        root: &Path,
+        path: &Path,
+        text: &str,
+        line: usize,
+    ) -> Result<(), String> {
+        use ferrite_core::test_at::{TestLang, test_at};
+        if self.is_running() {
+            return Err("테스트가 돌고 있습니다. 끝나거나 멈춘 뒤에 다시 하세요".into());
+        }
+        let lang =
+            TestLang::of(path).ok_or("Java·Kotlin·Python·Go 테스트 파일에서 돌릴 수 있습니다")?;
+        let fits = |tool: Tool| match lang {
+            TestLang::Jvm => matches!(tool, Tool::Maven | Tool::Gradle),
+            TestLang::Python => tool == Tool::Pytest,
+            TestLang::Go => tool == Tool::Go,
+        };
+        if self.root.as_deref() != Some(root) || self.configs.is_empty() {
+            self.refresh(root);
+        }
+        let config = match &self.last {
+            Some((config, tool, _)) if fits(*tool) => config.clone(),
+            _ => self
+                .configs
+                .iter()
+                .find(|c| Tool::of(&c.command).is_some_and(fits))
+                .cloned()
+                .ok_or("이 파일의 테스트를 돌릴 테스트 구성(mvn test·gradle test·pytest·go test)이 없습니다")?,
+        };
+        let tool = Tool::of(&config.command).ok_or("테스트 구성이 아닙니다")?;
+        let dir = config.working_directory(root);
+        let found = test_at(path, text, line, &dir)
+            .ok_or("커서가 테스트 메서드(함수) 안에 있지 않습니다")?;
+        let case = Case {
+            suite: found.suite,
+            name: found.name,
+            outcome: Outcome::Passed,
+            seconds: None,
+            message: None,
+            detail: String::new(),
+            file: None,
+            line: None,
+            integration: false,
+            task: None,
+            previous: false,
+        };
+        self.last = Some((config, tool, dir));
+        self.run_only(ctx, root, vec![case]);
+        Ok(())
+    }
+
     /// 결과에서 고른 테스트만 마지막 구성으로 돌린다. 결과는 앞 결과에 넣는다(고르지 않은 테스트는 그대로).
     fn run_only(&mut self, ctx: &egui::Context, root: &Path, targets: Vec<Case>) {
         if self.is_running() {

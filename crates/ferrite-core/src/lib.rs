@@ -14,6 +14,7 @@ pub mod sarif;
 pub mod search;
 pub mod settings;
 pub mod syntax;
+pub mod test_at;
 pub mod test_report;
 pub mod text_file;
 pub mod vuln;
