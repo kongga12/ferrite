@@ -596,8 +596,9 @@ impl TestPanel {
         action
     }
 
-    /// 에디터 커서가 든 테스트(`path` 파일의 `line` 줄, 0부터)만 돌린다. 구성은 마지막에 쓴 것이 그 파일의 도구면
-    /// 그것을, 아니면 그 도구의 첫 테스트 구성을 쓴다. 돌리지 못하면 까닭을 상태에 알린다.
+    /// 에디터 커서가 든 테스트(`path` 파일의 `line` 줄, 0부터)만 돌린다. 구성은 테스트 창에서 고른 것이 그 파일의
+    /// 도구면 그것을, 아니면 그 도구의 첫 테스트 구성을 쓴다. Gradle은 파일이 든 프로젝트·소스 세트의 테스트 작업만
+    /// 돌린다(`gradle check` 구성도 된다). 돌리지 못하면 까닭을 상태에 알린다.
     pub fn run_at(
         &mut self,
         ctx: &egui::Context,
@@ -633,15 +634,17 @@ impl TestPanel {
         if self.root.as_deref() != Some(root) || self.configs.is_empty() {
             self.refresh(root);
         }
-        let config = match &self.last {
-            Some((config, tool, _)) if fits(*tool) => config.clone(),
-            _ => self
-                .configs
-                .iter()
-                .find(|c| Tool::of(&c.command).is_some_and(fits))
-                .cloned()
-                .ok_or("이 파일의 테스트를 돌릴 테스트 구성(mvn test·gradle test·pytest·go test)이 없습니다")?,
-        };
+        let config = self
+            .configs
+            .get(self.chosen)
+            .filter(|c| Tool::of(&c.command).is_some_and(fits))
+            .or_else(|| {
+                self.configs
+                    .iter()
+                    .find(|c| Tool::of(&c.command).is_some_and(fits))
+            })
+            .cloned()
+            .ok_or("이 파일의 테스트를 돌릴 테스트 구성(mvn test·gradle test·pytest·go test)이 없습니다")?;
         let tool = Tool::of(&config.command).ok_or("테스트 구성이 아닙니다")?;
         let dir = config.working_directory(root);
         let found = test_at(path, text, line, &dir)
@@ -656,7 +659,10 @@ impl TestPanel {
             file: None,
             line: None,
             integration: false,
-            task: None,
+            // 작업을 알면 그 작업에만 `--tests`를 붙인다(명령의 `check`·`build` 같은 작업은 뺀다).
+            task: (tool == Tool::Gradle)
+                .then(|| test_report::gradle_test_task(path))
+                .flatten(),
             previous: false,
         };
         self.last = Some((config, tool, dir));
