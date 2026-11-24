@@ -56,6 +56,8 @@ struct Running {
     rerun: bool,
     /// 실패한 것만 고르지 못해 구성의 명령 그대로 다시 돌리는 중(결과는 앞 결과를 바꾼다).
     whole: bool,
+    /// 결과에서 고른 테스트만 돌리는 중(그 테스트들). 결과에 없으면 지운 것으로 볼 테스트가 이것뿐이다.
+    targets: Option<Vec<Case>>,
     /// `go test -json`의 표준 출력.
     json: String,
     /// 사용자가 멈췄다(끝난 테스트의 결과만 있다).
@@ -88,6 +90,8 @@ pub struct TestPanel {
     skipping: Option<PathBuf>,
     /// Gradle이 경로(프로젝트, Gradle 홈)의 한글 때문에 테스트를 돌리지 못했다(Windows). 까닭과 해법을 보인다.
     path_problem: Option<GradlePathProblem>,
+    /// 결과 트리에서 고른 테스트만 돌려 달라는 요청(다음 그리기에서 띄운다).
+    run_request: Option<Vec<Case>>,
 }
 
 /// Gradle 홈이 한글 경로일 때의 안내(`{home}`에 그 경로가 든다).
@@ -211,6 +215,7 @@ impl TestPanel {
             started: (SystemTime::now(), Instant::now()),
             rerun: rerun.is_some(),
             whole: rerun.as_deref() == Some(config.command.as_str()),
+            targets: None,
             json: String::new(),
             stopped: false,
         });
@@ -296,9 +301,11 @@ impl TestPanel {
         // 실패만 다시가 돌 테스트를 찾지 못하면 구성의 명령 그대로 전체를 다시 돌린다. 빌드 설정이 묶음만 돌리거나
         // (Gradle "No tests found"), 실패한 테스트를 지우거나 이름을 바꿨다(Gradle은 같은 오류, Maven은 아무것도
         // 돌지 않고 0으로 끝난다).
+        // 고른 테스트만 돌렸으면 넘어가지 않는다(고른 것을 지웠으면 결과에서 뺀다).
         if running.rerun
             && !running.whole
             && !running.stopped
+            && running.targets.is_none()
             && (test_report::gradle_rerun_found_nothing(running.tool, &self.output)
                 || (found.is_empty() && code == Some(0)))
             && let Some((config, ..)) = self.last.clone()
@@ -327,7 +334,23 @@ impl TestPanel {
             } else {
                 // 지운 실패를 빼면 줄 번호가 바뀌므로 고른 테스트를 다시 찾는다(빠졌으면 첫 실패).
                 let chosen = self.selected.and_then(|i| self.cases.get(i)).cloned();
-                test_report::apply_rerun(running.tool, code, &self.output, &mut self.cases, found);
+                match &running.targets {
+                    Some(targets) => test_report::apply_selected(
+                        running.tool,
+                        code,
+                        &self.output,
+                        &mut self.cases,
+                        found,
+                        targets,
+                    ),
+                    None => test_report::apply_rerun(
+                        running.tool,
+                        code,
+                        &self.output,
+                        &mut self.cases,
+                        found,
+                    ),
+                }
                 self.selected = chosen
                     .and_then(|c| self.cases.iter().position(|x| x.same_test(&c)))
                     .or_else(|| self.cases.iter().position(|c| c.outcome == Outcome::Failed));
@@ -409,6 +432,9 @@ impl TestPanel {
             self.refresh(root);
         }
         self.poll(ui.ctx(), root);
+        if let Some(targets) = self.run_request.take() {
+            self.run_only(ui.ctx(), root, targets);
+        }
         let running = self.is_running();
         let mut run = None;
         ui.horizontal(|ui| {
@@ -447,6 +473,17 @@ impl TestPanel {
                 .clicked()
             {
                 run = Some(true);
+            }
+            let chosen = self.selected.and_then(|i| self.cases.get(i)).cloned();
+            if ui
+                .add_enabled(
+                    !running && chosen.is_some() && self.last.is_some(),
+                    egui::Button::new("고른 테스트만"),
+                )
+                .on_hover_text("결과에서 고른 테스트만 다시 돌린다(묶음은 트리에서 오른쪽 단추)")
+                .clicked()
+            {
+                self.run_request = chosen.map(|case| vec![case]);
             }
             if ui.add_enabled(running, egui::Button::new("멈춤")).clicked() {
                 self.stop();
@@ -559,15 +596,35 @@ impl TestPanel {
         action
     }
 
+    /// 결과에서 고른 테스트만 마지막 구성으로 돌린다. 결과는 앞 결과에 넣는다(고르지 않은 테스트는 그대로).
+    fn run_only(&mut self, ctx: &egui::Context, root: &Path, targets: Vec<Case>) {
+        if self.is_running() {
+            return;
+        }
+        let Some((config, tool, dir)) = self.last.clone() else {
+            return;
+        };
+        let picked: Vec<&Case> = targets.iter().collect();
+        let Some(line) = test_report::run_only(tool, &config.command, &picked, &dir) else {
+            return;
+        };
+        self.start(ctx, root, config, Some(line));
+        if let Some(running) = &mut self.running {
+            running.targets = Some(targets);
+        }
+    }
+
     /// 결과 트리: 묶음(클래스·모듈·패키지)마다 테스트. 실패가 있는 묶음은 펼쳐 둔다. 실패를 두 번 누르면
-    /// 테스트 줄로 간다.
+    /// 테스트 줄로 간다. 오른쪽 단추로 그 테스트나 묶음만 돌린다.
     fn tree_ui(&mut self, ui: &mut egui::Ui, root: &Path) -> Option<TestAction> {
+        let can_run = !self.is_running() && self.last.is_some();
         let mut suites: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
         for (i, case) in self.cases.iter().enumerate() {
             suites.entry(&case.suite).or_default().push(i);
         }
         let mut picked = None;
         let mut jump = None;
+        let mut run: Option<Vec<usize>> = None;
         for (suite, indices) in suites {
             let failed = indices
                 .iter()
@@ -579,11 +636,11 @@ impl TestPanel {
             } else {
                 egui::RichText::new(format!("{suite} ({})", indices.len()))
             };
-            egui::CollapsingHeader::new(title)
+            let shown = egui::CollapsingHeader::new(title)
                 .id_salt(("test_suite", suite))
                 .default_open(failed > 0)
                 .show(ui, |ui| {
-                    for i in indices {
+                    for &i in &indices {
                         let case = &self.cases[i];
                         ui.horizontal(|ui| {
                             let (word, color) = outcome_label(ui, case.outcome);
@@ -602,9 +659,31 @@ impl TestPanel {
                             if row.double_clicked() {
                                 jump = Some(i);
                             }
+                            row.context_menu(|ui| {
+                                if ui
+                                    .add_enabled(can_run, egui::Button::new("이 테스트만 돌리기"))
+                                    .clicked()
+                                {
+                                    run = Some(vec![i]);
+                                    ui.close();
+                                }
+                            });
                         });
                     }
                 });
+            shown.header_response.context_menu(|ui| {
+                if ui
+                    .add_enabled(can_run, egui::Button::new("이 묶음만 돌리기"))
+                    .clicked()
+                {
+                    run = Some(indices.clone());
+                    ui.close();
+                }
+            });
+        }
+        if let Some(indices) = run {
+            self.run_request = Some(indices.iter().map(|&i| self.cases[i].clone()).collect());
+            ui.ctx().request_repaint();
         }
         if let Some(i) = picked {
             self.selected = Some(i);

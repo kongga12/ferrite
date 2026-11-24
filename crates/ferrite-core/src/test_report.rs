@@ -141,6 +141,24 @@ pub fn apply_rerun(
     cases: &mut Vec<Case>,
     found: Vec<Case>,
 ) {
+    let targets: Vec<Case> = cases
+        .iter()
+        .filter(|c| c.outcome == Outcome::Failed)
+        .cloned()
+        .collect();
+    apply_selected(tool, code, output, cases, found, &targets);
+}
+
+/// 고른 테스트(`targets`)만 돌린 결과를 앞 결과에 넣는다(`run_only`). 실패만 다시(`apply_rerun`)와 같되, 결과에
+/// 없으면 지운 것으로 볼 테스트가 지난 실패가 아니라 고른 테스트다. 고르지 않은 테스트는 그대로 둔다.
+pub fn apply_selected(
+    tool: Tool,
+    code: Option<i32>,
+    output: &str,
+    cases: &mut Vec<Case>,
+    found: Vec<Case>,
+    targets: &[Case],
+) {
     let built = match tool {
         Tool::Maven if code != Some(0) => maven_built_modules(output).unwrap_or_default(),
         _ => Vec::new(),
@@ -164,10 +182,10 @@ pub fn apply_rerun(
         Tool::Ctest => true,
     };
     cases.retain_mut(|c| {
-        if c.outcome != Outcome::Failed || found.iter().any(|f| f.same_test(c)) {
+        if !targets.iter().any(|t| t.same_test(c)) || found.iter().any(|f| f.same_test(c)) {
             return true;
         }
-        // 다시 돈 결과에 없는 지난 실패: 돌 자리가 돌았으면 지운 것이라 빼고, 아니면 앞 결과로 남긴다.
+        // 다시 돌린 테스트가 결과에 없다: 돌 자리가 돌았으면 지운 것이라 빼고, 아니면 앞 결과로 남긴다.
         c.previous = !ran_there(c);
         c.previous
     });
@@ -927,6 +945,74 @@ pub fn gradle_skipped_reports(root: &Path, output: &str) -> Vec<PathBuf> {
         .into_iter()
         .filter(|path| gradle_task(path).is_some_and(|task| skipped.contains(&task.as_str())))
         .collect()
+}
+
+/// 고른 테스트(`cases`)만 돌리는 명령. Maven·Gradle·Go는 실패만 다시(`rerun`)와 같은 거르기다. pytest는 노드
+/// ID(`파일::클래스::이름`)로 고른다. 결과의 묶음(`classname`, `tests.test_a.TestX`)에서 돌린 폴더(`dir`) 아래의
+/// 파일(`tests/test_a.py`)을 찾고, 못 찾으면 이름으로 거른다(`-k`). CTest는 이름의 정규식(`-R`)이다.
+pub fn run_only(tool: Tool, command: &str, cases: &[&Case], dir: &Path) -> Option<String> {
+    if cases.is_empty() {
+        return None;
+    }
+    match tool {
+        Tool::Pytest => {
+            let ids: Option<Vec<String>> = cases.iter().map(|c| pytest_node_id(c, dir)).collect();
+            Some(match ids {
+                Some(ids) => {
+                    let mut line = command.to_owned();
+                    for id in dedup_strings(ids) {
+                        line.push_str(&format!(" \"{id}\""));
+                    }
+                    line
+                }
+                None => {
+                    let names: Vec<String> = cases
+                        .iter()
+                        .map(|c| c.name.split('[').next().unwrap_or(&c.name).to_owned())
+                        .collect();
+                    format!("{command} -k \"{}\"", dedup_strings(names).join(" or "))
+                }
+            })
+        }
+        Tool::Ctest => {
+            let names: Vec<String> = cases.iter().map(|c| regex::escape(&c.name)).collect();
+            Some(format!(
+                "{command} -R \"^({})$\"",
+                dedup_strings(names).join("|")
+            ))
+        }
+        _ => rerun(tool, command, cases),
+    }
+}
+
+/// 순서를 지키며 겹친 것을 뺀다.
+fn dedup_strings(items: Vec<String>) -> Vec<String> {
+    let mut kept: Vec<String> = Vec::with_capacity(items.len());
+    for item in items {
+        if !kept.contains(&item) {
+            kept.push(item);
+        }
+    }
+    kept
+}
+
+/// pytest 결과의 노드 ID. 묶음(`tests.test_a`, 클래스 안이면 `tests.test_a.TestX`)의 앞쪽을 `dir` 아래 파일로
+/// 맞춰 본다(가장 긴 것부터). 파일이 없으면 None.
+fn pytest_node_id(case: &Case, dir: &Path) -> Option<String> {
+    let parts: Vec<&str> = case.suite.split('.').collect();
+    (1..=parts.len()).rev().find_map(|k| {
+        let file = format!("{}.py", parts[..k].join("/"));
+        dir.join(&file).is_file().then(|| {
+            let mut id = file;
+            for class in &parts[k..] {
+                id.push_str("::");
+                id.push_str(class);
+            }
+            id.push_str("::");
+            id.push_str(&case.name);
+            id
+        })
+    })
 }
 
 /// 실패한 것만 다시 돌리는 명령: Maven `-Dtest`(통합 테스트는 `-Dit.test`), Gradle `--tests`, pytest `--lf`,

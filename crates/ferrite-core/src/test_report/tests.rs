@@ -1176,6 +1176,95 @@ fn pytest가_모으지_못한_파일의_지난_실패는_앞_결과로_남긴다
 }
 
 #[test]
+fn 고른_테스트만_돌리는_명령을_만든다() {
+    let case = |suite: &str, name: &str| Case {
+        suite: suite.to_owned(),
+        name: name.to_owned(),
+        outcome: Outcome::Passed,
+        seconds: None,
+        message: None,
+        detail: String::new(),
+        file: None,
+        line: None,
+        integration: false,
+        task: None,
+        previous: false,
+    };
+    let dir = std::env::temp_dir().join(format!("ferrite-run-only-{}", std::process::id()));
+    std::fs::create_dir_all(dir.join("tests")).unwrap();
+    std::fs::write(dir.join("tests/test_a.py"), "").unwrap();
+    let add = case("tests.test_a", "test_add");
+    let param = case("tests.test_a.TestCalc", "test_sum[1-2]");
+    // pytest: 파일을 찾아 노드 ID로, 클래스와 매개변수도 그대로.
+    assert_eq!(
+        run_only(Tool::Pytest, "pytest -q", &[&add, &param, &add], &dir).unwrap(),
+        "pytest -q \"tests/test_a.py::test_add\" \"tests/test_a.py::TestCalc::test_sum[1-2]\""
+    );
+    // 파일을 못 찾으면 이름으로 거른다(매개변수는 뺀다).
+    let lost = case("pkg.test_b", "test_b[x]");
+    assert_eq!(
+        run_only(Tool::Pytest, "pytest", &[&add, &lost], &dir).unwrap(),
+        "pytest -k \"test_add or test_b\""
+    );
+    // CTest: 이름을 정규식으로(특수 글자는 이스케이프).
+    let (ok, plus) = (case("ok", "ok"), case("a+b", "a+b"));
+    assert_eq!(
+        run_only(Tool::Ctest, "ctest --test-dir build", &[&ok, &plus], &dir).unwrap(),
+        "ctest --test-dir build -R \"^(ok|a\\+b)$\""
+    );
+    // Maven은 실패만 다시와 같은 거르기다.
+    let calc = case("demo.CalcTest", "adds");
+    assert_eq!(
+        run_only(Tool::Maven, "mvn test", &[&calc], &dir),
+        rerun(Tool::Maven, "mvn test", &[&calc])
+    );
+    assert_eq!(run_only(Tool::Maven, "mvn test", &[], &dir), None);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn 고른_테스트만_돌린_결과는_고른_것만_지운_것으로_본다() {
+    let case = |name: &str, outcome| Case {
+        suite: "demo.CalcTest".to_owned(),
+        name: name.to_owned(),
+        outcome,
+        seconds: None,
+        message: None,
+        detail: String::new(),
+        file: None,
+        line: None,
+        integration: false,
+        task: None,
+        previous: false,
+    };
+    let mut cases = vec![
+        case("adds", Outcome::Passed),
+        case("gone", Outcome::Passed),
+        case("wrong", Outcome::Failed),
+        case("other", Outcome::Failed),
+    ];
+    // adds·gone을 골라 돌렸다: gone은 결과에 없어 지운 것이다. 고르지 않은 실패(wrong·other)는 그대로 둔다.
+    let targets = vec![case("adds", Outcome::Passed), case("gone", Outcome::Passed)];
+    apply_selected(
+        Tool::Pytest,
+        Some(0),
+        "",
+        &mut cases,
+        vec![case("adds", Outcome::Failed)],
+        &targets,
+    );
+    let seen: Vec<(&str, Outcome)> = cases.iter().map(|c| (c.name.as_str(), c.outcome)).collect();
+    assert_eq!(
+        seen,
+        [
+            ("adds", Outcome::Failed),
+            ("wrong", Outcome::Failed),
+            ("other", Outcome::Failed)
+        ]
+    );
+}
+
+#[test]
 fn 한글_windows의_maven이_cp949로_낸_모듈별_결과도_읽는다() {
     // 한글 Windows의 Maven(JDK 8·21 모두)이 `<name>게시판 공통</name>` 모듈을 이 바이트로 냈다(2026-11-23).
     // 테스트 창은 줄마다 UTF-8이 아니면 CP949로 푼다(`text_file::decode`).
