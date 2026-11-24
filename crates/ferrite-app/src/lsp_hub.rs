@@ -927,7 +927,14 @@ impl LspHub {
         found
     }
 
-    /// 이 서버에 마지막으로 보낸 문서 버전(열지 않은 문서면 None). 서버가 편집에 붙인 버전과 비교한다.
+    /// 이 서버가 떠서 요청을 받을 준비가 됐는가(`execute_command`가 보낼 수 있는가).
+    pub fn is_ready(&self, server: &str) -> bool {
+        self.servers
+            .get(server)
+            .and_then(|s| s.lsp.as_ref())
+            .is_some_and(LanguageServer::is_ready)
+    }
+
     /// 이 서버 프로세스가 떠 있는가(테스트에서 띄우는 조건을 확인할 때).
     #[cfg(test)]
     pub fn is_running(&self, server: &str) -> bool {
@@ -940,6 +947,7 @@ impl LspHub {
         self.crashes.get(server).map_or(0, |c| c.count)
     }
 
+    /// 이 서버에 마지막으로 보낸 문서 버전(열지 않은 문서면 None). 서버가 편집에 붙인 버전과 비교한다.
     pub fn document_version(&self, server: &str, path: &Path) -> Option<i32> {
         self.servers.get(server)?.opened.get(path).copied()
     }

@@ -3,11 +3,14 @@
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Read};
+use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::sync::{Arc, Weak};
 use std::thread;
-use std::time::{Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use eframe::egui;
 use ferrite_core::run::RunConfig;
@@ -26,6 +29,33 @@ fn enable_tests(pom: &Path) -> Result<(), String> {
     let enabled = test_report::enable_tests(&text)
         .ok_or_else(|| "pom.xml에서 skipTests 설정을 찾지 못했습니다".to_owned())?;
     std::fs::write(pom, enabled).map_err(|e| format!("{}에 쓰지 못했습니다: {e}", pom.display()))
+}
+
+/// 디버그로 띄운 테스트 JVM이 기다리는 곳(`test_report::with_jvm_debug`, 둘 다 기본 5005).
+fn jdwp_address() -> SocketAddr {
+    ([127, 0, 0, 1], ferrite_core::run::JDWP_PORT).into()
+}
+
+/// 그곳에서 누가 기다리는가. Surefire는 JVM의 "Listening for transport" 줄을 디버거가 붙은 뒤에야 내보내므로 줄 대신
+/// 연결해 본다. JDWP는 인사(handshake) 없이 끊은 연결을 버리고 계속 기다린다(JDK 8·21에서 확인, 출력에 "Debugger
+/// failed to attach: handshake failed" 한 줄이 남는다).
+fn jdwp_listening() -> bool {
+    TcpStream::connect_timeout(&jdwp_address(), Duration::from_millis(200)).is_ok()
+}
+
+/// 테스트 JVM이 기다리기 시작하면 `listening`을 세운다. 실행이 끝나 `listening`을 버리면 그만둔다.
+fn watch_jdwp(listening: Weak<AtomicBool>, ctx: egui::Context) {
+    thread::spawn(move || {
+        while let Some(flag) = listening.upgrade() {
+            if jdwp_listening() {
+                flag.store(true, Ordering::Relaxed);
+                ctx.request_repaint();
+                return;
+            }
+            drop(flag);
+            thread::sleep(Duration::from_millis(250));
+        }
+    });
 }
 
 /// pytest·CTest 보고서를 쓰는 폴더(이 앱 프로세스의 것). 앱을 닫을 때 지운다.
@@ -62,6 +92,8 @@ struct Running {
     json: String,
     /// 사용자가 멈췄다(끝난 테스트의 결과만 있다).
     stopped: bool,
+    /// 테스트 JVM을 디버거를 기다리게 띄웠고 아직 붙지 않았다. 기다리기 시작하면 참이 된다(`watch_jdwp`).
+    debug_wait: Option<Arc<AtomicBool>>,
 }
 
 /// 창 아래쪽에 보일 것. 창이 낮아도 다 보이게 하나씩 보인다.
@@ -218,6 +250,7 @@ impl TestPanel {
             targets: None,
             json: String::new(),
             stopped: false,
+            debug_wait: None,
         });
         self.last = Some((config, tool, dir));
     }
@@ -272,6 +305,13 @@ impl TestPanel {
         let Some(running) = self.running.take() else {
             return;
         };
+        if running.debug_wait.is_some() && !running.stopped {
+            push_limited(
+                &mut self.output,
+                "[테스트 JVM이 디버거를 기다리지 않고 끝났습니다. 빌드 설정이 테스트를 따로 띄우지 않으면(Surefire \
+                 forkCount=0) 디버그 인자가 먹지 않습니다]\n",
+            );
+        }
         let found = match running.tool {
             Tool::Go => test_report::parse_go_json(&running.json),
             tool => {
@@ -433,7 +473,7 @@ impl TestPanel {
         }
         self.poll(ui.ctx(), root);
         if let Some(targets) = self.run_request.take() {
-            self.run_only(ui.ctx(), root, targets);
+            self.run_only(ui.ctx(), root, targets, false);
         }
         let running = self.is_running();
         let mut run = None;
@@ -607,9 +647,39 @@ impl TestPanel {
         text: &str,
         line: usize,
     ) {
-        if let Err(e) = self.try_run_at(ctx, root, path, text, line) {
+        if let Err(e) = self.try_run_at(ctx, root, path, text, line, false) {
             self.status = Some((e, true));
         }
+    }
+
+    /// `run_at`처럼 커서의 Java·Kotlin 테스트만 돌리되 테스트 JVM이 시작에서 멈춰 디버거를 기다리게 띄운다. 기다리기
+    /// 시작하면 `take_attach_ready`가 참이 된다.
+    pub fn debug_at(
+        &mut self,
+        ctx: &egui::Context,
+        root: &Path,
+        path: &Path,
+        text: &str,
+        line: usize,
+    ) {
+        if let Err(e) = self.try_run_at(ctx, root, path, text, line, true) {
+            self.status = Some((e, true));
+        }
+    }
+
+    /// 디버그로 띄운 테스트 JVM이 디버거를 기다리기 시작했는가(한 번만 참). 창이 가려져도 앱이 늘 묻는다.
+    pub fn take_attach_ready(&mut self) -> bool {
+        let Some(running) = &mut self.running else {
+            return false;
+        };
+        let ready = running
+            .debug_wait
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::Relaxed));
+        if ready {
+            running.debug_wait = None;
+        }
+        ready
     }
 
     fn try_run_at(
@@ -619,6 +689,7 @@ impl TestPanel {
         path: &Path,
         text: &str,
         line: usize,
+        debug: bool,
     ) -> Result<(), String> {
         use ferrite_core::test_at::{TestLang, test_at};
         if self.is_running() {
@@ -626,6 +697,17 @@ impl TestPanel {
         }
         let lang =
             TestLang::of(path).ok_or("Java·Kotlin·Python·Go 테스트 파일에서 돌릴 수 있습니다")?;
+        if debug && lang != TestLang::Jvm {
+            return Err("테스트 창은 Java·Kotlin 테스트만 디버거를 기다리게 띄웁니다".into());
+        }
+        // 다른 것(실행의 "디버그 5005" 등)이 그 포트를 쓰면 테스트 JVM이 뜨지 못하고 그것에 붙고 만다.
+        if debug && jdwp_listening() {
+            return Err(format!(
+                "{} 포트를 이미 쓰고 있습니다(실행의 \"디버그 {}\" 등). 그것을 끝낸 뒤 다시 하세요",
+                ferrite_core::run::JDWP_PORT,
+                ferrite_core::run::JDWP_PORT
+            ));
+        }
         let fits = |tool: Tool| match lang {
             TestLang::Jvm => matches!(tool, Tool::Maven | Tool::Gradle),
             TestLang::Python => tool == Tool::Pytest,
@@ -666,12 +748,13 @@ impl TestPanel {
             previous: false,
         };
         self.last = Some((config, tool, dir));
-        self.run_only(ctx, root, vec![case]);
+        self.run_only(ctx, root, vec![case], debug);
         Ok(())
     }
 
     /// 결과에서 고른 테스트만 마지막 구성으로 돌린다. 결과는 앞 결과에 넣는다(고르지 않은 테스트는 그대로).
-    fn run_only(&mut self, ctx: &egui::Context, root: &Path, targets: Vec<Case>) {
+    /// `debug`면 테스트 JVM이 디버거를 기다리게 띄운다(Maven·Gradle만).
+    fn run_only(&mut self, ctx: &egui::Context, root: &Path, targets: Vec<Case>, debug: bool) {
         if self.is_running() {
             return;
         }
@@ -679,12 +762,30 @@ impl TestPanel {
             return;
         };
         let picked: Vec<&Case> = targets.iter().collect();
-        let Some(line) = test_report::run_only(tool, &config.command, &picked, &dir) else {
+        let Some(mut line) = test_report::run_only(tool, &config.command, &picked, &dir) else {
             return;
         };
+        if debug {
+            let Some(debugged) = test_report::with_jvm_debug(tool, &line) else {
+                return;
+            };
+            line = debugged;
+        }
         self.start(ctx, root, config, Some(line));
         if let Some(running) = &mut self.running {
             running.targets = Some(targets);
+            if debug {
+                let listening = Arc::new(AtomicBool::new(false));
+                watch_jdwp(Arc::downgrade(&listening), ctx.clone());
+                running.debug_wait = Some(listening);
+                push_limited(
+                    &mut self.output,
+                    &format!(
+                        "[테스트 JVM이 {} 포트에서 디버거를 기다리면 붙습니다. 붙지 못하면 [멈춤]으로 끝내세요]\n",
+                        ferrite_core::run::JDWP_PORT
+                    ),
+                );
+            }
         }
     }
 

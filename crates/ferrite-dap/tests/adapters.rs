@@ -86,14 +86,26 @@ fn response(event: DebugEvent) -> Value {
 fn locals_at_breakpoint(
     adapter: &Adapter,
     adapter_id: &str,
+    arguments: Value,
+    source: &Path,
+    line: usize,
+) -> Vec<(String, String)> {
+    locals_at(adapter, adapter_id, arguments, false, source, line)
+}
+
+/// `locals_at_breakpoint`와 같되 `attach`면 띄우지 않고 이미 뜬 프로그램에 붙는다.
+fn locals_at(
+    adapter: &Adapter,
+    adapter_id: &str,
     mut arguments: Value,
+    attach: bool,
     source: &Path,
     line: usize,
 ) -> Vec<(String, String)> {
     adapters::complete_arguments(adapter_id, &mut arguments);
     let launch = Launch {
         adapter_id: adapter_id.into(),
-        attach: false,
+        attach,
         arguments,
     };
     let breakpoints = BTreeMap::from([(
@@ -466,10 +478,78 @@ fn execute(
     panic!("{command} 응답 시간 초과");
 }
 
+/// jdt.ls와 java-debug를 받아 설치하고, java-debug를 실은 jdt.ls를 `project`에 띄워 준비될 때까지 기다린다.
+fn start_jdtls(servers: &Path, project: &Path) -> ferrite_lsp::client::LanguageServer {
+    let jdtls = ferrite_lsp::catalog::SERVERS
+        .iter()
+        .find(|s| s.name == "jdtls")
+        .unwrap();
+    install::install(servers, jdtls, &mut |_, _| {}).expect("jdt.ls 설치");
+    install::install(
+        servers,
+        adapters::find("java-debug").unwrap(),
+        &mut |_, _| {},
+    )
+    .expect("java-debug 설치");
+    let command = install::command(servers, jdtls, project).unwrap().unwrap();
+    assert!(
+        command
+            .init_options
+            .to_string()
+            .contains("com.microsoft.java.debug.plugin"),
+        "java-debug 번들을 싣는다: {}",
+        command.init_options
+    );
+    let lsp = ferrite_lsp::client::LanguageServer::start(&command, project, || {}).unwrap();
+    let started = Instant::now();
+    while !lsp.is_ready() {
+        assert!(
+            started.elapsed() < Duration::from_secs(180),
+            "jdt.ls 준비 시간 초과"
+        );
+        for event in lsp.poll_events() {
+            if let ferrite_lsp::client::ServerEvent::Exited(reason) = event {
+                panic!("jdt.ls가 끝남: {reason}");
+            }
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    lsp
+}
+
+/// java-debug가 jdt.ls에 차례로 묻는 것(메인 클래스·클래스패스 등)에 답해 받은 디버그 포트와 인자.
+fn java_debug_port(
+    lsp: &mut ferrite_lsp::client::LanguageServer,
+    start: &mut ferrite_dap::java::JavaStart,
+) -> (u16, Value) {
+    use ferrite_dap::java::{Next, RESOLVE_MAIN_CLASS};
+    let mut next = start.command();
+    loop {
+        match next {
+            Next::Command(name, args) => {
+                // 프로젝트를 다 읽기 전에는 메인 클래스가 비어 있다. 잠시 뒤 다시 묻는다.
+                let mut result = execute(lsp, name, &args);
+                for _ in 0..90 {
+                    let empty = result
+                        .as_ref()
+                        .is_ok_and(|v| v.as_array().is_some_and(Vec::is_empty));
+                    if name != RESOLVE_MAIN_CLASS || !empty {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_secs(1));
+                    result = execute(lsp, name, &args);
+                }
+                next = start.answer(result);
+            }
+            Next::Ready { port, arguments } => break (port, arguments),
+            Next::Failed(e) => panic!("java-debug 준비 실패: {e}"),
+        }
+    }
+}
+
 #[test]
 #[ignore = "jdt.ls(약 51MB)와 java-debug(약 3MB)를 받는다. Java 21 이상이 필요하다"]
 fn java_debug를_jdtls에_실어_java를_디버그한다() {
-    use ferrite_dap::java::{JavaStart, Next, RESOLVE_MAIN_CLASS};
     if !require("Java 21", ferrite_lsp::java::find_java().is_ok()) {
         return;
     }
@@ -494,76 +574,155 @@ fn java_debug를_jdtls에_실어_java를_디버그한다() {
     let text = "package demo;\n\npublic class Main {\n    static int add(int a, int b) {\n        int total = a + b;\n        return total;\n    }\n\n    public static void main(String[] args) {\n        int y = add(41, 1);\n        System.out.println(\"결과 \" + y);\n        try {\n            Thread.sleep(4000);\n        } catch (InterruptedException e) {\n        }\n    }\n}\n";
     std::fs::write(&source, text).unwrap();
 
-    let jdtls = ferrite_lsp::catalog::SERVERS
-        .iter()
-        .find(|s| s.name == "jdtls")
-        .unwrap();
-    install::install(&servers, jdtls, &mut |_, _| {}).expect("jdt.ls 설치");
-    install::install(
-        &servers,
-        adapters::find("java-debug").unwrap(),
-        &mut |_, _| {},
-    )
-    .expect("java-debug 설치");
-    let command = install::command(&servers, jdtls, &project)
-        .unwrap()
-        .unwrap();
-    assert!(
-        command
-            .init_options
-            .to_string()
-            .contains("com.microsoft.java.debug.plugin"),
-        "java-debug 번들을 싣는다: {}",
-        command.init_options
-    );
-    let mut lsp = ferrite_lsp::client::LanguageServer::start(&command, &project, || {}).unwrap();
-    let started = Instant::now();
-    while !lsp.is_ready() {
-        assert!(
-            started.elapsed() < Duration::from_secs(180),
-            "jdt.ls 준비 시간 초과"
-        );
-        for event in lsp.poll_events() {
-            if let ferrite_lsp::client::ServerEvent::Exited(reason) = event {
-                panic!("jdt.ls가 끝남: {reason}");
-            }
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
+    let mut lsp = start_jdtls(&servers, &project);
     lsp.did_open(&source, "java", 1, text);
 
-    let mut start = JavaStart::new(
+    let mut start = ferrite_dap::java::JavaStart::new(
         json!({ "cwd": project, "console": "internalConsole" }),
         false,
         Some(&source),
     );
-    let mut next = start.command();
-    let (port, arguments) = loop {
-        match next {
-            Next::Command(name, args) => {
-                // 프로젝트를 다 읽기 전에는 메인 클래스가 비어 있다. 잠시 뒤 다시 묻는다.
-                let mut result = execute(&mut lsp, name, &args);
-                for _ in 0..90 {
-                    let empty = result
-                        .as_ref()
-                        .is_ok_and(|v| v.as_array().is_some_and(Vec::is_empty));
-                    if name != RESOLVE_MAIN_CLASS || !empty {
-                        break;
-                    }
-                    std::thread::sleep(Duration::from_secs(1));
-                    result = execute(&mut lsp, name, &args);
-                }
-                next = start.answer(result);
-            }
-            Next::Ready { port, arguments } => break (port, arguments),
-            Next::Failed(e) => panic!("java-debug 준비 실패: {e}"),
-        }
-    };
+    let (port, arguments) = java_debug_port(&mut lsp, &mut start);
     assert_eq!(arguments["mainClass"], "demo.Main");
     let adapter = Adapter::Tcp(([127, 0, 0, 1], port).into());
     assert_locals(&locals_at_breakpoint(
         &adapter, "java", arguments, &source, 6,
     ));
+    drop(lsp);
+    let _ = std::fs::remove_dir_all(&servers);
+    let _ = std::fs::remove_dir_all(&project);
+}
+
+/// 앱의 테스트 창이 셸로 명령 줄을 띄우는 것과 같게(Windows는 `cmd`, 그 밖은 `sh`).
+fn shell(line: &str) -> Command {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let mut command = Command::new("cmd.exe");
+        command
+            .args(["/d", "/s", "/c"])
+            .raw_arg(format!("\"{line}\""));
+        command
+    }
+    #[cfg(not(windows))]
+    {
+        let mut command = Command::new("sh");
+        command.args(["-c", line]);
+        command
+    }
+}
+
+#[test]
+#[ignore = "jdt.ls·java-debug와 JUnit(Maven Central)을 받는다. Java 21 이상과 Maven이 필요하다"]
+fn java_debug로_커서의_maven_테스트에_붙는다() {
+    use ferrite_core::test_report::{self, Case, Outcome, Tool};
+    if !require("Java 21", ferrite_lsp::java::find_java().is_ok())
+        || !require("Maven", find_program("mvn").is_some())
+    {
+        return;
+    }
+    let (servers, project) = (temp_dir("java-test-servers"), temp_dir("java-test"));
+    std::fs::write(
+        project.join("pom.xml"),
+        "<project xmlns=\"http://maven.apache.org/POM/4.0.0\"><modelVersion>4.0.0</modelVersion>\
+         <groupId>demo</groupId><artifactId>calc</artifactId><version>1.0</version>\
+         <properties><maven.compiler.release>17</maven.compiler.release>\
+         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding></properties>\
+         <dependencies><dependency><groupId>org.junit.jupiter</groupId><artifactId>junit-jupiter</artifactId>\
+         <version>5.12.2</version><scope>test</scope></dependency></dependencies>\
+         <build><plugins><plugin><artifactId>maven-surefire-plugin</artifactId><version>3.5.4</version>\
+         </plugin></plugins></build></project>\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(project.join("src/main/java/demo")).unwrap();
+    std::fs::create_dir_all(project.join("src/test/java/demo")).unwrap();
+    let source = project.join("src/main/java/demo/Calc.java");
+    std::fs::write(
+        &source,
+        "package demo;\n\npublic class Calc {\n    public static int add(int a, int b) {\n        int total = a + b;\n        return total;\n    }\n}\n",
+    )
+    .unwrap();
+    let test = project.join("src/test/java/demo/CalcTest.java");
+    // 이어 간 뒤에도 잠시 돌아야 실행 중에 보낸 식의 답을 받는다(다른 예제와 같다).
+    let text = "package demo;\n\nimport static org.junit.jupiter.api.Assertions.assertEquals;\nimport static org.junit.jupiter.api.Assertions.fail;\n\nimport org.junit.jupiter.api.Test;\n\nclass CalcTest {\n    @Test\n    void adds() throws Exception {\n        assertEquals(42, Calc.add(41, 1)); // 커서\n        Thread.sleep(4000);\n    }\n\n    @Test\n    void other() {\n        fail(\"돌면 안 된다\");\n    }\n}\n";
+    std::fs::write(&test, text).unwrap();
+
+    // 앱처럼 jdt.ls가 먼저 떠 프로젝트를 읽는다(빌드 출력이 Maven과 겹치지 않게 그 빌드를 기다린다).
+    let mut lsp = start_jdtls(&servers, &project);
+    lsp.did_open(&test, "java", 1, text);
+    let built = project.join("target/classes/demo/Calc.class");
+    let started = Instant::now();
+    while !built.exists() && started.elapsed() < Duration::from_secs(120) {
+        lsp.poll_events();
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    // 테스트 창의 "커서의 테스트 디버그"와 같은 명령: 커서의 테스트만 고르고(`run_only`), 테스트 JVM이 디버거를
+    // 기다리게 하고(`with_jvm_debug`), 보고서 옵션을 붙인다(`with_report`).
+    let line = text.lines().position(|l| l.contains("// 커서")).unwrap();
+    let at = ferrite_core::test_at::test_at(&test, text, line, &project).expect("커서의 테스트");
+    let case = Case {
+        suite: at.suite,
+        name: at.name,
+        outcome: Outcome::Passed,
+        seconds: None,
+        message: None,
+        detail: String::new(),
+        file: None,
+        line: None,
+        integration: false,
+        task: None,
+        previous: false,
+    };
+    let only = test_report::run_only(Tool::Maven, "mvn -B test", &[&case], &project).unwrap();
+    let debug = test_report::with_jvm_debug(Tool::Maven, &only).unwrap();
+    let command = test_report::with_report(Tool::Maven, &debug, &project);
+    eprintln!("> {command}");
+    let mut maven = shell(&command).current_dir(&project).spawn().unwrap();
+
+    // 앱처럼 테스트 JVM이 기다리기 시작할 때까지 연결해 본다(Surefire는 기다리는 줄을 붙은 뒤에야 낸다).
+    let address = ([127, 0, 0, 1], ferrite_core::run::JDWP_PORT).into();
+    let started = Instant::now();
+    while std::net::TcpStream::connect_timeout(&address, Duration::from_millis(200)).is_err() {
+        assert!(
+            maven.try_wait().unwrap().is_none(),
+            "Maven이 디버거를 기다리지 않고 끝났다"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(300),
+            "테스트 JVM이 기다리지 않는다"
+        );
+        std::thread::sleep(Duration::from_millis(250));
+    }
+
+    let config = ferrite_core::test_at::jvm_attach_config();
+    assert!(config.attach());
+    let mut start = ferrite_dap::java::JavaStart::new(config.arguments, true, Some(&source));
+    let (port, arguments) = java_debug_port(&mut lsp, &mut start);
+    let adapter = Adapter::Tcp(([127, 0, 0, 1], port).into());
+    assert_locals(&locals_at(&adapter, "java", arguments, true, &source, 6));
+
+    let started = Instant::now();
+    let status = loop {
+        if let Some(status) = maven.try_wait().unwrap() {
+            break status;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(120),
+            "Maven이 끝나지 않는다"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    };
+    assert!(status.success(), "Maven 종료: {status}");
+    // 커서의 테스트만 돌았다.
+    let cases =
+        test_report::read_report(&project.join("target/surefire-reports/TEST-demo.CalcTest.xml"))
+            .unwrap();
+    assert_eq!(cases.len(), 1, "{cases:?}");
+    assert_eq!(
+        (cases[0].name.as_str(), cases[0].outcome),
+        ("adds", Outcome::Passed)
+    );
     drop(lsp);
     let _ = std::fs::remove_dir_all(&servers);
     let _ = std::fs::remove_dir_all(&project);
