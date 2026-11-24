@@ -2570,6 +2570,15 @@
   - 검증: 단위 시험(Maven·Gradle 명령, 붙기 구성). 실제 도구(로컬, JDK 21): Maven 3.10·Surefire 3.5.4와 Gradle 9.2로 위 명령을 띄우니 5005에서 기다렸고, 연결해 본 뒤 jdb로 붙어 이어 가니 테스트가 통과했다(JDK 8도 연결해 본 뒤 붙었다). 실제 어댑터(`adapters` 시험 `java_debug로_커서의_maven_테스트에_붙는다`, CI 3개 OS): jdt.ls에 Maven 프로젝트를 띄우고 커서의 `adds`만 위 명령으로 띄워 기다림을 본 뒤 java-debug로 붙어 테스트가 부르는 `add`의 `return` 줄에서 a=41·b=1·total=42를 읽는다. 같은 클래스의 다른 테스트는 돌지 않는다. `locals_at_breakpoint`는 붙기도 받게 넓혔다(`locals_at`).
   - 확인하지 못한 것: 앱 화면에서 실제로 멈추기(로컬에 jdt.ls가 없다), Gradle을 java-debug로(로컬 jdb만), Kotlin 테스트, 5005가 `::1`에만 열리는 환경.
 
+- [x] 결과 트리에서 테스트 디버그(2026-11-24) — 작음
+  - 까닭: 실패한 테스트를 디버거로 보려면 결과에서 소스로 가서 커서를 두고 `Ctrl+Shift+F9`를 눌러야 했다.
+  - 고침
+    - 테스트 창 결과 트리의 테스트 오른쪽 단추에 [이 테스트 디버그]를 더했다(CTest 결과에서는 끈다). 누르면 앱이 다음 그리기에서 가져간다(`take_debug_request`, 창을 그리는 동안에는 도킹 배치를 바꿀 수 없다).
+    - Maven·Gradle: jdt.ls를 확인하고 마지막 구성으로 그 테스트만 디버거를 기다리게 다시 돌려 붙는다(`debug_case`, 위 항목과 같은 길). 결과의 통합 테스트(`-Dit.test`)는 Failsafe가 띄우므로 `-Dmaven.failsafe.debug`를 붙인다(그때 Surefire에는 돌 것이 없어 JVM을 띄우지 않는다).
+    - pytest·Go: `test_at::debug_target`이 결과의 묶음에서 파일을 찾아(`tests.test_a.TestX` → `tests/test_a.py`, `example.com/board/calc` → `go.mod` 모듈 경로를 뺀 `calc/`의 `_test.go`) 커서의 테스트와 같은 `debug_config`를 만든다. Go 패키지 결과(`(패키지)`)는 패키지 전체다.
+  - 검증: 단위 시험(Python 클래스 묶음·없는 파일, Go 패키지·패키지 결과·모듈 밖, Failsafe 인자). 실제 Maven 3.10·Failsafe 3.5.4(로컬, JDK 21): `-Dtest=NoUnitTestsToRerun … -Dit.test=CalcIT#adds -Dmaven.failsafe.debug`로 띄우니 5005에서 기다렸고 jdb로 붙어 이어 가니 `adds`만 통과했다(실패하는 단위 테스트·다른 통합 테스트는 돌지 않았다).
+  - 확인하지 못한 것: 오른쪽 단추 메뉴를 앱 화면으로(자동 조작 도구에 오른쪽 단추가 없다), pytest·Go를 결과에서 실제 어댑터로(구성은 커서의 것과 같아 `adapters` 시험이 본 길이다).
+
 - 살폈지만 넣지 않은 것: 임베디드(MCU 플래시·시리얼 모니터·장비 설정 파일), 프레임워크별 지원(React·Vue·Angular 등, JS·TS 언어 서버로 기본은 된다), 린터 개별 연동(언어 서버나 저장 시 작업으로 된다), 원격 개발·컨테이너·SFTP 배포, 로컬 AI 완성 모델, 계정 기반 설정 동기화. egov 개발과 거리가 멀거나 크기에 비해 쓰임이 적다.
 
 ## 3. Phase별 3-OS 검증 체크리스트 (수동)
