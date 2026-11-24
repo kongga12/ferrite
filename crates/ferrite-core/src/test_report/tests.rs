@@ -1408,3 +1408,29 @@ fn 커서의_jvm_테스트를_디버거를_기다리게_띄운다() {
     );
     assert_eq!(with_jvm_debug(Tool::Pytest, "pytest"), None);
 }
+
+#[test]
+fn junit5_nested_안쪽_클래스만_거른다() {
+    let case = Case {
+        suite: "demo.CalcTest$Inner".into(),
+        name: "adds()".into(),
+        outcome: Outcome::Failed,
+        seconds: None,
+        message: None,
+        detail: String::new(),
+        file: None,
+        line: None,
+        integration: false,
+        task: Some(":app:test".into()),
+        previous: false,
+    };
+    // `$`를 떼면 바깥 클래스의 같은 이름 테스트가 돈다. sh가 `$Inner`를 풀지 않게 `*`로 적는다.
+    assert_eq!(
+        rerun(Tool::Maven, "mvn test", &[&case]).unwrap(),
+        "mvn test -Dtest=CalcTest*Inner#adds -Dsurefire.failIfNoSpecifiedTests=false"
+    );
+    assert_eq!(
+        rerun(Tool::Gradle, "gradle test", &[&case]).unwrap(),
+        "gradle :app:test --tests \"demo.CalcTest*Inner.adds\""
+    );
+}

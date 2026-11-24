@@ -1081,12 +1081,16 @@ pub fn rerun(tool: Tool, command: &str, failed: &[&Case]) -> Option<String> {
     }
     // JUnit 5의 매개변수 테스트 이름(`adds(int)[1]`)과 Gradle의 `()`를 뺀다.
     let method = |name: &str| name.split(['(', '[']).next().unwrap_or(name).to_owned();
+    // JUnit 5 `@Nested` 안쪽 클래스(`CalcTest$Inner`)는 `$`까지 적어야 그것만 거른다(떼면 바깥 클래스의 같은
+    // 이름 테스트가 돈다). 명령은 셸로 띄우고 sh는 큰따옴표 안의 `$Inner`를 변수로 풀므로 `*`로 적는다(Maven
+    // Surefire 3.5.4·Gradle 9.2가 `CalcTest*Inner`로 안쪽 클래스만 골랐다).
+    let nested = |class: &str| class.replace('$', "*");
     // Gradle `--tests`의 거르기. 이름이 빈 것(묶음 전체, `run_only`)은 클래스만.
     let gradle_test = |case: &Case| {
         if case.name.is_empty() {
-            case.suite.clone()
+            nested(&case.suite)
         } else {
-            format!("{}.{}", case.suite, method(&case.name))
+            format!("{}.{}", nested(&case.suite), method(&case.name))
         }
     };
     Some(match tool {
@@ -1095,8 +1099,7 @@ pub fn rerun(tool: Tool, command: &str, failed: &[&Case]) -> Option<String> {
             let filter = |cases: &[&&Case]| {
                 let mut classes: Vec<(String, Vec<String>)> = Vec::new();
                 for case in cases {
-                    let class = case.suite.rsplit('.').next().unwrap_or(&case.suite);
-                    let class = class.split('$').next().unwrap_or(class).to_owned();
+                    let class = nested(case.suite.rsplit('.').next().unwrap_or(&case.suite));
                     let name = method(&case.name);
                     match classes.iter_mut().find(|(c, _)| *c == class) {
                         Some((_, names)) if !names.contains(&name) => names.push(name),
