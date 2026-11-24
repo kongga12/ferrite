@@ -1292,6 +1292,7 @@ impl FerriteApp {
             Command::SendRequest => {}
             Command::Run => self.open_run_picker(ctx),
             Command::RunTest => self.run_test_at_cursor(ctx),
+            Command::DebugTest => self.debug_test_at_cursor(ctx),
             Command::Debug => self.debug_continue_or_start(ctx),
             Command::DebugStop => self.debugger.stop(),
             Command::DebugPause => self.debugger.pause(),
@@ -1642,6 +1643,40 @@ impl FerriteApp {
         let path = doc.path.clone();
         dock::show(&mut self.layout, Pane::Tests);
         self.tests.run_at(ctx, &root, &path, &text, line);
+    }
+
+    /// 활성 문서에서 커서가 든 테스트를 디버거로 띄운다(Python은 debugpy로 pytest, Go는 delve test 모드).
+    fn debug_test_at_cursor(&mut self, ctx: &egui::Context) {
+        use ferrite_core::test_at::{debug_config, test_at};
+        let (Some(i), Some(root)) = (
+            self.active,
+            self.tree.as_ref().map(|t| t.root().to_path_buf()),
+        ) else {
+            return;
+        };
+        if self.debugger.is_active() {
+            self.status = "디버그 중입니다. 멈춘 뒤에 다시 하세요".into();
+            return;
+        }
+        let doc = &self.docs[i];
+        let rope = doc.buffer.rope();
+        let line = rope.char_to_line(doc.buffer.selection().head);
+        let text = rope.to_string();
+        let path = doc.path.clone();
+        let Some(at) = test_at(&path, &text, line, &root) else {
+            self.status =
+                "이 파일에서 테스트(@Test 메서드, test 함수, TestX)를 찾지 못했습니다".into();
+            return;
+        };
+        match debug_config(&at, &path, &root) {
+            Some(config) => self.start_debug(&config, ctx),
+            None => {
+                self.status = format!(
+                    "Java·Kotlin 테스트 디버그는 아직 없습니다. 실행의 \"디버그 {}\"로 띄운 뒤 붙으세요",
+                    ferrite_core::run::JDWP_PORT
+                )
+            }
+        }
     }
 
     fn request_at_cursor(&mut self, kind: LspRequest) {
@@ -2786,6 +2821,22 @@ impl FerriteApp {
                     {
                         ui.close();
                         self.run_test_at_cursor(&ctx);
+                    }
+                    let item = egui::Button::new("커서의 테스트 디버그")
+                        .shortcut_text(self.keys.text(&ctx, Command::DebugTest));
+                    if ui
+                        .add_enabled(
+                            project && self.active.is_some() && !self.debugger.is_active(),
+                            item,
+                        )
+                        .on_hover_text(
+                            "에디터 커서가 든 테스트를 디버거로 띄운다(Python은 debugpy로 pytest, Go는 delve). \
+                             걸어 둔 중단점에서 멈춘다. Java·Kotlin은 아직 없다",
+                        )
+                        .clicked()
+                    {
+                        ui.close();
+                        self.debug_test_at_cursor(&ctx);
                     }
                     ui.separator();
                     let debugging = self.debugger.is_active();

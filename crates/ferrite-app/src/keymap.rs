@@ -39,6 +39,7 @@ pub enum Command {
     SendRequest,
     Run,
     RunTest,
+    DebugTest,
     Debug,
     DebugStop,
     DebugPause,
@@ -255,6 +256,14 @@ const TABLE: &[Row] = &[
         "커서의 테스트 돌리기",
         &["Ctrl+Shift+F10"],
         &["Ctrl+Shift+F10"],
+    ),
+    // 커서가 든 테스트를 디버거로 띄운다(Python·Go).
+    (
+        Command::DebugTest,
+        "run.debugTestAtCursor",
+        "커서의 테스트 디버그",
+        &["Ctrl+Shift+F9"],
+        &["Ctrl+Shift+F9"],
     ),
     (
         Command::Debug,

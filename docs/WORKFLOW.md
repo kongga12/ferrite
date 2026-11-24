@@ -2552,6 +2552,14 @@
   - 검증: 단위 시험(하위 프로젝트 `test`·`integrationTest`, 루트 프로젝트, `src` 밖, 빌드 파일 없음). 실제 Gradle 9.2(`test_tools`, 로컬, JDK 21): app·lib 두 프로젝트에서 구성 `gradle check`로 app의 커서 테스트가 `gradle :app:test --tests "demo.CalcTest.addsWrong"`로 그것만 돌았다. 앱 화면(Windows): `.ferrite/run.toml`의 `gradle check` 구성을 고르고 app의 `addsWrong` 몸에서 `Ctrl+Shift+F10`을 누르니 그것만 돌았다(lib은 돌지 않음).
   - 확인하지 못한 것: 소스 세트와 이름이 다른 테스트 작업(빌드 파일에서 따로 만든 작업), Android 등 다른 플러그인의 테스트 작업.
 
+- [x] 커서의 테스트 디버그 — Python·Go(2026-11-24) — 중간
+  - 까닭: 위 "에디터에서 커서의 테스트 돌리기"로 테스트를 돌릴 수는 있지만 디버거로는 띄우지 못했다. 테스트 안에서 멈춰 보려면 디버그 구성을 손으로 적어야 했다.
+  - 고침
+    - `test_at::debug_config`: 커서의 테스트(`test_at`)를 띄우는 디버그 구성. Python은 debugpy `launch`로 `module = "pytest"`, `args = [노드 ID]`(`tests/test_calc.py::TestCalc::test_sub`, 묶음 전체면 파일·클래스까지), `cwd`는 프로젝트 루트. 디버그 대상 Python은 어댑터가 사용자의 것으로 채운다(`complete_arguments`). Go는 delve `mode = "test"`, `program`은 그 패키지 폴더, `args = ["-test.run", "^TestX$"]`(패키지 전체면 없음). Java·Kotlin은 아직 없다.
+    - `실행 > 커서의 테스트 디버그`, 단축키 `Ctrl+Shift+F9`(`run.debugTestAtCursor`). 디버그 중이면 막고, Java·Kotlin이면 "디버그 5005"로 띄운 뒤 붙으라고 알린다.
+  - 검증: 단위 시험(노드 ID·클래스·묶음 전체, Go 인자·패키지 전체, Java는 None). 실제 어댑터(`adapters` 시험, CI 3개 OS. 로컬에는 debugpy·pytest·Go가 없다): debugpy로 커서의 `test_add`를 pytest로 띄워 테스트가 부르는 `add`의 `return` 줄 중단점에서 멈춰 a=41·b=1·total=42를 읽는다. delve test 모드로 커서의 `TestAdd`를 띄워 같은 값을 읽는다(같은 패키지의 다른 테스트는 거른다). `adapters.yml`에 pytest 설치를 더했다. 앱 화면(Windows): 메뉴와 단축키가 보이고 Java 파일에서는 안내가 나온다.
+  - 확인하지 못한 것: 앱 화면에서 실제로 멈추기(로컬에 도구가 없다), Java·Kotlin 테스트 디버그(Maven `-Dmaven.surefire.debug`·Gradle `--debug-jvm`으로 띄워 5005에 붙는 길이 있다), 테스트 구성의 작업 폴더가 루트가 아닌 pytest.
+
 - 살폈지만 넣지 않은 것: 임베디드(MCU 플래시·시리얼 모니터·장비 설정 파일), 프레임워크별 지원(React·Vue·Angular 등, JS·TS 언어 서버로 기본은 된다), 린터 개별 연동(언어 서버나 저장 시 작업으로 된다), 원격 개발·컨테이너·SFTP 배포, 로컬 AI 완성 모델, 계정 기반 설정 동기화. egov 개발과 거리가 멀거나 크기에 비해 쓰임이 적다.
 
 ## 3. Phase별 3-OS 검증 체크리스트 (수동)

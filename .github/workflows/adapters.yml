@@ -47,6 +47,9 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: '3.13'
+      # 커서의 pytest 테스트를 debugpy로 띄우는 시험은 디버그 대상 Python의 pytest를 쓴다.
+      - name: pytest 설치
+        run: python -m pip install --disable-pip-version-check pytest==8.4.2
       # delve는 go install로 만들고, 디버그 대상도 Go로 빌드한다.
       - uses: actions/setup-go@v7
         with:
