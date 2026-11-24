@@ -346,7 +346,8 @@ fn debugpy로_커서의_pytest_테스트를_디버그한다() {
     let source = project.join("tests/test_calc.py");
     std::fs::write(
         &source,
-        "def add(a, b):\n    total = a + b\n    return total\n\n\ndef test_add():\n    assert add(41, 1) == 42  # 커서\n",
+        // 이어 간 뒤에도 잠시 돌아야 실행 중에 보낸 식의 답을 받는다(다른 예제와 같다).
+        "def add(a, b):\n    total = a + b\n    return total\n\n\ndef test_add():\n    assert add(41, 1) == 42  # 커서\n    import time\n    time.sleep(4)\n",
     )
     .unwrap();
     let arguments = test_debug_arguments(&source, "# 커서", &project);
@@ -381,7 +382,8 @@ fn delve로_커서의_go_테스트를_디버그한다() {
     let test = project.join("calc/calc_test.go");
     std::fs::write(
         &test,
-        "package calc\n\nimport \"testing\"\n\nfunc TestAdd(t *testing.T) {\n\tif add(41, 1) != 42 { // 커서\n\t\tt.Fatal(\"add\")\n\t}\n}\n\nfunc TestOther(t *testing.T) {\n\tt.Fatal(\"돌면 안 된다\")\n}\n",
+        // 이어 간 뒤에도 잠시 돌아야 실행 중에 보낸 식의 답을 받는다(다른 예제와 같다).
+        "package calc\n\nimport (\n\t\"testing\"\n\t\"time\"\n)\n\nfunc TestAdd(t *testing.T) {\n\tif add(41, 1) != 42 { // 커서\n\t\tt.Fatal(\"add\")\n\t}\n\ttime.Sleep(4 * time.Second)\n}\n\nfunc TestOther(t *testing.T) {\n\tt.Fatal(\"돌면 안 된다\")\n}\n",
     )
     .unwrap();
     let arguments = test_debug_arguments(&test, "// 커서", &project);
