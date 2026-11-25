@@ -2532,7 +2532,7 @@
     - 테스트 창 `run_at`: 마지막에 쓴 구성이 그 파일의 도구(Java·Kotlin은 Maven·Gradle, Python은 pytest, Go는 go test)면 그것을, 아니면 그 도구의 첫 테스트 구성을 골라 위 "고른 테스트만"과 같은 길(`run_only`, `apply_selected`)로 돌린다. 테스트 안이 아니거나 구성이 없거나 돌고 있으면 까닭을 상태 줄에 알린다.
     - `실행 > 커서의 테스트 돌리기`(열린 문서가 있을 때).
   - 검증: 단위 시험(Java: 메서드 몸·글자열 안 중괄호·패키지 붙은 어노테이션·테스트 아닌 메서드·메서드 밖, Kotlin, Python: 함수·클래스 안·도우미 함수, Go: 패키지 경로). 실제 Maven 3.10(`test_tools`, 로컬): 파일 글에서 커서 줄의 `addsWrong`을 알아보고 `-Dtest=CalcTest#addsWrong`으로 그것만 돌았다. 실제 pytest(CI): 클래스 안 테스트를 노드 ID로 돌리고 결과의 묶음이 알아본 것과 같다. 앱 화면(Windows, Maven 두 모듈 예제): `TextTest.java`의 `joinsWrong` 몸에 커서를 두고 메뉴를 누르니 테스트 창이 열려 그것만 6.3초로 돌아 실패 1이 보였다.
-  - 확인하지 못한 것: 단축키(메뉴만 두었다), 클래스 단위로 돌리기(커서가 메서드 밖이면 알린다. 둘 다 뒤에 백로그 "커서의 테스트 단축키·묶음 전체"(2026-11-24)에서 넣었다), JUnit 5 `@Nested` 안쪽 클래스(가장 가까운 클래스 이름만 쓴다), Kotlin의 빈칸 든 백틱 이름(알아보지 않는다), Gradle 작업 경로(작업을 모르면 구성 명령에 `--tests`를 붙인다. `gradle check` 구성은 `--tests`를 받지 못한다. 뒤에 백로그 "커서의 테스트의 Gradle 작업 경로"(2026-11-24)에서 고쳤다).
+  - 확인하지 못한 것: 단축키(메뉴만 두었다), 클래스 단위로 돌리기(커서가 메서드 밖이면 알린다. 둘 다 뒤에 백로그 "커서의 테스트 단축키·묶음 전체"(2026-11-24)에서 넣었다), JUnit 5 `@Nested` 안쪽 클래스(가장 가까운 클래스 이름만 쓴다. 뒤에 백로그 "JUnit 5 @Nested 테스트"(2026-11-24)에서 고쳤다), Kotlin의 빈칸 든 백틱 이름(알아보지 않는다), Gradle 작업 경로(작업을 모르면 구성 명령에 `--tests`를 붙인다. `gradle check` 구성은 `--tests`를 받지 못한다. 뒤에 백로그 "커서의 테스트의 Gradle 작업 경로"(2026-11-24)에서 고쳤다).
 
 - [x] 커서의 테스트 단축키·묶음 전체(2026-11-24) — 작음
   - 까닭: 위 "에디터에서 커서의 테스트 돌리기"는 메뉴로만 부르고, 커서가 테스트 메서드 밖이면 아무것도 돌리지 않았다.
@@ -2578,6 +2578,14 @@
     - pytest·Go: `test_at::debug_target`이 결과의 묶음에서 파일을 찾아(`tests.test_a.TestX` → `tests/test_a.py`, `example.com/board/calc` → `go.mod` 모듈 경로를 뺀 `calc/`의 `_test.go`) 커서의 테스트와 같은 `debug_config`를 만든다. Go 패키지 결과(`(패키지)`)는 패키지 전체다.
   - 검증: 단위 시험(Python 클래스 묶음·없는 파일, Go 패키지·패키지 결과·모듈 밖, Failsafe 인자). 실제 Maven 3.10·Failsafe 3.5.4(로컬, JDK 21): `-Dtest=NoUnitTestsToRerun … -Dit.test=CalcIT#adds -Dmaven.failsafe.debug`로 띄우니 5005에서 기다렸고 jdb로 붙어 이어 가니 `adds`만 통과했다(실패하는 단위 테스트·다른 통합 테스트는 돌지 않았다).
   - 확인하지 못한 것: 오른쪽 단추 메뉴를 앱 화면으로(자동 조작 도구에 오른쪽 단추가 없다), pytest·Go를 결과에서 실제 어댑터로(구성은 커서의 것과 같아 `adapters` 시험이 본 길이다).
+
+- [x] JUnit 5 @Nested 테스트(2026-11-24) — 작음
+  - 까닭: 커서의 테스트는 위로 가장 가까운 클래스 이름만 묶음으로 써서 `@Nested` 안쪽 클래스(`CalcTest.Inner`)의 테스트를 `CalcTest`의 것으로 골랐다. 결과 트리의 다시 돌리기도 Maven 거르기에서 `$` 뒤를 떼어(`-Dtest=CalcTest#adds`) 바깥 클래스의 같은 이름 테스트를 돌렸다(Gradle `--tests "demo.CalcTest$Inner.adds"`는 Linux·macOS의 sh가 `$Inner`를 변수로 풀었다).
+  - 고침
+    - `test_at`: 커서를 품은 클래스들을 바깥부터 `$`로 이어 묶음으로 쓴다(`demo.CalcTest$Inner$Deeper`, 보고서의 `classname`과 같다). 몸(`{`)이 없는 선언(Kotlin `data class Point(val x: Int)`)은 뒤 선언의 몸을 제 것으로 세지 않는다. 품은 클래스가 없으면 예전처럼 위로 가장 가까운 클래스, 없으면 파일의 첫 클래스.
+    - `rerun`(실패만 다시·고른 것만·커서의 테스트): Maven·Gradle 모두 안쪽 클래스의 `$`를 `*`로 적는다(`-Dtest=CalcTest*Inner#adds`, `--tests "demo.CalcTest*Inner.adds"`). 셸이 풀지 않고 두 도구 모두 안쪽 클래스만 고른다.
+  - 검증: 단위 시험(두 겹 `@Nested`, 안쪽 클래스의 메서드 밖, 바깥 클래스로 돌아온 줄, Kotlin 몸 없는 선언, Maven·Gradle 거르기). 실제 도구(로컬, JDK 21): 바깥 `adds`(실패)·안쪽 `adds`·안쪽 `other`(실패)가 든 클래스에서 Maven 3.10·Surefire 3.5.4는 `CalcTest$Inner#adds`·`CalcTest*Inner#adds`가 안쪽 `adds`만, `CalcTest#adds`(예전)는 바깥 것을 돌렸고 `CalcTest.Inner#adds`는 아무것도 돌리지 않았다. Gradle 9.2도 `$`·`*`는 안쪽 것만, `.`은 아무것도. `*` 꼴을 Windows `cmd`와 `sh`로 띄워 두 도구 모두 안쪽 `adds`만 돌았다.
+  - 확인하지 못한 것: 앱 화면, JUnit 4 `Enclosed`, Kotlin 테스트를 실제 도구로.
 
 - 살폈지만 넣지 않은 것: 임베디드(MCU 플래시·시리얼 모니터·장비 설정 파일), 프레임워크별 지원(React·Vue·Angular 등, JS·TS 언어 서버로 기본은 된다), 린터 개별 연동(언어 서버나 저장 시 작업으로 된다), 원격 개발·컨테이너·SFTP 배포, 로컬 AI 완성 모델, 계정 기반 설정 동기화. egov 개발과 거리가 멀거나 크기에 비해 쓰임이 적다.
 

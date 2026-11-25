@@ -75,22 +75,21 @@ fn jvm(lines: &[&str], line: usize) -> Option<TestAt> {
     if !lines.iter().any(|l| TEST_ANNOTATION.is_match(l)) {
         return None;
     }
-    let class_above = |end: usize| {
-        lines[..=end]
+    // 품은 클래스들. 없으면(클래스 밖) 위로 가장 가까운 클래스, 그것도 없으면(import 줄) 파일의 첫 클래스.
+    let class_at = |at: usize| {
+        let nested = enclosing_classes(lines, at);
+        if !nested.is_empty() {
+            return Some(nested.join("$"));
+        }
+        lines[..=at]
             .iter()
             .rev()
+            .chain(lines.iter())
             .find_map(|l| CLASS.captures(l).map(|c| c[1].to_owned()))
     };
     let (class, name) = match jvm_test_method(lines, line) {
-        Some((start, name)) => (class_above(start)?, name),
-        None => (
-            class_above(line).or_else(|| {
-                lines
-                    .iter()
-                    .find_map(|l| CLASS.captures(l).map(|c| c[1].to_owned()))
-            })?,
-            String::new(),
-        ),
+        Some((start, name)) => (class_at(start)?, name),
+        None => (class_at(line)?, String::new()),
     };
     let package = lines
         .iter()
@@ -103,6 +102,24 @@ fn jvm(lines: &[&str], line: usize) -> Option<TestAt> {
         },
         name,
     })
+}
+
+/// `line` 줄을 품은 클래스 이름들(바깥부터). JUnit 5 `@Nested` 안쪽 클래스는 보고서(`CalcTest$Inner`)처럼 이어
+/// 묶음이 된다. 몸(`{`)이 없는 선언(Kotlin `data class P(val x: Int)`)은 뒤 선언의 몸을 제 것으로 세지 않는다.
+fn enclosing_classes(lines: &[&str], line: usize) -> Vec<String> {
+    (0..=line)
+        .filter_map(|i| CLASS.captures(lines[i]).map(|c| (i, c[1].to_owned())))
+        .filter(|&(i, _)| {
+            let Some(open) = (i..lines.len()).find(|&j| lines[j].contains('{')) else {
+                return false;
+            };
+            let declares =
+                |l: &&str| CLASS.is_match(l) || JAVA_METHOD.is_match(l) || KOTLIN_FUN.is_match(l);
+            !lines[i + 1..=open].iter().any(declares)
+                && block_end(lines, i).is_some_and(|end| end >= line)
+        })
+        .map(|(_, name)| name)
+        .collect()
 }
 
 /// 커서를 품은 테스트 메서드의 (시작 줄, 이름). 커서 위로 가장 가까운 메서드가 중괄호로 커서를 품고 그 줄이나 위의
@@ -490,6 +507,49 @@ class CalcTest {
                 dir
             ),
             None
+        );
+    }
+
+    #[test]
+    fn junit5_nested_안쪽_클래스는_달러로_잇는다() {
+        let text = "package demo;\n\nclass CalcTest {\n    @Test\n    void adds() {\n        // A\n    }\n\n    @Nested\n    class Inner {\n        @Test\n        void adds() {\n            // B\n        }\n\n        // C\n        @Nested\n        class Deeper {\n            @Test\n            void deep() { // D\n            }\n        }\n    }\n\n    // E\n}\n";
+        let case = |suite: &str, name: &str| {
+            Some(TestAt {
+                lang: TestLang::Jvm,
+                suite: suite.to_owned(),
+                name: name.to_owned(),
+            })
+        };
+        let dir = Path::new(".");
+        assert_eq!(
+            at("CalcTest.java", text, "// A", dir),
+            case("demo.CalcTest", "adds")
+        );
+        assert_eq!(
+            at("CalcTest.java", text, "// B", dir),
+            case("demo.CalcTest$Inner", "adds")
+        );
+        assert_eq!(
+            at("CalcTest.java", text, "// C", dir),
+            case("demo.CalcTest$Inner", "")
+        );
+        assert_eq!(
+            at("CalcTest.java", text, "// D", dir),
+            case("demo.CalcTest$Inner$Deeper", "deep")
+        );
+        assert_eq!(
+            at("CalcTest.java", text, "// E", dir),
+            case("demo.CalcTest", "")
+        );
+        // 몸이 없는 Kotlin 선언은 뒤 클래스를 품지 않는다.
+        let kotlin = "package demo\n\ndata class Point(val x: Int)\n\nclass PointTest {\n    @Test\n    fun moves() {\n        // A\n    }\n\n    @Nested\n    inner class Zero {\n        @Test\n        fun stays() {\n            // B\n        }\n    }\n}\n";
+        assert_eq!(
+            at("PointTest.kt", kotlin, "// A", dir),
+            case("demo.PointTest", "moves")
+        );
+        assert_eq!(
+            at("PointTest.kt", kotlin, "// B", dir),
+            case("demo.PointTest$Zero", "stays")
         );
     }
 
