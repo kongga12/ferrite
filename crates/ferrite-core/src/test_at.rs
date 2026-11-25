@@ -60,7 +60,8 @@ pub fn test_at(path: &Path, text: &str, line: usize, dir: &Path) -> Option<TestA
 static JAVA_METHOD: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\bvoid\s+([A-Za-z_]\w*)\s*\(").unwrap());
 static KOTLIN_FUN: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\bfun\s+([A-Za-z_]\w*)\s*\(").unwrap());
+    // 이름은 둘째 묶음이 백틱 이름(`` fun `adds two numbers`() ``)이다.
+    LazyLock::new(|| Regex::new(r"\bfun\s+(?:([A-Za-z_]\w*)|`([^`]+)`)\s*\(").unwrap());
 static TEST_ANNOTATION: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"@(?:[\w.]+\.)?(?:Test|ParameterizedTest|RepeatedTest|TestFactory|TestTemplate)\b")
         .unwrap()
@@ -129,7 +130,7 @@ fn jvm_test_method(lines: &[&str], line: usize) -> Option<(usize, String)> {
         let m = JAVA_METHOD
             .captures(lines[i])
             .or_else(|| KOTLIN_FUN.captures(lines[i]))?;
-        Some((i, m[1].to_owned()))
+        Some((i, m.get(1).or(m.get(2))?.as_str().to_owned()))
     })?;
     if block_end(lines, start)? < line {
         return None;
@@ -550,6 +551,27 @@ class CalcTest {
         assert_eq!(
             at("PointTest.kt", kotlin, "// B", dir),
             case("demo.PointTest$Zero", "stays")
+        );
+    }
+
+    #[test]
+    fn kotlin_백틱_이름의_테스트() {
+        let text = "package demo\n\nclass CalcTest {\n    @Test\n    fun `adds two numbers, again`() {\n        // A\n    }\n\n    @Test fun `braces { stay }`() { // B\n    }\n}\n";
+        let case = |name: &str| {
+            Some(TestAt {
+                lang: TestLang::Jvm,
+                suite: "demo.CalcTest".to_owned(),
+                name: name.to_owned(),
+            })
+        };
+        let dir = Path::new(".");
+        assert_eq!(
+            at("CalcTest.kt", text, "// A", dir),
+            case("adds two numbers, again")
+        );
+        assert_eq!(
+            at("CalcTest.kt", text, "// B", dir),
+            case("braces { stay }")
         );
     }
 

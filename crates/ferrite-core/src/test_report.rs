@@ -969,7 +969,7 @@ pub fn report_files(tool: Tool, root: &Path, dir: &Path, since: SystemTime) -> V
 pub fn with_jvm_debug(tool: Tool, line: &str) -> Option<String> {
     match tool {
         // 통합 테스트(`-Dit.test`, 결과 트리에서 고른 것)는 Failsafe가 띄운다. 그때 Surefire에는 걸러 돌 것이 없다.
-        Tool::Maven if line.contains(" -Dit.test=") => {
+        Tool::Maven if line.contains("-Dit.test=") => {
             Some(format!("{line} -Dmaven.failsafe.debug"))
         }
         Tool::Maven => Some(format!("{line} -Dmaven.surefire.debug")),
@@ -1100,7 +1100,9 @@ pub fn rerun(tool: Tool, command: &str, failed: &[&Case]) -> Option<String> {
                 let mut classes: Vec<(String, Vec<String>)> = Vec::new();
                 for case in cases {
                     let class = nested(case.suite.rsplit('.').next().unwrap_or(&case.suite));
-                    let name = method(&case.name);
+                    // Kotlin 백틱 이름(`adds two numbers, again`): Surefire는 `,`(클래스 사이)·`+`(메서드
+                    // 사이)로 가르므로 아무 한 글자인 `?`로 적는다.
+                    let name = method(&case.name).replace([',', '+'], "?");
                     match classes.iter_mut().find(|(c, _)| *c == class) {
                         Some((_, names)) if !names.contains(&name) => names.push(name),
                         Some(_) => {}
@@ -1131,13 +1133,23 @@ pub fn rerun(tool: Tool, command: &str, failed: &[&Case]) -> Option<String> {
             } else {
                 filter(&unit)
             };
-            let mut line =
-                format!("{command} -Dtest={unit} -Dsurefire.failIfNoSpecifiedTests=false");
+            // 공백이 든 거르기(Kotlin 백틱 이름)는 셸이 가르지 않게 인자째 감싼다.
+            let property = |key: &str, filter: String| {
+                if filter.contains(' ') {
+                    format!("\"-D{key}={filter}\"")
+                } else {
+                    format!("-D{key}={filter}")
+                }
+            };
+            let mut line = format!(
+                "{command} {} -Dsurefire.failIfNoSpecifiedTests=false",
+                property("test", unit)
+            );
             if !integration.is_empty() {
                 // 다중 모듈이면 그 통합 테스트가 없는 모듈도 있다.
                 line.push_str(&format!(
-                    " -Dit.test={} -Dit.failIfNoSpecifiedTests=false",
-                    filter(&integration)
+                    " {} -Dit.failIfNoSpecifiedTests=false",
+                    property("it.test", filter(&integration))
                 ));
             } else if runs_integration_tests(command) {
                 line.push_str(" -DskipITs");
