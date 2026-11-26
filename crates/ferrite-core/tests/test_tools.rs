@@ -4078,7 +4078,7 @@ fn gradle_이름_생성기의_실패만_다시와_한글_커서의_테스트() {
     assert_eq!(
         ids(&cases),
         [
-            id("demo.Calc_Test", "plain()", Outcome::Passed),
+            id("demo.Calc_Test", "plain", Outcome::Passed),
             id("demo.Calc_Test", "두_수를_더한다()", Outcome::Failed),
             id(
                 "demo.Calc_Test$안쪽_묶음",

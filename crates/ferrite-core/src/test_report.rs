@@ -701,9 +701,10 @@ pub fn read_report(path: &Path) -> Result<Vec<Case>, String> {
     Ok(cases)
 }
 
-/// Gradle 보고서의 메서드 이름 꼴(`adds()`, `many(int)`). 아니면 표시 이름이다(Kotlin 백틱 이름도 여기 든다).
+/// Gradle 보고서의 메서드 이름 꼴: JUnit 5 `adds()`·`many(int)`, JUnit 4·TestNG는 괄호 없는 `adds`, TestNG
+/// 매개변수 실행 `adds[0](1, 2, 3)`. 아니면 표시 이름이다(Kotlin 백틱 이름도 여기 든다).
 static GRADLE_METHOD: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^[\p{L}_$][\p{L}\p{N}_$]*\([^()]*\)$").unwrap());
+    LazyLock::new(|| Regex::new(r"^[\p{L}_$][\p{L}\p{N}_$]*(?:\[\d+\])?(?:\([^()]*\))?$").unwrap());
 
 /// JUnit 5 `@DisplayName`을 소스에서 찾아 결과에 붙인다.
 /// - 보고서의 표시 이름은 진짜 이름으로 되돌린다. 그래야 다시 돌리기·디버그가 그 테스트를 거른다. Gradle은 테스트
@@ -805,12 +806,14 @@ fn display_names(path: &Path, gradle: bool, cases: &mut [Case]) {
         {
             case.suite.clone_from(&at.suite);
         }
-        if name_display(case) {
+        // 한 낱말의 표시 이름(`통과한다`)은 JUnit 4·TestNG의 괄호 없는 이름과 꼴이 같다. `@DisplayName` 글과 같으면
+        // 되돌리고, 생성기의 꼴로 맞추는 것은 메서드 이름 꼴이 아닌 것만이다(`lists`를 `lists()`로 바꾸지 않게).
+        if gradle && !case.name.is_empty() && (!case.name.ends_with(')') || name_display(case)) {
             let found = names
                 .iter()
                 .find(|(d, at)| *d == case.name && at.suite == case.suite && !at.name.is_empty())
                 .map(|(_, at)| at.name.clone())
-                .or_else(|| generated(case));
+                .or_else(|| name_display(case).then(|| generated(case)).flatten());
             if let Some(method) = found {
                 case.name = format!("{method}()");
             }

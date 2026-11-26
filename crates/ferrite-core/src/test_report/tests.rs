@@ -1713,7 +1713,7 @@ fn gradle_이름_생성기의_표시_이름은_메서드로_되돌린다() {
         rows,
         [
             ("demo.Calc_Test", "두_수를_더한다()", Some("두 수를 더한다")),
-            ("demo.Calc_Test", "plain()", Some("plain")),
+            ("demo.Calc_Test", "plain", None),
             ("demo.Calc_Test", "[1] 1", None),
             (
                 "demo.Calc_Test$안쪽_묶음",
