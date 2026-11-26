@@ -768,6 +768,8 @@ fn java_debug로_커서의_테스트에_붙는다(tool: ferrite_core::test_repor
             .then(|| test_report::gradle_test_task(&test))
             .flatten(),
         previous: false,
+        label: None,
+        suite_label: None,
     };
     // Gradle 데몬이 남으면 Windows에서 프로젝트 폴더를 지우지 못한다.
     let configured = match tool {

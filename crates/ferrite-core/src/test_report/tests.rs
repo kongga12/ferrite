@@ -591,6 +591,8 @@ fn kotlin_scala_스택의_테스트_줄을_찾는다() {
         integration: false,
         task: None,
         previous: false,
+        label: None,
+        suite_label: None,
     };
     // Kotlin 백틱 이름은 빈칸이 들고, 그 안의 람다는 클래스 이름에도 든다.
     let kotlin = failed(
@@ -902,6 +904,8 @@ fn 실패만_다시가_다시_돌리지_않은_지난_실패는_지운_것으로
         integration: false,
         task: task.map(str::to_owned),
         previous: false,
+        label: None,
+        suite_label: None,
     };
     let names = |cases: &[Case]| {
         cases
@@ -1060,6 +1064,8 @@ fn 같은_테스트가_둘이면_실패한_것_하나로_모은다() {
         integration,
         task: None,
         previous: false,
+        label: None,
+        suite_label: None,
     };
     let found = dedup(vec![
         case("CalcTest", "adds", Outcome::Passed, false),
@@ -1096,6 +1102,8 @@ fn 실패만_다시에서_넘어간_전체_실행은_결과를_내지_못한_gra
         integration: false,
         task: task.map(str::to_owned),
         previous: false,
+        label: None,
+        suite_label: None,
     };
     fn names(cases: &[Case]) -> Vec<(&str, Outcome)> {
         cases.iter().map(|c| (c.name.as_str(), c.outcome)).collect()
@@ -1154,6 +1162,8 @@ fn pytest가_모으지_못한_파일의_지난_실패는_앞_결과로_남긴다
         integration: false,
         task: None,
         previous: false,
+        label: None,
+        suite_label: None,
     };
     let mut cases = vec![
         case("tests.test_a", "test_add", Outcome::Passed),
@@ -1197,6 +1207,8 @@ fn 고른_테스트만_돌리는_명령을_만든다() {
         integration: false,
         task: None,
         previous: false,
+        label: None,
+        suite_label: None,
     };
     let dir = std::env::temp_dir().join(format!("ferrite-run-only-{}", std::process::id()));
     std::fs::create_dir_all(dir.join("tests")).unwrap();
@@ -1275,6 +1287,8 @@ fn 고른_테스트만_돌린_결과는_고른_것만_지운_것으로_본다() 
         integration: false,
         task: None,
         previous: false,
+        label: None,
+        suite_label: None,
     };
     let mut cases = vec![
         case("adds", Outcome::Passed),
@@ -1392,6 +1406,8 @@ fn 커서의_jvm_테스트를_디버거를_기다리게_띄운다() {
         integration: false,
         task: Some(":app:test".into()),
         previous: false,
+        label: None,
+        suite_label: None,
     };
     let dir = Path::new("/p");
     let maven = run_only(Tool::Maven, "mvn -B test", &[&case], dir).unwrap();
@@ -1431,6 +1447,8 @@ fn junit5_nested_안쪽_클래스만_거른다() {
         integration: false,
         task: Some(":app:test".into()),
         previous: false,
+        label: None,
+        suite_label: None,
     };
     // `$`를 떼면 바깥 클래스의 같은 이름 테스트가 돈다. sh가 `$Inner`를 풀지 않게 `*`로 적는다.
     assert_eq!(
@@ -1457,6 +1475,8 @@ fn kotlin_백틱_이름은_인자째_감싼다() {
         integration,
         task: Some(":test".into()),
         previous: false,
+        label: None,
+        suite_label: None,
     };
     // Surefire는 `,`를 클래스 사이로 읽으므로 한 글자 `?`로 적는다(`*`는 `adds_two_numbers`까지 고른다).
     let unit = case("adds two numbers, again", false);
@@ -1501,7 +1521,7 @@ fn 표시_이름은_소스에서_진짜_이름으로_되돌려_다시_돌린다(
     std::fs::write(root.join("settings.gradle"), "rootProject.name = 'calc'\n").unwrap();
     std::fs::write(
         source.join("CalcTest.java"),
-        "package demo;\n\n@DisplayName(\"계산기\")\nclass CalcTest {\n    @Test\n    @DisplayName(\"두 수를 더한다\")\n    void adds() {}\n\n    @Test\n    void plain() {}\n\n    @ParameterizedTest\n    @ValueSource(ints = {5})\n    void bare(int n) {}\n\n    @Nested\n    @DisplayName(\"안쪽\")\n    class Inner {\n        @Test\n        @DisplayName(\"안에서 더한다\")\n        void inside() {}\n    }\n}\n",
+        "package demo;\n\n@DisplayName(\"계산기\")\nclass CalcTest {\n    @Test\n    @DisplayName(\"두 수를 더한다\")\n    void adds() {}\n\n    @Test\n    void plain() {}\n\n    @ParameterizedTest\n    @DisplayName(\"다섯\")\n    @ValueSource(ints = {5})\n    void bare(int n) {}\n\n    @Nested\n    @DisplayName(\"안쪽\")\n    class Inner {\n        @Test\n        @DisplayName(\"안에서 더한다\")\n        void inside() {}\n    }\n}\n",
     )
     .unwrap();
     std::fs::write(
@@ -1526,6 +1546,14 @@ fn 표시_이름은_소스에서_진짜_이름으로_되돌려_다시_돌린다(
             .collect()
     };
     let id = |s: &str, n: &str| (s.to_owned(), n.to_owned());
+    // 결과 트리에 보일 (묶음, 테스트) 이름. 도구와 상관없이 소스의 표시 이름이다.
+    let labels = |cases: &[Case]| -> Vec<(Option<String>, Option<String>)> {
+        cases
+            .iter()
+            .map(|c| (c.suite_label.clone(), c.label.clone()))
+            .collect()
+    };
+    let label = |s: &str, n: Option<&str>| (Some(s.to_owned()), n.map(str::to_owned));
 
     let mut found = read_report(&gradle.join("TEST-demo.CalcTest.xml")).unwrap();
     found.extend(read_report(&gradle.join("TEST-demo.CalcTest$Inner.xml")).unwrap());
@@ -1537,6 +1565,16 @@ fn 표시_이름은_소스에서_진짜_이름으로_되돌려_다시_돌린다(
             id("demo.CalcTest", "plain()"),
             id("demo.CalcTest$Inner", "inside()"),
         ]
+    );
+    assert_eq!(
+        labels(&found),
+        [
+            label("계산기", Some("두 수를 더한다")),
+            label("계산기", None),
+            label("계산기", None),
+            label("안쪽", Some("안에서 더한다")),
+        ],
+        "Gradle의 매개변수 실행(`[1] 5`)은 메서드를 몰라 표시 이름이 없다"
     );
     // 메서드를 모르는 매개변수 실행은 클래스째 돈다.
     let all: Vec<&Case> = found.iter().collect();
@@ -1553,6 +1591,15 @@ fn 표시_이름은_소스에서_진짜_이름으로_되돌려_다시_돌린다(
             id("demo.CalcTest", "bare(int)[1]"),
             id("demo.CalcTest", "plain"),
             id("demo.CalcTest$Inner", "inside"),
+        ]
+    );
+    assert_eq!(
+        labels(&found),
+        [
+            label("계산기", Some("두 수를 더한다")),
+            label("계산기", Some("다섯 [1]")),
+            label("계산기", None),
+            label("안쪽", Some("안에서 더한다")),
         ]
     );
     let all: Vec<&Case> = found.iter().collect();

@@ -2607,7 +2607,7 @@
     - Surefire 3.5.4: 메서드 이름은 그대로, `classname`에 클래스의 표시 이름(`계산기`, `@Nested`는 `안쪽`)을 적는다.
   - 고침
     - `test_at::jvm_display_names`: 파일의 `@DisplayName("…")`마다 그것이 붙은 테스트나 클래스(커서의 테스트와 같은 길).
-    - `read_report`: 보고서 파일 이름(`TEST-demo.CalcTest.xml`)의 클래스로 소스를 찾아, 표시 이름을 진짜 이름으로 되돌린다(Gradle `adds()`, Surefire `demo.CalcTest`·`demo.CalcTest$Inner`). 결과 트리도 진짜 이름을 보인다. 소스에서 못 찾은 것(`[1] 5`)은 그대로 둔다.
+    - `read_report`: 보고서 파일 이름(`TEST-demo.CalcTest.xml`)의 클래스로 소스를 찾아, 표시 이름을 진짜 이름으로 되돌린다(Gradle `adds()`, Surefire `demo.CalcTest`·`demo.CalcTest$Inner`). 결과 트리도 진짜 이름을 보였다(뒤에 백로그 "결과 트리의 표시 이름"(2026-11-26)에서 표시 이름을 보이게 했다). 소스에서 못 찾은 것(`[1] 5`)은 그대로 둔다.
     - `rerun`(Gradle): 메서드를 모르는 이름(`[1] 5`)은 클래스째 거른다(전에는 `demo.CalcTest.`가 됐다). Maven은 전부터 클래스째였다.
   - 검증: 단위 시험(표시 이름·따옴표·한 줄 어노테이션·`@Nested`, 실제 보고서를 줄인 Gradle·Surefire 보고서와 다시 돌리기 명령). 실제 도구(로컬 Windows cmd, JDK 21, Maven 3.10·Surefire 3.5.4, Gradle 9.2): `test_tools`의 `maven_표시_이름의_실패만_다시`·`gradle_표시_이름의_실패만_다시`에서 결과가 진짜 이름이고 실패만 다시가 표시 이름 붙은 두 실패만 돌렸다.
   - 확인하지 못한 것: 앱 화면, `@DisplayNameGeneration`(이름 생성기, 소스에 글이 없다), 매개변수 실행 하나만 다시(Gradle 보고서에 메서드가 없어 클래스째 돈다).
@@ -2616,6 +2616,16 @@
   - 고침: `test_frame`이 묶음의 바깥 클래스(`$` 앞)로 견준다.
   - 검증: 단위 시험(안쪽 클래스 묶음의 스택). 실제 도구(로컬 Windows cmd, JDK 21, Maven 3.10·Surefire 3.5.4, Gradle 9.2): `test_tools`의 `maven_·gradle_표시_이름의_실패만_다시`에 실패마다 먼저 갈 줄이 그 단언 줄인지 더했다. 고치기 전에는 두 도구 모두 프로젝트 밖 프레임을 골라 깨졌다.
   - 확인하지 못한 것: 앱 화면(같은 `test_frame`을 쓴다).
+- [x] 결과 트리의 표시 이름(2026-11-26) — 작음
+  - 까닭: "@DisplayName 테스트 다시 돌리기"(2026-11-26) 뒤로 결과 트리가 표시 이름 대신 메서드·클래스 이름(`adds()`, `demo.CalcTest`)을 보였다. 표시 이름을 쓰는 프로젝트에는 뒤로 간 것이다.
+  - 고침
+    - `Case`에 보일 이름 두 칸(`label`: 테스트, `suite_label`: 클래스)을 더했다. 같은 테스트인지와 거르기에는 들지 않는다.
+    - `read_report`: 보고서 클래스의 소스에 `@DisplayName`이 있으면 도구와 상관없이 소스에서 두 칸을 채운다(Surefire가 적지 않는 메서드의 표시 이름도). Surefire 매개변수 실행은 차례를 붙인다(`여러 값 [1]`). Gradle 매개변수 실행(`[1] 5`)은 메서드를 몰라 그대로다.
+    - 소스는 흔한 자리(`src/<소스 세트>/java|kotlin/<패키지>/`)부터 보고, 프로젝트를 뒤지는 것은 보고서에 표시 이름이 보일 때만이다(보고서마다 뒤지면 느리다).
+    - 결과 트리: 묶음·테스트 줄은 표시 이름, 상세는 표시 이름과 그 아래 거르는 진짜 이름(`demo.CalcTest.adds()`).
+  - 검증: 단위 시험(Gradle·Surefire 보고서의 두 칸, Surefire 매개변수 실행의 차례). 화면 시험(egui_kittest): Gradle 보고서를 읽은 결과 트리에 `계산기 (실패 1/2)`·`두 수를 더한다`와 상세의 `demo.CalcTest.adds()`. 실제 도구(로컬 Windows cmd, JDK 21, Maven 3.10·Surefire 3.5.4, Gradle 9.2): `test_tools`의 `maven_·gradle_표시_이름의_실패만_다시`에 두 도구가 같은 표시 이름을 보이는지 더했다.
+  - 한계: 소스가 흔한 자리에 없고(Kotlin이 공통 루트 패키지를 뺀 폴더) 보고서에도 표시 이름이 보이지 않으면(메서드만 `@DisplayName`인 Surefire 결과) 표시 이름을 채우지 않는다.
+  - 확인하지 못한 것: 실제 앱 창(화면 시험은 같은 그리기 코드).
 
 - 살폈지만 넣지 않은 것: 임베디드(MCU 플래시·시리얼 모니터·장비 설정 파일), 프레임워크별 지원(React·Vue·Angular 등, JS·TS 언어 서버로 기본은 된다), 린터 개별 연동(언어 서버나 저장 시 작업으로 된다), 원격 개발·컨테이너·SFTP 배포, 로컬 AI 완성 모델, 계정 기반 설정 동기화. egov 개발과 거리가 멀거나 크기에 비해 쓰임이 적다.
 

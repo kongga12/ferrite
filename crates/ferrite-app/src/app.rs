@@ -7936,6 +7936,54 @@ mod tests {
     }
 
     #[test]
+    fn 결과_트리는_display_name의_표시_이름을_보인다() {
+        let dir =
+            std::env::temp_dir().join(format!("ferrite-tests-display-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let java = dir.join("src/test/java/demo");
+        let results = dir.join("build/test-results/test");
+        fs::create_dir_all(&java).unwrap();
+        fs::create_dir_all(&results).unwrap();
+        fs::write(dir.join("settings.gradle"), "rootProject.name = 'calc'\n").unwrap();
+        fs::write(
+            java.join("CalcTest.java"),
+            "package demo;\n\n@DisplayName(\"계산기\")\nclass CalcTest {\n    @Test\n    @DisplayName(\"두 수를 더한다\")\n    void adds() {}\n\n    @Test\n    void plain() {}\n}\n",
+        )
+        .unwrap();
+        // Gradle 9.2가 적는 꼴: 테스트 이름에 표시 이름.
+        let report = results.join("TEST-demo.CalcTest.xml");
+        fs::write(
+            &report,
+            r#"<testsuite name="계산기"><testcase name="두 수를 더한다" classname="demo.CalcTest" time="0.010"><failure message="틀림">틀림</failure></testcase><testcase name="plain()" classname="demo.CalcTest" time="0.002"/></testsuite>"#,
+        )
+        .unwrap();
+        let cases = ferrite_core::test_report::read_report(&report).unwrap();
+        let mut harness = harness_builder()
+            .with_size(egui::vec2(1200.0, 1000.0))
+            .build_eframe(|cc| FerriteApp::new(cc, Some(dir.clone())));
+        harness.run_ok();
+        let config = ferrite_core::run::RunConfig {
+            name: "gradle test".into(),
+            command: "gradle test".into(),
+            cwd: None,
+            env: Default::default(),
+        };
+        {
+            let app = harness.state_mut();
+            app.tests.show_results(config, dir.clone(), cases, "");
+            dock::show(&mut app.layout, Pane::Tests);
+        }
+        harness.run_ok();
+        // 묶음·테스트는 표시 이름으로 보이고, 고른 실패의 상세에는 거르는 진짜 이름도 적힌다.
+        harness.get_by_label("계산기 (실패 1/2)");
+        harness.get_by_label("두 수를 더한다  0.010초");
+        harness.get_by_label("plain()  0.002초");
+        harness.get_by_label("demo.CalcTest.adds()");
+        drop(harness);
+        remove_project(&dir);
+    }
+
+    #[test]
     fn 한글_경로에서_gradle이_테스트_클래스를_찾지_못하면_까닭과_해법을_알린다() {
         let dir =
             std::env::temp_dir().join(format!("ferrite-tests-자바 게시판-{}", std::process::id()));
