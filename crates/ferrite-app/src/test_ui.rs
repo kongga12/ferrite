@@ -834,6 +834,7 @@ impl TestPanel {
         let mut jump = None;
         let mut run: Option<Vec<usize>> = None;
         let mut debug = None;
+        let mut debug_suite = None;
         for (suite, indices) in suites {
             let failed = indices
                 .iter()
@@ -900,6 +901,14 @@ impl TestPanel {
                     run = Some(indices.clone());
                     ui.close();
                 }
+                // 이름이 빈 것은 묶음 전체다(`run_only`의 클래스 거르기, `debug_target`의 파일·클래스·패키지).
+                if ui
+                    .add_enabled(can_debug, egui::Button::new("이 묶음 디버그"))
+                    .clicked()
+                {
+                    debug_suite = Some(indices[0]);
+                    ui.close();
+                }
             });
         }
         if let Some(indices) = run {
@@ -911,6 +920,15 @@ impl TestPanel {
         }
         if let (Some(i), Some((_, tool, dir))) = (debug, &self.last) {
             self.debug_request = Some((self.cases[i].clone(), *tool, dir.clone()));
+            ui.ctx().request_repaint();
+        }
+        if let (Some(i), Some((_, tool, dir))) = (debug_suite, &self.last) {
+            let suite = Case {
+                name: String::new(),
+                label: None,
+                ..self.cases[i].clone()
+            };
+            self.debug_request = Some((suite, *tool, dir.clone()));
             ui.ctx().request_repaint();
         }
         let i = jump?;
@@ -1157,5 +1175,59 @@ mod tests {
         let mut kept = cases[1].clone();
         kept.previous = true;
         assert_eq!(runner_tag(&kept), "  (통합)  (앞 결과)");
+    }
+
+    #[test]
+    fn 묶음의_오른쪽_단추로_그_묶음_전체를_디버그한다() {
+        use egui_kittest::kittest::Queryable;
+        let root = std::env::temp_dir();
+        let mut panel = TestPanel::default();
+        let config = RunConfig {
+            name: "gradle test".into(),
+            command: "gradle test".into(),
+            cwd: None,
+            env: Default::default(),
+        };
+        let mut failed = case("adds()", Outcome::Failed, false, Some(":app:test"));
+        failed.label = Some("두 수를 더한다".into());
+        let cases = vec![
+            failed,
+            case("lists()", Outcome::Passed, false, Some(":app:test")),
+        ];
+        panel.show_results(config, root.clone(), cases, "");
+        // 한글 글꼴은 다음 화면부터 쓰이므로 첫 화면은 글꼴만 둔다(앱은 시작할 때 둔다).
+        let mut harness = egui_kittest::Harness::new_ui_state(
+            |ui, (fonts, panel): &mut (bool, TestPanel)| {
+                if !std::mem::replace(fonts, true) {
+                    crate::fonts::install_korean_font(ui.ctx());
+                    return;
+                }
+                panel.ui(ui, Some(&std::env::temp_dir()));
+            },
+            (false, panel),
+        );
+        harness.run();
+        harness
+            .get_by_label("com.example.board.BoardIT (실패 1/2)")
+            .click_secondary();
+        harness.run();
+        harness.get_by_label("이 묶음 디버그").click();
+        harness.run();
+        // 이름이 빈 것(묶음 전체)을 첫 테스트가 돈 곳(Gradle 작업)과 함께 넘긴다.
+        let (suite, tool, dir) = harness
+            .state_mut()
+            .1
+            .take_debug_request()
+            .expect("디버그 요청");
+        assert_eq!(
+            (
+                suite.suite.as_str(),
+                suite.name.as_str(),
+                suite.label,
+                suite.task.as_deref()
+            ),
+            ("com.example.board.BoardIT", "", None, Some(":app:test"))
+        );
+        assert_eq!((tool, dir), (Tool::Gradle, root));
     }
 }
