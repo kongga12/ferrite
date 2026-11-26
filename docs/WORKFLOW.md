@@ -2599,7 +2599,7 @@
     - jdt.ls는 wrapper도 설정도 없으면 `GRADLE_HOME`의 Gradle로 프로젝트를 읽고, 그것도 없으면 제 Gradle 판을 받는다. 시험은 PATH의 Gradle 설치 폴더를 `GRADLE_HOME`으로 알려 준다. 사용자 프로젝트는 대개 wrapper(`gradlew`)가 있어 그것을 쓴다.
     - Gradle은 테스트 JVM이 120초 안에 되돌아 붙지 못하면 "Unable to connect to the child process 'Gradle Test Executor 1'"로 실패한다. 디버거가 그 안에 붙어야 한다(앱은 기다리기 시작하면 바로 붙는다).
   - 검증: 로컬(JDK 21, Gradle 9.2, `sh`)에서 위 명령이 5005에서 기다리고 소켓 jdb(`-connect com.sun.jdi.SocketAttach`, Windows jdb의 `-attach`는 공유 메모리라 붙지 못한다)로 붙어 `add`의 값을 읽고 `adds()`만 돌았다. java-debug로 붙기는 CI(3개 OS)에서 본다(로컬에 jdt.ls가 없다).
-    - jdt.ls가 Gradle 프로젝트를 읽으며 띄운 Tooling API 데몬은 jdt.ls가 끝나도 남는다. Windows CI에서는 그 데몬이 물려받은 출력 파이프를 쥐고 있었다. 그래서 19개 시험이 다 통과한 뒤에도 `cargo test | tee`가 끝나지 않아 2시간 멈췄다. 시험이 끝날 때(깨져도) `gradle --stop`으로 데몬을 끄고, `adapters` 작업 한도를 30분으로 줄였다.
+    - jdt.ls가 Gradle 프로젝트를 읽으며 띄운 Tooling API 데몬은 jdt.ls가 끝나도 남는다. Windows CI에서는 그 데몬이 물려받은 출력 파이프를 쥐고 있었다. 그래서 19개 시험이 다 통과한 뒤에도 `cargo test | tee`가 끝나지 않아 2시간 멈췄다. 시험이 끝날 때(깨져도) `gradle --stop`으로 데몬을 끄고, `adapters` 작업 한도를 15분으로 줄였다.
   - 확인하지 못한 것: 앱 화면, wrapper가 있는 프로젝트를 jdt.ls가 읽기.
 
 - 살폈지만 넣지 않은 것: 임베디드(MCU 플래시·시리얼 모니터·장비 설정 파일), 프레임워크별 지원(React·Vue·Angular 등, JS·TS 언어 서버로 기본은 된다), 린터 개별 연동(언어 서버나 저장 시 작업으로 된다), 원격 개발·컨테이너·SFTP 배포, 로컬 AI 완성 모델, 계정 기반 설정 동기화. egov 개발과 거리가 멀거나 크기에 비해 쓰임이 적다.

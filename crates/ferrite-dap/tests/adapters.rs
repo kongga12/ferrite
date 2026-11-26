@@ -706,10 +706,21 @@ fn java_debug로_커서의_테스트에_붙는다(tool: ferrite_core::test_repor
     struct StopGradleDaemons;
     impl Drop for StopGradleDaemons {
         fn drop(&mut self) {
-            let _ = shell("gradle --stop")
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status();
+            // 진단: 무엇이 남는지 끄기 앞뒤로 찍는다.
+            let show = |label: &str, line: &str| {
+                if let Ok(out) = shell(line).output() {
+                    eprintln!(
+                        "--- {label}\n{}{}",
+                        String::from_utf8_lossy(&out.stdout),
+                        String::from_utf8_lossy(&out.stderr)
+                    );
+                }
+            };
+            show("jps 앞", "jps -lmv");
+            show("gradle --status", "gradle --status");
+            show("gradle --stop", "gradle --stop");
+            std::thread::sleep(Duration::from_secs(10));
+            show("jps 뒤(10초)", "jps -lmv");
         }
     }
     let daemons = (tool == Tool::Gradle).then_some(StopGradleDaemons);

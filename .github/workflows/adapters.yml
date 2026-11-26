@@ -29,8 +29,8 @@ jobs:
   adapters:
     name: adapters (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    # 보통 8분 안에 끝난다. 남은 프로세스가 출력 파이프를 쥐면 기본 한도(6시간)까지 멈추므로 줄여 둔다.
-    timeout-minutes: 30
+    # 보통 Windows도 8분 안에 끝난다. 남은 프로세스가 출력 파이프를 쥐면 기본 한도(6시간)까지 멈추므로 줄여 둔다.
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
