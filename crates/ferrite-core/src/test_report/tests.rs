@@ -1434,3 +1434,46 @@ fn junit5_nested_안쪽_클래스만_거른다() {
         "gradle :app:test --tests \"demo.CalcTest*Inner.adds\""
     );
 }
+
+#[test]
+fn kotlin_백틱_이름은_인자째_감싼다() {
+    let case = |name: &str, integration: bool| Case {
+        suite: "demo.CalcTest".into(),
+        name: name.into(),
+        outcome: Outcome::Failed,
+        seconds: None,
+        message: None,
+        detail: String::new(),
+        file: None,
+        line: None,
+        integration,
+        task: Some(":test".into()),
+        previous: false,
+    };
+    // Surefire는 `,`를 클래스 사이로 읽으므로 한 글자 `?`로 적는다(`*`는 `adds_two_numbers`까지 고른다).
+    let unit = case("adds two numbers, again", false);
+    assert_eq!(
+        rerun(Tool::Maven, "mvn test", &[&unit]).unwrap(),
+        "mvn test \"-Dtest=CalcTest#adds two numbers? again\" -Dsurefire.failIfNoSpecifiedTests=false"
+    );
+    let it = case("reads a b", true);
+    let line = rerun(Tool::Maven, "mvn verify", &[&it]).unwrap();
+    assert_eq!(
+        line,
+        "mvn verify -Dtest=NoUnitTestsToRerun -Dsurefire.failIfNoSpecifiedTests=false \"-Dit.test=CalcTest#reads a b\" -Dit.failIfNoSpecifiedTests=false"
+    );
+    assert_eq!(
+        with_jvm_debug(Tool::Maven, &line).unwrap(),
+        format!("{line} -Dmaven.failsafe.debug")
+    );
+    // Gradle은 큰따옴표 안의 이름을 그대로 고른다(보고서는 `()`를 붙인다).
+    assert_eq!(
+        rerun(
+            Tool::Gradle,
+            "gradle test",
+            &[&case("adds two numbers, again()", false)]
+        )
+        .unwrap(),
+        "gradle :test --tests \"demo.CalcTest.adds two numbers, again\""
+    );
+}
