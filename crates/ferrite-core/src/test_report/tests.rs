@@ -1659,3 +1659,78 @@ fn gradle_매개변수_실행의_실패는_스택의_메서드로_다시_돌린�
         "gradle :test --tests \"demo.CalcTest\""
     );
 }
+
+/// Windows·JDK 21에서 `@DisplayNameGeneration`을 붙인 예제를 실제로 돌린 Gradle 9.2 보고서를 줄였다. 소스에
+/// 표시 이름 글이 없으니 생성기의 꼴을 거꾸로 맞춘다(Surefire 3.5.4는 진짜 이름을 적는다).
+#[test]
+fn gradle_이름_생성기의_표시_이름은_메서드로_되돌린다() {
+    let root = std::env::temp_dir().join(format!("ferrite-display-gen-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let source = root.join("src/test/java/demo");
+    let gradle = root.join("build/test-results/test");
+    for dir in [&source, &gradle] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    std::fs::write(root.join("settings.gradle"), "rootProject.name = 'calc'\n").unwrap();
+    std::fs::write(
+        source.join("Calc_Test.java"),
+        "package demo;\n\n@DisplayNameGeneration(DisplayNameGenerator.ReplaceUnderscores.class)\nclass Calc_Test {\n    @Test\n    void 두_수를_더한다() {}\n\n    @Test\n    void plain() {}\n\n    @ParameterizedTest\n    @ValueSource(ints = {1})\n    void 여러_값(int n) {}\n\n    @Nested\n    class 안쪽_묶음 {\n        @Test\n        void 안에서_더한다() {}\n    }\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        source.join("SentenceTest.java"),
+        "package demo;\n\n@DisplayNameGeneration(DisplayNameGenerator.IndicativeSentences.class)\nclass SentenceTest {\n    @Test\n    void 문장_이름() {}\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        gradle.join("TEST-demo.Calc_Test.xml"),
+        r#"<testsuite name="Calc Test"><testcase name="두 수를 더한다" classname="demo.Calc_Test"/><testcase name="plain" classname="demo.Calc_Test"/><testcase name="[1] 1" classname="demo.Calc_Test"/></testsuite>"#,
+    )
+    .unwrap();
+    std::fs::write(
+        gradle.join("TEST-demo.Calc_Test$안쪽_묶음.xml"),
+        r#"<testsuite name="안쪽 묶음"><testcase name="안에서 더한다" classname="demo.Calc_Test$안쪽_묶음"/></testsuite>"#,
+    )
+    .unwrap();
+    std::fs::write(
+        gradle.join("TEST-demo.SentenceTest.xml"),
+        r#"<testsuite name="demo.SentenceTest"><testcase name="SentenceTest, 문장_이름()" classname="demo.SentenceTest"/></testsuite>"#,
+    )
+    .unwrap();
+    let mut found = Vec::new();
+    for file in [
+        "TEST-demo.Calc_Test.xml",
+        "TEST-demo.Calc_Test$안쪽_묶음.xml",
+        "TEST-demo.SentenceTest.xml",
+    ] {
+        found.extend(read_report(&gradle.join(file)).unwrap());
+    }
+    let rows: Vec<(&str, &str, Option<&str>)> = found
+        .iter()
+        .map(|c| (c.suite.as_str(), c.name.as_str(), c.label.as_deref()))
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            ("demo.Calc_Test", "두_수를_더한다()", Some("두 수를 더한다")),
+            ("demo.Calc_Test", "plain()", Some("plain")),
+            ("demo.Calc_Test", "[1] 1", None),
+            (
+                "demo.Calc_Test$안쪽_묶음",
+                "안에서_더한다()",
+                Some("안에서 더한다")
+            ),
+            (
+                "demo.SentenceTest",
+                "문장_이름()",
+                Some("SentenceTest, 문장_이름()")
+            ),
+        ]
+    );
+    let all: Vec<&Case> = found.iter().collect();
+    assert_eq!(
+        rerun(Tool::Gradle, "gradle test", &all).unwrap(),
+        "gradle :test --tests \"demo.Calc_Test.두_수를_더한다\" --tests \"demo.Calc_Test.plain\" --tests \"demo.Calc_Test\" --tests \"demo.Calc_Test*안쪽_묶음.안에서_더한다\" --tests \"demo.SentenceTest.문장_이름\""
+    );
+    std::fs::remove_dir_all(&root).unwrap();
+}

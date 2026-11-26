@@ -58,17 +58,18 @@ pub fn test_at(path: &Path, text: &str, line: usize, dir: &Path) -> Option<TestA
 }
 
 static JAVA_METHOD: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\bvoid\s+([A-Za-z_]\w*)\s*\(").unwrap());
+    // 이름은 한글 같은 유니코드 글자로도 시작한다(`void 두_수를_더한다()`).
+    LazyLock::new(|| Regex::new(r"\bvoid\s+([\p{L}_$][\w$]*)\s*\(").unwrap());
 static KOTLIN_FUN: LazyLock<Regex> =
     // 이름은 둘째 묶음이 백틱 이름(`` fun `adds two numbers`() ``)이다.
-    LazyLock::new(|| Regex::new(r"\bfun\s+(?:([A-Za-z_]\w*)|`([^`]+)`)\s*\(").unwrap());
+    LazyLock::new(|| Regex::new(r"\bfun\s+(?:([\p{L}_$][\w$]*)|`([^`]+)`)\s*\(").unwrap());
 static TEST_ANNOTATION: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"@(?:[\w.]+\.)?(?:Test|ParameterizedTest|RepeatedTest|TestFactory|TestTemplate)\b")
         .unwrap()
 });
 static PACKAGE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\s*package\s+([\w.]+)").unwrap());
 static CLASS: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\b(?:class|object)\s+([A-Za-z_]\w*)").unwrap());
+    LazyLock::new(|| Regex::new(r"\b(?:class|object)\s+([\p{L}_$][\w$]*)").unwrap());
 
 /// Java·Kotlin: 커서 위로 가장 가까운 메서드가 커서를 품고 테스트 어노테이션이 붙었으면 그 테스트. 아니면 커서 위로
 /// 가장 가까운 클래스(위에 없으면 파일의 첫 클래스) 전체다. 파일에 테스트 어노테이션이 없으면 None.
@@ -131,6 +132,26 @@ pub fn jvm_display_names(text: &str) -> Vec<(String, TestAt)> {
         }
     }
     names
+}
+
+/// Java·Kotlin 파일의 테스트 메서드들(테스트 어노테이션이 붙은 것, 묶음은 `@Nested`면 `CalcTest$Inner`).
+pub fn jvm_tests(text: &str) -> Vec<TestAt> {
+    let lines: Vec<&str> = text.lines().collect();
+    let declares = |l: &str| JAVA_METHOD.is_match(l) || KOTLIN_FUN.is_match(l);
+    let mut tests: Vec<TestAt> = Vec::new();
+    for (i, line) in lines.iter().enumerate() {
+        let Some(m) = TEST_ANNOTATION.find(line) else {
+            continue;
+        };
+        let at = (declares(&line[m.end()..]).then_some(i))
+            .or_else(|| (i + 1..lines.len()).find(|&j| declares(lines[j])))
+            .and_then(|j| jvm(&lines, j))
+            .filter(|at| !at.name.is_empty());
+        if let Some(at) = at.filter(|at| !tests.contains(at)) {
+            tests.push(at);
+        }
+    }
+    tests
 }
 
 /// `line` 줄을 품은 클래스 이름들(바깥부터). JUnit 5 `@Nested` 안쪽 클래스는 보고서(`CalcTest$Inner`)처럼 이어
@@ -619,6 +640,32 @@ class CalcTest {
                 row("한 줄", "demo.CalcTest", "inline"),
                 row("안쪽", "demo.CalcTest$Inner", ""),
                 row("안에서", "demo.CalcTest$Inner", "inside"),
+            ]
+        );
+    }
+
+    #[test]
+    fn 한글_이름의_테스트와_클래스() {
+        let text = "package demo;\n\nclass 계산_Test {\n    @Test\n    void 두_수를_더한다() {\n        // A\n    }\n\n    @Nested\n    class 안쪽_묶음 {\n        @ParameterizedTest\n        @ValueSource(ints = {1})\n        void 여러_값(int n) {\n            // B\n        }\n    }\n}\n";
+        let case = |suite: &str, name: &str| TestAt {
+            lang: TestLang::Jvm,
+            suite: suite.to_owned(),
+            name: name.to_owned(),
+        };
+        let dir = Path::new(".");
+        assert_eq!(
+            at("계산_Test.java", text, "// A", dir),
+            Some(case("demo.계산_Test", "두_수를_더한다"))
+        );
+        assert_eq!(
+            at("계산_Test.java", text, "// B", dir),
+            Some(case("demo.계산_Test$안쪽_묶음", "여러_값"))
+        );
+        assert_eq!(
+            jvm_tests(text),
+            [
+                case("demo.계산_Test", "두_수를_더한다"),
+                case("demo.계산_Test$안쪽_묶음", "여러_값"),
             ]
         );
     }
