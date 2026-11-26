@@ -60,6 +60,13 @@ jobs:
         with:
           distribution: temurin
           java-version: '21'
+      # 커서의 Gradle 테스트를 `--debug-jvm`으로 띄워 java-debug로 붙는 시험. ci.yml과 같은 판이다. 받는 것은
+      # JUnit뿐이라 Gradle 홈은 캐시하지 않는다(저장소 캐시 한도, 위 Rust 캐시 참고).
+      - uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: '9.2.0'
+          cache-disabled: true
+          add-job-summary: never
       # vscode-php-debug는 Xdebug 3과 말한다. node는 러너에 있다.
       - uses: shivammathur/setup-php@v2
         with:
