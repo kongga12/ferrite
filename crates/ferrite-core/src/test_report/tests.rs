@@ -1609,3 +1609,53 @@ fn 표시_이름은_소스에서_진짜_이름으로_되돌려_다시_돌린다(
     );
     std::fs::remove_dir_all(&root).unwrap();
 }
+
+/// Gradle은 매개변수 실행을 표시 이름(`[2] 2`)으로만 적는다. 실패했으면 스택에서 그 묶음 클래스의 메서드를 찾아
+/// 그 메서드만 다시 돌리고, 스택이 없으면(통과) 클래스째 돌린다.
+#[test]
+fn gradle_매개변수_실행의_실패는_스택의_메서드로_다시_돌린다() {
+    let case = |suite: &str, name: &str, detail: &str| Case {
+        suite: suite.to_owned(),
+        name: name.to_owned(),
+        outcome: Outcome::Failed,
+        seconds: None,
+        message: None,
+        detail: detail.to_owned(),
+        file: None,
+        line: None,
+        integration: false,
+        task: Some(":test".to_owned()),
+        previous: false,
+        label: None,
+        suite_label: None,
+    };
+    let stack = |frame: &str| {
+        format!(
+            "org.opentest4j.AssertionFailedError: expected: <2> but was: <1>\n\tat app//org.junit.jupiter.api.AssertionUtils.fail(AssertionUtils.java:158)\n\tat app//{frame}\n\tat java.base/java.lang.reflect.Method.invoke(Method.java:580)\n"
+        )
+    };
+    let failed = case(
+        "demo.CalcTest",
+        "[2] 2",
+        &stack("demo.CalcTest.bare(CalcTest.java:15)"),
+    );
+    let again = case(
+        "demo.CalcTest",
+        "[3] 3",
+        &stack("demo.CalcTest.bare(CalcTest.java:15)"),
+    );
+    let inner = case(
+        "demo.CalcTest$Inner",
+        "[1] 9",
+        &stack("demo.CalcTest$Inner.many(CalcTest.java:30)"),
+    );
+    let passed = case("demo.CalcTest", "[1] 1", "");
+    assert_eq!(
+        rerun(Tool::Gradle, "gradle test", &[&failed, &again, &inner]).unwrap(),
+        "gradle :test --tests \"demo.CalcTest.bare\" --tests \"demo.CalcTest*Inner.many\""
+    );
+    assert_eq!(
+        rerun(Tool::Gradle, "gradle test", &[&passed]).unwrap(),
+        "gradle :test --tests \"demo.CalcTest\""
+    );
+}

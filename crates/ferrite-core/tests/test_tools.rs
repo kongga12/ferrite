@@ -3939,3 +3939,78 @@ fn 표시_이름의_실패만_다시(tool: Tool) {
     );
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[test]
+#[ignore = "Gradle로 JUnit 5 매개변수 테스트를 돌린다(의존성을 받는다). Java 17 이상과 gradle이 필요하다"]
+fn gradle_매개변수_실행의_실패만_다시() {
+    if !require("gradle --version") {
+        return;
+    }
+    let root = temp_dir("gradle-parameterized");
+    let files = [
+        ("settings.gradle", "rootProject.name = 'calc'\n"),
+        ("gradle.properties", "org.gradle.daemon=false\n"),
+        (
+            "build.gradle",
+            "plugins { id 'java' }\nrepositories { mavenCentral() }\ndependencies {\n    \
+             testImplementation platform('org.junit:junit-bom:5.12.2')\n    \
+             testImplementation 'org.junit.jupiter:junit-jupiter'\n    \
+             testRuntimeOnly 'org.junit.platform:junit-platform-launcher'\n}\n\
+             tasks.withType(JavaCompile).configureEach { options.release = 17 }\n\
+             test { useJUnitPlatform() }\n",
+        ),
+        (
+            "src/test/java/demo/CalcTest.java",
+            "package demo;\n\nimport static org.junit.jupiter.api.Assertions.assertEquals;\n\n\
+             import org.junit.jupiter.api.Test;\nimport org.junit.jupiter.params.ParameterizedTest;\n\
+             import org.junit.jupiter.params.provider.ValueSource;\n\nclass CalcTest {\n    \
+             @ParameterizedTest\n    @ValueSource(ints = {1, 2})\n    void one(int n) {\n        assertEquals(1, n);\n    }\n\n    \
+             @Test\n    void plain() {\n        assertEquals(2, 1 + 1);\n    }\n}\n",
+        ),
+    ];
+    for (file, text) in files {
+        let path = root.join(file);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+    let command = "gradle test";
+    let names = |cases: &[Case]| {
+        let mut found: Vec<(String, Outcome)> =
+            cases.iter().map(|c| (c.name.clone(), c.outcome)).collect();
+        found.sort_by(|a, b| a.0.cmp(&b.0));
+        found
+    };
+    let name = |n: &str, outcome| (n.to_owned(), outcome);
+    let since = SystemTime::now();
+    let (ok, output) = run(
+        &root,
+        &test_report::with_report(Tool::Gradle, command, &root),
+    );
+    assert!(!ok, "{output}");
+    let cases = junit(Tool::Gradle, &root, &root, since);
+    // 매개변수 실행은 메서드 없이 표시 이름만 적힌다.
+    assert_eq!(
+        names(&cases),
+        [
+            name("[1] 1", Outcome::Passed),
+            name("[2] 2", Outcome::Failed),
+            name("plain()", Outcome::Passed),
+        ],
+        "{output}"
+    );
+    // 실패만 다시: 실패 스택의 메서드(`one`)만 돌고 `plain`은 돌지 않는다.
+    std::fs::remove_dir_all(root.join("build/test-results")).unwrap();
+    let since = SystemTime::now();
+    let line = test_report::rerun(Tool::Gradle, command, &failed(&cases)).unwrap();
+    assert!(line.contains("--tests \"demo.CalcTest.one\""), "{line}");
+    let (_, output) = run(&root, &test_report::with_report(Tool::Gradle, &line, &root));
+    assert_eq!(
+        names(&junit(Tool::Gradle, &root, &root, since)),
+        [
+            name("[1] 1", Outcome::Passed),
+            name("[2] 2", Outcome::Failed),
+        ],
+        "{line}\n{output}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}

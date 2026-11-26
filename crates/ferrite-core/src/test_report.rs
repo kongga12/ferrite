@@ -1186,20 +1186,21 @@ pub fn rerun(tool: Tool, command: &str, failed: &[&Case]) -> Option<String> {
     if failed.is_empty() {
         return None;
     }
-    // JUnit 5의 매개변수 테스트 이름(`adds(int)[1]`)과 Gradle의 `()`를 뺀다.
-    let method = |name: &str| name.split(['(', '[']).next().unwrap_or(name).to_owned();
+    // JUnit 5의 매개변수 테스트 이름(`adds(int)[1]`)과 Gradle의 `()`를 뺀다. Gradle은 매개변수 실행을 표시
+    // 이름(`[1] 5`)으로만 적으므로, 실패했으면 스택에서 그 묶음 클래스의 메서드를 찾는다. 그래도 모르면 빈 글이다.
+    let method = |case: &Case| match case.name.split(['(', '[']).next().unwrap_or_default() {
+        "" if !case.name.is_empty() => stack_method(case).unwrap_or_default().to_owned(),
+        name => name.to_owned(),
+    };
     // JUnit 5 `@Nested` 안쪽 클래스(`CalcTest$Inner`)는 `$`까지 적어야 그것만 거른다(떼면 바깥 클래스의 같은
     // 이름 테스트가 돈다). 명령은 셸로 띄우고 sh는 큰따옴표 안의 `$Inner`를 변수로 풀므로 `*`로 적는다(Maven
     // Surefire 3.5.4·Gradle 9.2가 `CalcTest*Inner`로 안쪽 클래스만 골랐다).
     let nested = |class: &str| class.replace('$', "*");
-    // Gradle `--tests`의 거르기. 이름이 빈 것(묶음 전체, `run_only`)은 클래스만. 메서드를 모르는 이름(Gradle이
-    // 표시 이름만 적는 매개변수 실행 `[1] 5`)도 클래스째 돌린다.
-    let gradle_test = |case: &Case| {
-        if method(&case.name).is_empty() {
-            nested(&case.suite)
-        } else {
-            format!("{}.{}", nested(&case.suite), method(&case.name))
-        }
+    // Gradle `--tests`의 거르기. 이름이 빈 것(묶음 전체, `run_only`)은 클래스만. 메서드를 모르는 이름(통과한
+    // Gradle 매개변수 실행 `[1] 5`)도 클래스째 돌린다.
+    let gradle_test = |case: &Case| match method(case) {
+        name if name.is_empty() => nested(&case.suite),
+        name => format!("{}.{name}", nested(&case.suite)),
     };
     Some(match tool {
         Tool::Maven => {
@@ -1210,7 +1211,7 @@ pub fn rerun(tool: Tool, command: &str, failed: &[&Case]) -> Option<String> {
                     let class = nested(case.suite.rsplit('.').next().unwrap_or(&case.suite));
                     // Kotlin 백틱 이름(`adds two numbers, again`): Surefire는 `,`(클래스 사이)·`+`(메서드
                     // 사이)로 가르므로 아무 한 글자인 `?`로 적는다.
-                    let name = method(&case.name).replace([',', '+'], "?");
+                    let name = method(case).replace([',', '+'], "?");
                     match classes.iter_mut().find(|(c, _)| *c == class) {
                         Some((_, names)) if !names.contains(&name) => names.push(name),
                         Some(_) => {}
@@ -1394,6 +1395,14 @@ pub fn frames(case: &Case) -> Vec<Frame> {
         }
     }
     frames
+}
+
+/// 실패 스택에서 묶음 클래스(`demo.CalcTest`, 안쪽 클래스는 `demo.CalcTest$Inner`) 그대로인 첫 프레임의 메서드.
+fn stack_method(case: &Case) -> Option<&str> {
+    case.detail.lines().find_map(|line| {
+        let class = JAVA_FRAME.captures(line)?.get(1)?;
+        (class.as_str() == case.suite).then(|| line[class.end() + 1..].split('(').next())?
+    })
 }
 
 /// 실패한 테스트에서 먼저 보일 프레임: Java는 테스트 클래스의 첫 프레임, pytest는 마지막 프레임(테스트
