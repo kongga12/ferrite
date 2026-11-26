@@ -685,6 +685,7 @@ fn java_debug로_커서의_테스트에_붙는다(tool: ferrite_core::test_repor
                 // SAFETY: 이 시험들은 한 스레드로 돈다(`--test-threads=1`). jdt.ls를 띄우기 전에 한 번 둔다.
                 unsafe { std::env::set_var("GRADLE_HOME", home) };
             }
+            eprintln!("GRADLE_HOME: {:?}", std::env::var_os("GRADLE_HOME"));
         }
     }
     std::fs::create_dir_all(project.join("src/main/java/demo")).unwrap();
@@ -701,29 +702,38 @@ fn java_debug로_커서의_테스트에_붙는다(tool: ferrite_core::test_repor
     std::fs::write(&test, text).unwrap();
 
     // jdt.ls는 Gradle 프로젝트를 Tooling API의 데몬으로 읽는다. 그 데몬은 jdt.ls가 끝나도 남고, Windows에서는
-    // 물려받은 출력 파이프를 쥐고 있어 CI의 `cargo test | tee`가 끝나지 않는다(2026-11-26, 2시간 멈춤).
-    // 시험이 깨져도 멈추도록 Drop에서 끈다.
-    struct StopGradleDaemons;
+    // 물려받은 출력 파이프를 쥐고 있어 CI의 `cargo test | tee`가 끝나지 않는다(2026-11-26, 2시간 멈춤). 데몬의
+    // 판은 PATH의 Gradle과 다를 수 있어(Windows 러너에서 9.9.1) `gradle --stop`으로는 끄지 못한다. 시험 중에
+    // 새로 뜬 GradleDaemon을 `jps`로 찾아 끈다. 시험이 깨져도 끄도록 Drop에서 한다.
+    fn gradle_daemons() -> std::collections::BTreeSet<String> {
+        let out = shell("jps -l")
+            .output()
+            .map(|o| o.stdout)
+            .unwrap_or_default();
+        String::from_utf8_lossy(&out)
+            .lines()
+            .filter(|l| l.contains("GradleDaemon"))
+            .filter_map(|l| l.split_whitespace().next().map(str::to_owned))
+            .collect()
+    }
+    struct StopGradleDaemons(std::collections::BTreeSet<String>);
     impl Drop for StopGradleDaemons {
         fn drop(&mut self) {
-            // 진단: 무엇이 남는지 끄기 앞뒤로 찍는다.
-            let show = |label: &str, line: &str| {
-                if let Ok(out) = shell(line).output() {
-                    eprintln!(
-                        "--- {label}\n{}{}",
-                        String::from_utf8_lossy(&out.stdout),
-                        String::from_utf8_lossy(&out.stderr)
-                    );
-                }
-            };
-            show("jps 앞", "jps -lmv");
-            show("gradle --status", "gradle --status");
-            show("gradle --stop", "gradle --stop");
-            std::thread::sleep(Duration::from_secs(10));
-            show("jps 뒤(10초)", "jps -lmv");
+            for pid in gradle_daemons().difference(&self.0) {
+                let kill = if cfg!(windows) {
+                    format!("taskkill /F /T /PID {pid}")
+                } else {
+                    format!("kill {pid}")
+                };
+                eprintln!("남은 Gradle 데몬을 끈다: {kill}");
+                let _ = shell(&kill)
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status();
+            }
         }
     }
-    let daemons = (tool == Tool::Gradle).then_some(StopGradleDaemons);
+    let daemons = (tool == Tool::Gradle).then(|| StopGradleDaemons(gradle_daemons()));
 
     // 앱처럼 jdt.ls가 먼저 떠 프로젝트를 읽는다. Maven은 빌드 출력(`target/classes`)이 겹치지 않게 그 빌드를
     // 기다린다. Gradle은 jdt.ls가 `bin`에 따로 빌드하지만 프로젝트를 읽어야 중단점이 붙으므로 같이 기다린다.
