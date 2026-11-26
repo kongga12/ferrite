@@ -1734,3 +1734,15 @@ fn gradle_이름_생성기의_표시_이름은_메서드로_되돌린다() {
     );
     std::fs::remove_dir_all(&root).unwrap();
 }
+
+#[test]
+fn 명령_줄이_담지_못하는_글자는_gradle_거르기에서_별표로() {
+    assert_eq!(
+        wildcard_non_ascii("demo.Calc_Test*안쪽_묶음.안에서_더한다"),
+        "demo.Calc_Test*_*.*_*"
+    );
+    assert_eq!(
+        wildcard_non_ascii("demo.CalcTest.adds"),
+        "demo.CalcTest.adds"
+    );
+}

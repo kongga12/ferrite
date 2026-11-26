@@ -1237,9 +1237,17 @@ pub fn rerun(tool: Tool, command: &str, failed: &[&Case]) -> Option<String> {
     let nested = |class: &str| class.replace('$', "*");
     // Gradle `--tests`의 거르기. 이름이 빈 것(묶음 전체, `run_only`)은 클래스만. 메서드를 모르는 이름(통과한
     // Gradle 매개변수 실행 `[1] 5`)도 클래스째 돌린다.
-    let gradle_test = |case: &Case| match method(case) {
-        name if name.is_empty() => nested(&case.suite),
-        name => format!("{}.{name}", nested(&case.suite)),
+    let keeps_non_ascii = command_line_keeps_non_ascii();
+    let gradle_test = |case: &Case| {
+        let filter = match method(case) {
+            name if name.is_empty() => nested(&case.suite),
+            name => format!("{}.{name}", nested(&case.suite)),
+        };
+        if keeps_non_ascii {
+            filter
+        } else {
+            wildcard_non_ascii(&filter)
+        }
     };
     Some(match tool {
         Tool::Maven => {
@@ -1434,6 +1442,38 @@ pub fn frames(case: &Case) -> Vec<Frame> {
         }
     }
     frames
+}
+
+/// 명령 줄의 ASCII 밖 글자(한글 테스트 이름)가 테스트 도구에 그대로 가는지. Windows의 Java는 명령 줄을 ANSI 코드
+/// 페이지로 읽어, 거기 없는 글자는 `?`가 된다(영문 Windows의 1252에서 한글. Maven은 `?`가 한 글자 와일드카드라
+/// 거르기가 되지만 Gradle은 그렇지 않아 "No tests found"로 깨진다).
+fn command_line_keeps_non_ascii() -> bool {
+    #[cfg(windows)]
+    {
+        unsafe extern "system" {
+            safe fn GetACP() -> u32;
+        }
+        // ponytail: UTF-8(65001)과 한국어(949)만 본다. 다른 코드 페이지에서는 그 나라 글자도 별표로 넓힌다.
+        matches!(GetACP(), 65001 | 949)
+    }
+    #[cfg(not(windows))]
+    {
+        true
+    }
+}
+
+/// Gradle 거르기의 ASCII 밖 글자 묶음을 `*`로 바꾼다(`demo.Calc_Test.두_수를_더한다` → `demo.Calc_Test.*_*_*`).
+/// 그 글자를 담지 못하는 명령 줄에서 쓴다. 같은 꼴의 다른 테스트도 고를 수 있다(더 돌 뿐 빠지지는 않는다).
+fn wildcard_non_ascii(filter: &str) -> String {
+    let mut out = String::with_capacity(filter.len());
+    for c in filter.chars() {
+        if c.is_ascii() {
+            out.push(c);
+        } else if !out.ends_with('*') {
+            out.push('*');
+        }
+    }
+    out
 }
 
 /// 실패 스택에서 묶음 클래스(`demo.CalcTest`, 안쪽 클래스는 `demo.CalcTest$Inner`) 그대로인 첫 프레임의 메서드.
