@@ -3878,6 +3878,22 @@ fn 표시_이름의_실패만_다시(tool: Tool) {
         ],
         "{output}"
     );
+    // 실패의 스택에서 먼저 갈 줄은 그 테스트의 단언 줄이다(`@Nested` 안쪽 클래스도).
+    let source = root.join("src/test/java/demo/CalcTest.java");
+    let text = std::fs::read_to_string(&source).unwrap();
+    let line_of = |needle: &str| text.lines().position(|l| l.contains(needle)).unwrap() as u32 + 1;
+    for (name, needle) in [("adds", "assertEquals(4"), ("inside", "assertEquals(5")] {
+        let case = cases
+            .iter()
+            .find(|c| c.name.trim_end_matches("()") == name)
+            .unwrap();
+        assert_eq!(
+            test_line(&root, &root, case),
+            (source.clone(), line_of(needle)),
+            "{name}: {}",
+            case.detail
+        );
+    }
 
     let reports = match tool {
         Tool::Maven => "target/surefire-reports",
