@@ -700,6 +700,20 @@ fn java_debug로_커서의_테스트에_붙는다(tool: ferrite_core::test_repor
     let text = "package demo;\n\nimport static org.junit.jupiter.api.Assertions.assertEquals;\nimport static org.junit.jupiter.api.Assertions.fail;\n\nimport org.junit.jupiter.api.Test;\n\nclass CalcTest {\n    @Test\n    void adds() throws Exception {\n        assertEquals(42, Calc.add(41, 1)); // 커서\n        Thread.sleep(4000);\n    }\n\n    @Test\n    void other() {\n        fail(\"돌면 안 된다\");\n    }\n}\n";
     std::fs::write(&test, text).unwrap();
 
+    // jdt.ls는 Gradle 프로젝트를 Tooling API의 데몬으로 읽는다. 그 데몬은 jdt.ls가 끝나도 남고, Windows에서는
+    // 물려받은 출력 파이프를 쥐고 있어 CI의 `cargo test | tee`가 끝나지 않는다(2026-11-26, 2시간 멈춤).
+    // 시험이 깨져도 멈추도록 Drop에서 끈다.
+    struct StopGradleDaemons;
+    impl Drop for StopGradleDaemons {
+        fn drop(&mut self) {
+            let _ = shell("gradle --stop")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+        }
+    }
+    let daemons = (tool == Tool::Gradle).then_some(StopGradleDaemons);
+
     // 앱처럼 jdt.ls가 먼저 떠 프로젝트를 읽는다. Maven은 빌드 출력(`target/classes`)이 겹치지 않게 그 빌드를
     // 기다린다. Gradle은 jdt.ls가 `bin`에 따로 빌드하지만 프로젝트를 읽어야 중단점이 붙으므로 같이 기다린다.
     let mut lsp = start_jdtls(&servers, &project);
@@ -791,6 +805,8 @@ fn java_debug로_커서의_테스트에_붙는다(tool: ferrite_core::test_repor
         ("adds", Outcome::Passed)
     );
     drop(lsp);
+    // 데몬이 프로젝트 폴더를 쥐고 있으면 지우지 못한다.
+    drop(daemons);
     let _ = std::fs::remove_dir_all(&servers);
     let _ = std::fs::remove_dir_all(&project);
 }
