@@ -2568,7 +2568,7 @@
     - 기다리는 줄("Listening for transport dt_socket") 대신 연결해 보는 까닭: Surefire 3.5.4는 그 줄을 디버거가 붙은 *뒤에야* 낸다(실제 Maven으로 확인). Gradle 9.2는 바로 낸다. JDWP는 인사 없이 끊은 연결을 버리고 계속 기다린다(JDK 8·21에서 확인). 출력에 "Debugger failed to attach: handshake failed" 한 줄이 남는다.
     - 앱 `debug_test_at_cursor`: Java·Kotlin이면 jdt.ls가 준비됐는지 먼저 본다(java-debug가 jdt.ls에 실린 번들이라, 없으면 테스트 JVM이 헛되이 기다린다). `LspHub::is_ready`를 더했다. 붙지 못하면 JVM이 기다리므로 출력에 [멈춤] 안내를 남긴다. 디버거를 기다리지 않고 끝나면(Surefire `forkCount=0` 등) 그것도 알린다.
   - 검증: 단위 시험(Maven·Gradle 명령, 붙기 구성). 실제 도구(로컬, JDK 21): Maven 3.10·Surefire 3.5.4와 Gradle 9.2로 위 명령을 띄우니 5005에서 기다렸고, 연결해 본 뒤 jdb로 붙어 이어 가니 테스트가 통과했다(JDK 8도 연결해 본 뒤 붙었다). 실제 어댑터(`adapters` 시험 `java_debug로_커서의_maven_테스트에_붙는다`, CI 3개 OS): jdt.ls에 Maven 프로젝트를 띄우고 커서의 `adds`만 위 명령으로 띄워 기다림을 본 뒤 java-debug로 붙어 테스트가 부르는 `add`의 `return` 줄에서 a=41·b=1·total=42를 읽는다. 같은 클래스의 다른 테스트는 돌지 않는다. `locals_at_breakpoint`는 붙기도 받게 넓혔다(`locals_at`).
-  - 확인하지 못한 것: 앱 화면에서 실제로 멈추기(로컬에 jdt.ls가 없다), Gradle을 java-debug로(로컬 jdb만), Kotlin 테스트, 5005가 `::1`에만 열리는 환경.
+  - 확인하지 못한 것: 앱 화면에서 실제로 멈추기(로컬에 jdt.ls가 없다), Gradle을 java-debug로(로컬 jdb만. 뒤에 백로그 "Gradle 테스트 디버그 검증"(2026-11-26)에서 CI 시험을 더했다), Kotlin 테스트, 5005가 `::1`에만 열리는 환경.
 
 - [x] 결과 트리에서 테스트 디버그(2026-11-24) — 작음
   - 까닭: 실패한 테스트를 디버거로 보려면 결과에서 소스로 가서 커서를 두고 `Ctrl+Shift+F9`를 눌러야 했다.
@@ -2593,6 +2593,14 @@
     - `rerun`(Maven): 이름의 `,`·`+`(Surefire가 가르는 글자)는 아무 한 글자인 `?`로 적는다. `*`는 `adds_two_numbers`까지 고른다. 빈칸이 든 거르기는 인자째 감싼다(`"-Dtest=CalcTest#adds two numbers? again"`, 통합 테스트는 `"-Dit.test=…"`). Gradle은 이미 `--tests "…"`로 감싸 그대로 고른다.
   - 검증: 단위 시험(백틱 이름, 이름 안 중괄호, Maven 단위·통합 테스트의 감싸기와 디버그 속성, Gradle). 실제 도구(로컬, JDK 21, Kotlin 2.3.0): `adds two numbers`·`adds two numbers, again`·`adds_two_numbers`가 든 클래스에서 Gradle 9.2는 `--tests "demo.CalcTest.adds two numbers"`가 그것만, `adds*two*numbers`는 `adds_two_numbers`까지 돌렸다. Maven 3.10·Surefire 3.5.4(Gradle이 컴파일한 클래스)는 `"-Dtest=CalcTest#adds two numbers? again"`가 그것만, `, again`을 그대로 두면 `adds two numbers`를 돌렸다. Windows `cmd`와 `sh` 모두 같았다.
   - 확인하지 못한 것: 앱 화면, Kotlin 메이븐 플러그인으로 컴파일한 프로젝트, 이름에 `(`가 든 것(Gradle 보고서의 `()`를 떼는 자리와 겹친다).
+- [x] Gradle 테스트 디버그 검증(2026-11-26) — 작음
+  - 까닭: 커서의 테스트 디버그는 Maven만 실제 java-debug로 붙어 보았다. Gradle(`--debug-jvm`)은 로컬 jdb로만 확인했다.
+  - 한 일: `adapters`의 Maven 시험을 도구를 받는 몸(`java_debug로_커서의_테스트에_붙는다`)으로 나누고 Gradle 시험(`java_debug로_커서의_gradle_테스트에_붙는다`)을 더했다. 앱처럼 jdt.ls가 Gradle 프로젝트를 읽은 뒤 테스트 창과 같은 명령(`gradle --no-daemon :test --tests "demo.CalcTest.adds" --debug-jvm --rerun-tasks`, 작업은 `gradle_test_task`)을 띄우고 5005를 연결해 본 뒤 java-debug로 붙어 `add`의 a=41·b=1·total=42를 읽고, 보고서에 `adds()`만 있는지 본다. `adapters.yml`은 ci.yml과 같은 Gradle 9.2.0을 둔다(받는 것은 JUnit뿐이라 Gradle 홈은 캐시하지 않는다).
+    - jdt.ls는 wrapper도 설정도 없으면 `GRADLE_HOME`의 Gradle로 프로젝트를 읽고, 그것도 없으면 제 Gradle 판을 받는다. 시험은 PATH의 Gradle 설치 폴더를 `GRADLE_HOME`으로 알려 준다. 사용자 프로젝트는 대개 wrapper(`gradlew`)가 있어 그것을 쓴다.
+    - Gradle은 테스트 JVM이 120초 안에 되돌아 붙지 못하면 "Unable to connect to the child process 'Gradle Test Executor 1'"로 실패한다. 디버거가 그 안에 붙어야 한다(앱은 기다리기 시작하면 바로 붙는다).
+  - 검증: 로컬(JDK 21, Gradle 9.2, `sh`)에서 위 명령이 5005에서 기다리고 소켓 jdb(`-connect com.sun.jdi.SocketAttach`, Windows jdb의 `-attach`는 공유 메모리라 붙지 못한다)로 붙어 `add`의 값을 읽고 `adds()`만 돌았다. java-debug로 붙기는 CI(3개 OS)에서 본다(로컬에 jdt.ls가 없다).
+    - jdt.ls가 Gradle 프로젝트를 읽으며 띄운 Tooling API 데몬은 jdt.ls가 끝나도 남는다. Windows CI에서는 그 데몬이 물려받은 출력 파이프를 쥐고 있었다. 그래서 19개 시험이 다 통과한 뒤에도 `cargo test | tee`가 끝나지 않아 2시간 멈췄다. 그 데몬은 PATH의 Gradle(9.2)이 아닌 9.9.1이어서 `gradle --stop`으로는 꺼지지 않았다. 시험은 시작 전과 끝의 `jps -l`을 견주어 새로 뜬 GradleDaemon을 끈다(깨져도 Drop에서). `adapters` 작업 한도는 15분으로 줄였다.
+  - 확인하지 못한 것: 앱 화면, wrapper가 있는 프로젝트를 jdt.ls가 읽기.
 
 - 살폈지만 넣지 않은 것: 임베디드(MCU 플래시·시리얼 모니터·장비 설정 파일), 프레임워크별 지원(React·Vue·Angular 등, JS·TS 언어 서버로 기본은 된다), 린터 개별 연동(언어 서버나 저장 시 작업으로 된다), 원격 개발·컨테이너·SFTP 배포, 로컬 AI 완성 모델, 계정 기반 설정 동기화. egov 개발과 거리가 멀거나 크기에 비해 쓰임이 적다.
 

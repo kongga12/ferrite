@@ -615,14 +615,35 @@ fn shell(line: &str) -> Command {
 #[test]
 #[ignore = "jdt.ls·java-debug와 JUnit(Maven Central)을 받는다. Java 21 이상과 Maven이 필요하다"]
 fn java_debug로_커서의_maven_테스트에_붙는다() {
-    use ferrite_core::test_report::{self, Case, Outcome, Tool};
+    use ferrite_core::test_report::Tool;
     if !require("Java 21", ferrite_lsp::java::find_java().is_ok())
         || !require("Maven", find_program("mvn").is_some())
     {
         return;
     }
-    let (servers, project) = (temp_dir("java-test-servers"), temp_dir("java-test"));
-    std::fs::write(
+    java_debug로_커서의_테스트에_붙는다(Tool::Maven);
+}
+
+#[test]
+#[ignore = "jdt.ls·java-debug와 JUnit(Maven Central)을 받는다. Java 21 이상과 Gradle이 필요하다"]
+fn java_debug로_커서의_gradle_테스트에_붙는다() {
+    use ferrite_core::test_report::Tool;
+    if !require("Java 21", ferrite_lsp::java::find_java().is_ok())
+        || !require("Gradle", find_program("gradle").is_some())
+    {
+        return;
+    }
+    java_debug로_커서의_테스트에_붙는다(Tool::Gradle);
+}
+
+/// 테스트 창의 "커서의 테스트 디버그"처럼 커서의 테스트만 테스트 JVM이 디버거를 기다리게 띄우고(Maven
+/// `-Dmaven.surefire.debug`, Gradle `--debug-jvm`), 기다리기 시작하면 java-debug로 붙어 중단점의 변수를 읽는다.
+fn java_debug로_커서의_테스트에_붙는다(tool: ferrite_core::test_report::Tool) {
+    use ferrite_core::test_report::{self, Case, Outcome, Tool};
+    let name = format!("java-test-{tool:?}").to_lowercase();
+    let (servers, project) = (temp_dir(&format!("{name}-servers")), temp_dir(&name));
+    match tool {
+        Tool::Maven => std::fs::write(
         project.join("pom.xml"),
         "<project xmlns=\"http://maven.apache.org/POM/4.0.0\"><modelVersion>4.0.0</modelVersion>\
          <groupId>demo</groupId><artifactId>calc</artifactId><version>1.0</version>\
@@ -632,8 +653,41 @@ fn java_debug로_커서의_maven_테스트에_붙는다() {
          <version>5.12.2</version><scope>test</scope></dependency></dependencies>\
          <build><plugins><plugin><artifactId>maven-surefire-plugin</artifactId><version>3.5.4</version>\
          </plugin></plugins></build></project>\n",
-    )
-    .unwrap();
+        )
+        .unwrap(),
+        _ => {
+            std::fs::write(
+                project.join("settings.gradle"),
+                "rootProject.name = 'calc'\n",
+            )
+            .unwrap();
+            std::fs::write(
+                project.join("build.gradle"),
+                "plugins { id 'java' }\nrepositories { mavenCentral() }\ndependencies {\n    \
+                 testImplementation platform('org.junit:junit-bom:5.12.2')\n    \
+                 testImplementation 'org.junit.jupiter:junit-jupiter'\n    \
+                 testRuntimeOnly 'org.junit.platform:junit-platform-launcher'\n}\n\
+                 tasks.withType(JavaCompile).configureEach { options.release = 17 }\n\
+                 test { useJUnitPlatform() }\n",
+            )
+            .unwrap();
+            // jdt.ls는 wrapper도 설정도 없으면 `GRADLE_HOME`의 Gradle로 프로젝트를 읽는다(없으면 제 판을 받는다).
+            // PATH의 Gradle(`…/bin/gradle`)의 설치 폴더를 알려 준다.
+            if std::env::var_os("GRADLE_HOME").is_none() {
+                // 링크(Homebrew 등)를 따라간다. Windows의 canonicalize는 Java가 못 읽는 `\\?\` 경로를 준다.
+                let gradle = find_program("gradle").unwrap();
+                let gradle = if cfg!(windows) {
+                    gradle
+                } else {
+                    std::fs::canonicalize(gradle).unwrap()
+                };
+                let home = gradle.parent().and_then(Path::parent).unwrap();
+                // SAFETY: 이 시험들은 한 스레드로 돈다(`--test-threads=1`). jdt.ls를 띄우기 전에 한 번 둔다.
+                unsafe { std::env::set_var("GRADLE_HOME", home) };
+            }
+            eprintln!("GRADLE_HOME: {:?}", std::env::var_os("GRADLE_HOME"));
+        }
+    }
     std::fs::create_dir_all(project.join("src/main/java/demo")).unwrap();
     std::fs::create_dir_all(project.join("src/test/java/demo")).unwrap();
     let source = project.join("src/main/java/demo/Calc.java");
@@ -647,18 +701,57 @@ fn java_debug로_커서의_maven_테스트에_붙는다() {
     let text = "package demo;\n\nimport static org.junit.jupiter.api.Assertions.assertEquals;\nimport static org.junit.jupiter.api.Assertions.fail;\n\nimport org.junit.jupiter.api.Test;\n\nclass CalcTest {\n    @Test\n    void adds() throws Exception {\n        assertEquals(42, Calc.add(41, 1)); // 커서\n        Thread.sleep(4000);\n    }\n\n    @Test\n    void other() {\n        fail(\"돌면 안 된다\");\n    }\n}\n";
     std::fs::write(&test, text).unwrap();
 
-    // 앱처럼 jdt.ls가 먼저 떠 프로젝트를 읽는다(빌드 출력이 Maven과 겹치지 않게 그 빌드를 기다린다).
+    // jdt.ls는 Gradle 프로젝트를 Tooling API의 데몬으로 읽는다. 그 데몬은 jdt.ls가 끝나도 남고, Windows에서는
+    // 물려받은 출력 파이프를 쥐고 있어 CI의 `cargo test | tee`가 끝나지 않는다(2026-11-26, 2시간 멈춤). 데몬의
+    // 판은 PATH의 Gradle과 다를 수 있어(Windows 러너에서 9.9.1) `gradle --stop`으로는 끄지 못한다. 시험 중에
+    // 새로 뜬 GradleDaemon을 `jps`로 찾아 끈다. 시험이 깨져도 끄도록 Drop에서 한다.
+    fn gradle_daemons() -> std::collections::BTreeSet<String> {
+        let out = shell("jps -l")
+            .output()
+            .map(|o| o.stdout)
+            .unwrap_or_default();
+        String::from_utf8_lossy(&out)
+            .lines()
+            .filter(|l| l.contains("GradleDaemon"))
+            .filter_map(|l| l.split_whitespace().next().map(str::to_owned))
+            .collect()
+    }
+    struct StopGradleDaemons(std::collections::BTreeSet<String>);
+    impl Drop for StopGradleDaemons {
+        fn drop(&mut self) {
+            for pid in gradle_daemons().difference(&self.0) {
+                let kill = if cfg!(windows) {
+                    format!("taskkill /F /T /PID {pid}")
+                } else {
+                    format!("kill {pid}")
+                };
+                eprintln!("남은 Gradle 데몬을 끈다: {kill}");
+                let _ = shell(&kill)
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status();
+            }
+        }
+    }
+    let daemons = (tool == Tool::Gradle).then(|| StopGradleDaemons(gradle_daemons()));
+
+    // 앱처럼 jdt.ls가 먼저 떠 프로젝트를 읽는다. Maven은 빌드 출력(`target/classes`)이 겹치지 않게 그 빌드를
+    // 기다린다. Gradle은 jdt.ls가 `bin`에 따로 빌드하지만 프로젝트를 읽어야 중단점이 붙으므로 같이 기다린다.
     let mut lsp = start_jdtls(&servers, &project);
     lsp.did_open(&test, "java", 1, text);
-    let built = project.join("target/classes/demo/Calc.class");
+    let built = project.join(match tool {
+        Tool::Maven => "target/classes/demo/Calc.class",
+        _ => "bin/main/demo/Calc.class",
+    });
     let started = Instant::now();
-    while !built.exists() && started.elapsed() < Duration::from_secs(120) {
+    while !built.exists() && started.elapsed() < Duration::from_secs(180) {
         lsp.poll_events();
         std::thread::sleep(Duration::from_millis(200));
     }
+    eprintln!("jdt.ls 빌드 {}: {}", built.display(), built.exists());
 
-    // 테스트 창의 "커서의 테스트 디버그"와 같은 명령: 커서의 테스트만 고르고(`run_only`), 테스트 JVM이 디버거를
-    // 기다리게 하고(`with_jvm_debug`), 보고서 옵션을 붙인다(`with_report`).
+    // 테스트 창의 "커서의 테스트 디버그"와 같은 명령: 커서의 테스트만 고르고(`run_only`, Gradle은 파일의 테스트
+    // 작업에만), 테스트 JVM이 디버거를 기다리게 하고(`with_jvm_debug`), 보고서 옵션을 붙인다(`with_report`).
     let line = text.lines().position(|l| l.contains("// 커서")).unwrap();
     let at = ferrite_core::test_at::test_at(&test, text, line, &project).expect("커서의 테스트");
     let case = Case {
@@ -671,22 +764,29 @@ fn java_debug로_커서의_maven_테스트에_붙는다() {
         file: None,
         line: None,
         integration: false,
-        task: None,
+        task: (tool == Tool::Gradle)
+            .then(|| test_report::gradle_test_task(&test))
+            .flatten(),
         previous: false,
     };
-    let only = test_report::run_only(Tool::Maven, "mvn -B test", &[&case], &project).unwrap();
-    let debug = test_report::with_jvm_debug(Tool::Maven, &only).unwrap();
-    let command = test_report::with_report(Tool::Maven, &debug, &project);
+    // Gradle 데몬이 남으면 Windows에서 프로젝트 폴더를 지우지 못한다.
+    let configured = match tool {
+        Tool::Maven => "mvn -B test",
+        _ => "gradle --no-daemon test",
+    };
+    let only = test_report::run_only(tool, configured, &[&case], &project).unwrap();
+    let debug = test_report::with_jvm_debug(tool, &only).unwrap();
+    let command = test_report::with_report(tool, &debug, &project);
     eprintln!("> {command}");
-    let mut maven = shell(&command).current_dir(&project).spawn().unwrap();
+    let mut tool_run = shell(&command).current_dir(&project).spawn().unwrap();
 
     // 앱처럼 테스트 JVM이 기다리기 시작할 때까지 연결해 본다(Surefire는 기다리는 줄을 붙은 뒤에야 낸다).
     let address = ([127, 0, 0, 1], ferrite_core::run::JDWP_PORT).into();
     let started = Instant::now();
     while std::net::TcpStream::connect_timeout(&address, Duration::from_millis(200)).is_err() {
         assert!(
-            maven.try_wait().unwrap().is_none(),
-            "Maven이 디버거를 기다리지 않고 끝났다"
+            tool_run.try_wait().unwrap().is_none(),
+            "{tool:?}이 디버거를 기다리지 않고 끝났다"
         );
         assert!(
             started.elapsed() < Duration::from_secs(300),
@@ -704,26 +804,30 @@ fn java_debug로_커서의_maven_테스트에_붙는다() {
 
     let started = Instant::now();
     let status = loop {
-        if let Some(status) = maven.try_wait().unwrap() {
+        if let Some(status) = tool_run.try_wait().unwrap() {
             break status;
         }
         assert!(
             started.elapsed() < Duration::from_secs(120),
-            "Maven이 끝나지 않는다"
+            "{tool:?}이 끝나지 않는다"
         );
         std::thread::sleep(Duration::from_millis(200));
     };
-    assert!(status.success(), "Maven 종료: {status}");
-    // 커서의 테스트만 돌았다.
-    let cases =
-        test_report::read_report(&project.join("target/surefire-reports/TEST-demo.CalcTest.xml"))
-            .unwrap();
+    assert!(status.success(), "{tool:?} 종료: {status}");
+    // 커서의 테스트만 돌았다(Gradle 보고서는 이름에 `()`를 붙인다).
+    let report = match tool {
+        Tool::Maven => "target/surefire-reports/TEST-demo.CalcTest.xml",
+        _ => "build/test-results/test/TEST-demo.CalcTest.xml",
+    };
+    let cases = test_report::read_report(&project.join(report)).unwrap();
     assert_eq!(cases.len(), 1, "{cases:?}");
     assert_eq!(
-        (cases[0].name.as_str(), cases[0].outcome),
+        (cases[0].name.trim_end_matches("()"), cases[0].outcome),
         ("adds", Outcome::Passed)
     );
     drop(lsp);
+    // 데몬이 프로젝트 폴더를 쥐고 있으면 지우지 못한다.
+    drop(daemons);
     let _ = std::fs::remove_dir_all(&servers);
     let _ = std::fs::remove_dir_all(&project);
 }
