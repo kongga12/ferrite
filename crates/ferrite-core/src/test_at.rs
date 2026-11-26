@@ -105,6 +105,34 @@ fn jvm(lines: &[&str], line: usize) -> Option<TestAt> {
     })
 }
 
+static DISPLAY_NAME: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"@(?:[\w.]+\.)?DisplayName\s*\(\s*"((?:[^"\\]|\\.)*)"\s*\)"#).unwrap()
+});
+
+/// Java·Kotlin 파일의 `@DisplayName("…")`마다 (표시 이름, 그것이 붙은 테스트나 클래스). 클래스면 이름이 빈
+/// 것(묶음 전체)이다. 보고서가 표시 이름을 적으면(Gradle은 테스트 이름에, Surefire는 클래스 이름에) 다시 돌릴
+/// 진짜 이름을 여기서 찾는다.
+pub fn jvm_display_names(text: &str) -> Vec<(String, TestAt)> {
+    let lines: Vec<&str> = text.lines().collect();
+    let declares = |l: &str| CLASS.is_match(l) || JAVA_METHOD.is_match(l) || KOTLIN_FUN.is_match(l);
+    let mut names = Vec::new();
+    for (i, line) in lines.iter().enumerate() {
+        for c in DISPLAY_NAME.captures_iter(line) {
+            // 어노테이션 줄이나 그 아래의 첫 선언(메서드·클래스)에 붙는다.
+            let after = &line[c.get(0).unwrap().end()..];
+            let Some(at) = (if declares(after) { Some(i) } else { None })
+                .or_else(|| (i + 1..lines.len()).find(|&j| declares(lines[j])))
+                .and_then(|j| jvm(&lines, j))
+            else {
+                continue;
+            };
+            let display = c[1].replace("\\\"", "\"").replace("\\\\", "\\");
+            names.push((display, at));
+        }
+    }
+    names
+}
+
 /// `line` 줄을 품은 클래스 이름들(바깥부터). JUnit 5 `@Nested` 안쪽 클래스는 보고서(`CalcTest$Inner`)처럼 이어
 /// 묶음이 된다. 몸(`{`)이 없는 선언(Kotlin `data class P(val x: Int)`)은 뒤 선언의 몸을 제 것으로 세지 않는다.
 fn enclosing_classes(lines: &[&str], line: usize) -> Vec<String> {
@@ -572,6 +600,26 @@ class CalcTest {
         assert_eq!(
             at("CalcTest.kt", text, "// B", dir),
             case("braces { stay }")
+        );
+    }
+
+    #[test]
+    fn 표시_이름이_붙은_테스트와_클래스() {
+        let text = "package demo;\n\n@DisplayName(\"계산기\")\nclass CalcTest {\n    @Test\n    @DisplayName(\"두 \\\"수\\\"를 더한다\")\n    void adds() {}\n\n    @Test @DisplayName(\"한 줄\") void inline() {}\n\n    @Nested\n    @DisplayName(\"안쪽\")\n    class Inner {\n        @Test\n        @DisplayName(\"안에서\")\n        void inside() {}\n    }\n}\n";
+        let found: Vec<(String, String, String)> = jvm_display_names(text)
+            .into_iter()
+            .map(|(d, at)| (d, at.suite, at.name))
+            .collect();
+        let row = |d: &str, s: &str, n: &str| (d.to_owned(), s.to_owned(), n.to_owned());
+        assert_eq!(
+            found,
+            [
+                row("계산기", "demo.CalcTest", ""),
+                row("두 \"수\"를 더한다", "demo.CalcTest", "adds"),
+                row("한 줄", "demo.CalcTest", "inline"),
+                row("안쪽", "demo.CalcTest$Inner", ""),
+                row("안에서", "demo.CalcTest$Inner", "inside"),
+            ]
         );
     }
 

@@ -1477,3 +1477,80 @@ fn kotlin_백틱_이름은_인자째_감싼다() {
         "gradle :test --tests \"demo.CalcTest.adds two numbers, again\""
     );
 }
+
+/// Windows·JDK 21에서 `@DisplayName`을 붙인 예제를 실제로 돌린 보고서(Gradle 9.2.0·Surefire 3.5.4)를 줄였다.
+/// Gradle은 테스트 이름에, Surefire는 클래스 이름에 표시 이름을 적는다.
+#[test]
+fn 표시_이름은_소스에서_진짜_이름으로_되돌려_다시_돌린다() {
+    let root = std::env::temp_dir().join(format!("ferrite-display-name-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let source = root.join("src/test/java/demo");
+    let gradle = root.join("build/test-results/test");
+    let maven = root.join("target/surefire-reports");
+    for dir in [&source, &gradle, &maven] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    std::fs::write(root.join("settings.gradle"), "rootProject.name = 'calc'\n").unwrap();
+    std::fs::write(
+        source.join("CalcTest.java"),
+        "package demo;\n\n@DisplayName(\"계산기\")\nclass CalcTest {\n    @Test\n    @DisplayName(\"두 수를 더한다\")\n    void adds() {}\n\n    @Test\n    void plain() {}\n\n    @ParameterizedTest\n    @ValueSource(ints = {5})\n    void bare(int n) {}\n\n    @Nested\n    @DisplayName(\"안쪽\")\n    class Inner {\n        @Test\n        @DisplayName(\"안에서 더한다\")\n        void inside() {}\n    }\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        gradle.join("TEST-demo.CalcTest.xml"),
+        r#"<testsuite name="계산기" tests="3"><testcase name="두 수를 더한다" classname="demo.CalcTest"/><testcase name="[1] 5" classname="demo.CalcTest"/><testcase name="plain()" classname="demo.CalcTest"/></testsuite>"#,
+    )
+    .unwrap();
+    std::fs::write(
+        gradle.join("TEST-demo.CalcTest$Inner.xml"),
+        r#"<testsuite name="안쪽" tests="1"><testcase name="안에서 더한다" classname="demo.CalcTest$Inner"/></testsuite>"#,
+    )
+    .unwrap();
+    std::fs::write(
+        maven.join("TEST-demo.CalcTest.xml"),
+        r#"<testsuite name="demo.CalcTest" tests="4"><testcase name="adds" classname="계산기"/><testcase name="bare(int)[1]" classname="계산기"/><testcase name="plain" classname="계산기"/><testcase name="inside" classname="안쪽"/></testsuite>"#,
+    )
+    .unwrap();
+    let ids = |cases: &[Case]| -> Vec<(String, String)> {
+        cases
+            .iter()
+            .map(|c| (c.suite.clone(), c.name.clone()))
+            .collect()
+    };
+    let id = |s: &str, n: &str| (s.to_owned(), n.to_owned());
+
+    let mut found = read_report(&gradle.join("TEST-demo.CalcTest.xml")).unwrap();
+    found.extend(read_report(&gradle.join("TEST-demo.CalcTest$Inner.xml")).unwrap());
+    assert_eq!(
+        ids(&found),
+        [
+            id("demo.CalcTest", "adds()"),
+            id("demo.CalcTest", "[1] 5"),
+            id("demo.CalcTest", "plain()"),
+            id("demo.CalcTest$Inner", "inside()"),
+        ]
+    );
+    // 메서드를 모르는 매개변수 실행은 클래스째 돈다.
+    let all: Vec<&Case> = found.iter().collect();
+    assert_eq!(
+        rerun(Tool::Gradle, "gradle test", &all).unwrap(),
+        "gradle :test --tests \"demo.CalcTest.adds\" --tests \"demo.CalcTest\" --tests \"demo.CalcTest.plain\" --tests \"demo.CalcTest*Inner.inside\""
+    );
+
+    let found = read_report(&maven.join("TEST-demo.CalcTest.xml")).unwrap();
+    assert_eq!(
+        ids(&found),
+        [
+            id("demo.CalcTest", "adds"),
+            id("demo.CalcTest", "bare(int)[1]"),
+            id("demo.CalcTest", "plain"),
+            id("demo.CalcTest$Inner", "inside"),
+        ]
+    );
+    let all: Vec<&Case> = found.iter().collect();
+    assert_eq!(
+        rerun(Tool::Maven, "mvn test", &all).unwrap(),
+        "mvn test -Dtest=CalcTest#adds+bare+plain,CalcTest*Inner#inside -Dsurefire.failIfNoSpecifiedTests=false"
+    );
+    std::fs::remove_dir_all(&root).unwrap();
+}

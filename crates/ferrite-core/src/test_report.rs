@@ -686,7 +686,67 @@ pub fn read_report(path: &Path) -> Result<Vec<Case>, String> {
         case.integration = integration;
         case.task.clone_from(&task);
     }
+    undo_display_names(path, gradle_task(path).is_some(), &mut cases);
     Ok(cases)
+}
+
+/// JUnit 5 `@DisplayName`의 표시 이름을 소스에서 찾아 진짜 이름으로 되돌린다. 그래야 다시 돌리기·디버그가 그
+/// 테스트를 거른다. Gradle은 테스트 이름에(`두 수를 더한다` → `adds()`), Surefire는 클래스 이름에(`계산기` →
+/// `demo.CalcTest`, `@Nested`는 `demo.CalcTest$Inner`) 표시 이름을 적는다. 보고서 파일 이름
+/// (`TEST-demo.CalcTest.xml`)의 클래스로 소스를 찾는다. 못 찾은 것(매개변수 실행의 `[1] 5`)은 그대로 둔다.
+fn undo_display_names(path: &Path, gradle: bool, cases: &mut [Case]) {
+    let Some(class) = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .and_then(|n| n.strip_prefix("TEST-")?.strip_suffix(".xml"))
+    else {
+        return;
+    };
+    let top = class.split('$').next().unwrap_or(class);
+    // 이 보고서의 클래스나 그 안쪽 클래스.
+    let in_report = |suite: &str| suite == top || suite.starts_with(&format!("{top}$"));
+    let name_display = |case: &Case| gradle && !case.name.is_empty() && !case.name.ends_with(')');
+    let is_display = |case: &Case| !in_report(&case.suite) || name_display(case);
+    if !cases.iter().any(is_display) {
+        return;
+    }
+    let Some(project) = path
+        .ancestors()
+        .find(|a| a.file_name().is_some_and(|n| n == "build" || n == "target"))
+        .and_then(Path::parent)
+    else {
+        return;
+    };
+    let simple = top.rsplit('.').next().unwrap_or(top);
+    let Some(text) = ["java", "kt"].iter().find_map(|ext| {
+        let frame = Frame {
+            text: String::new(),
+            file: format!("{simple}.{ext}"),
+            line: 0,
+            class: Some(top.to_owned()),
+        };
+        std::fs::read_to_string(resolve(project, project, &frame)?).ok()
+    }) else {
+        return;
+    };
+    let names = crate::test_at::jvm_display_names(&text);
+    for case in cases.iter_mut().filter(|c| is_display(c)) {
+        // 표시 이름이 겹치면 이 보고서의 클래스의 것을 고른다.
+        if !in_report(&case.suite)
+            && let Some((_, at)) = names
+                .iter()
+                .find(|(d, at)| *d == case.suite && at.name.is_empty() && in_report(&at.suite))
+        {
+            case.suite.clone_from(&at.suite);
+        }
+        if name_display(case)
+            && let Some((_, at)) = names
+                .iter()
+                .find(|(d, at)| *d == case.name && at.suite == case.suite && !at.name.is_empty())
+        {
+            case.name = format!("{}()", at.name);
+        }
+    }
 }
 
 /// Maven 보고서(`<모듈>/target/surefire-reports/TEST-….xml`, `failsafe-reports`)를 남긴 모듈의 이름: 그 pom의
@@ -1085,9 +1145,10 @@ pub fn rerun(tool: Tool, command: &str, failed: &[&Case]) -> Option<String> {
     // 이름 테스트가 돈다). 명령은 셸로 띄우고 sh는 큰따옴표 안의 `$Inner`를 변수로 풀므로 `*`로 적는다(Maven
     // Surefire 3.5.4·Gradle 9.2가 `CalcTest*Inner`로 안쪽 클래스만 골랐다).
     let nested = |class: &str| class.replace('$', "*");
-    // Gradle `--tests`의 거르기. 이름이 빈 것(묶음 전체, `run_only`)은 클래스만.
+    // Gradle `--tests`의 거르기. 이름이 빈 것(묶음 전체, `run_only`)은 클래스만. 메서드를 모르는 이름(Gradle이
+    // 표시 이름만 적는 매개변수 실행 `[1] 5`)도 클래스째 돌린다.
     let gradle_test = |case: &Case| {
-        if case.name.is_empty() {
+        if method(&case.name).is_empty() {
             nested(&case.suite)
         } else {
             format!("{}.{}", nested(&case.suite), method(&case.name))
