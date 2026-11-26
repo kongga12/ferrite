@@ -1350,11 +1350,12 @@ pub fn frames(case: &Case) -> Vec<Frame> {
 }
 
 /// 실패한 테스트에서 먼저 보일 프레임: Java는 테스트 클래스의 첫 프레임, pytest는 마지막 프레임(테스트
-/// 줄), 그 밖은 첫 프레임.
+/// 줄), 그 밖은 첫 프레임. 프레임의 클래스는 바깥 클래스라 `@Nested` 묶음(`CalcTest$Inner`)도 바깥으로 견준다.
 pub fn test_frame(case: &Case, frames: &[Frame]) -> Option<usize> {
+    let outer = case.suite.split('$').next().unwrap_or(&case.suite);
     if let Some(i) = frames
         .iter()
-        .position(|f| f.class.as_deref() == Some(case.suite.as_str()))
+        .position(|f| f.class.as_deref() == Some(outer))
     {
         return Some(i);
     }

@@ -606,6 +606,14 @@ fn kotlin_scala_스택의_테스트_줄을_찾는다() {
     );
     assert_eq!(test_frame(&kotlin, &found), Some(1));
     assert_eq!((found[2].file.as_str(), found[2].line), ("CalcTest.kt", 14));
+    // `@Nested` 안쪽 클래스의 묶음(`CalcTest$Inner`)도 바깥 클래스의 프레임으로 간다.
+    let nested = failed(
+        "demo.CalcTest$Inner",
+        "org.opentest4j.AssertionFailedError: expected: <5> but was: <3>\n\tat org.junit.jupiter.api.AssertionUtils.fail(AssertionUtils.java:55)\n\tat demo.CalcTest$Inner.inside(CalcTest.java:29)\n",
+    );
+    let found = frames(&nested);
+    assert_eq!(test_frame(&nested, &found), Some(1));
+    assert_eq!(found[1].line, 29);
     // Scala 람다는 같은 클래스의 `$anonfun$` 메서드다.
     let scala = failed(
         "com.example.board.CalcSuite",
