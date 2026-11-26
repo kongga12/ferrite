@@ -2601,6 +2601,16 @@
   - 검증: 로컬(JDK 21, Gradle 9.2, `sh`)에서 위 명령이 5005에서 기다리고 소켓 jdb(`-connect com.sun.jdi.SocketAttach`, Windows jdb의 `-attach`는 공유 메모리라 붙지 못한다)로 붙어 `add`의 값을 읽고 `adds()`만 돌았다. java-debug로 붙기는 CI(3개 OS)에서 본다(로컬에 jdt.ls가 없다).
     - jdt.ls가 Gradle 프로젝트를 읽으며 띄운 Tooling API 데몬은 jdt.ls가 끝나도 남는다. Windows CI에서는 그 데몬이 물려받은 출력 파이프를 쥐고 있었다. 그래서 19개 시험이 다 통과한 뒤에도 `cargo test | tee`가 끝나지 않아 2시간 멈췄다. 그 데몬은 PATH의 Gradle(9.2)이 아닌 9.9.1이어서 `gradle --stop`으로는 꺼지지 않았다. 시험은 시작 전과 끝의 `jps -l`을 견주어 새로 뜬 GradleDaemon을 끈다(깨져도 Drop에서). `adapters` 작업 한도는 15분으로 줄였다.
   - 확인하지 못한 것: 앱 화면, wrapper가 있는 프로젝트를 jdt.ls가 읽기.
+- [x] @DisplayName 테스트 다시 돌리기(2026-11-26) — 작음
+  - 까닭: JUnit 5 `@DisplayName`을 붙이면 보고서가 표시 이름을 적어 결과의 실패만 다시·이 테스트 디버그가 그 테스트를 고르지 못했다(Gradle은 "No tests found for given includes"로 빌드 실패).
+    - Gradle 9.2: 테스트 이름에 표시 이름(`두 수를 더한다`)을 적는다. 매개변수 테스트는 `@DisplayName`이 없어도 실행의 표시 이름(`[1] 5`)만 적어 메서드 이름이 없다. `classname`은 그대로다. XML의 이름을 고르는 설정은 없다(`JUnitXmlReport`는 `outputPerTestCase`·`mergeReruns`·출력 포함만).
+    - Surefire 3.5.4: 메서드 이름은 그대로, `classname`에 클래스의 표시 이름(`계산기`, `@Nested`는 `안쪽`)을 적는다.
+  - 고침
+    - `test_at::jvm_display_names`: 파일의 `@DisplayName("…")`마다 그것이 붙은 테스트나 클래스(커서의 테스트와 같은 길).
+    - `read_report`: 보고서 파일 이름(`TEST-demo.CalcTest.xml`)의 클래스로 소스를 찾아, 표시 이름을 진짜 이름으로 되돌린다(Gradle `adds()`, Surefire `demo.CalcTest`·`demo.CalcTest$Inner`). 결과 트리도 진짜 이름을 보인다. 소스에서 못 찾은 것(`[1] 5`)은 그대로 둔다.
+    - `rerun`(Gradle): 메서드를 모르는 이름(`[1] 5`)은 클래스째 거른다(전에는 `demo.CalcTest.`가 됐다). Maven은 전부터 클래스째였다.
+  - 검증: 단위 시험(표시 이름·따옴표·한 줄 어노테이션·`@Nested`, 실제 보고서를 줄인 Gradle·Surefire 보고서와 다시 돌리기 명령). 실제 도구(로컬 Windows cmd, JDK 21, Maven 3.10·Surefire 3.5.4, Gradle 9.2): `test_tools`의 `maven_표시_이름의_실패만_다시`·`gradle_표시_이름의_실패만_다시`에서 결과가 진짜 이름이고 실패만 다시가 표시 이름 붙은 두 실패만 돌렸다.
+  - 확인하지 못한 것: 앱 화면, `@DisplayNameGeneration`(이름 생성기, 소스에 글이 없다), 매개변수 실행 하나만 다시(Gradle 보고서에 메서드가 없어 클래스째 돈다).
 
 - 살폈지만 넣지 않은 것: 임베디드(MCU 플래시·시리얼 모니터·장비 설정 파일), 프레임워크별 지원(React·Vue·Angular 등, JS·TS 언어 서버로 기본은 된다), 린터 개별 연동(언어 서버나 저장 시 작업으로 된다), 원격 개발·컨테이너·SFTP 배포, 로컬 AI 완성 모델, 계정 기반 설정 동기화. egov 개발과 거리가 멀거나 크기에 비해 쓰임이 적다.
 

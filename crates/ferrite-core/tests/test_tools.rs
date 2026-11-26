@@ -3786,3 +3786,114 @@ fn 전이_의존의_log4shell을_온라인과_오프라인_db가_찾는다() {
     assert_eq!(again, offline, "색인으로 읽은 결과");
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[test]
+#[ignore = "Maven으로 @DisplayName을 붙인 JUnit 5 테스트를 돌린다(의존성을 받는다). Java 17 이상과 mvn이 필요하다"]
+fn maven_표시_이름의_실패만_다시() {
+    if require("mvn --version") {
+        표시_이름의_실패만_다시(Tool::Maven);
+    }
+}
+
+#[test]
+#[ignore = "Gradle로 @DisplayName을 붙인 JUnit 5 테스트를 돌린다(의존성을 받는다). Java 17 이상과 gradle이 필요하다"]
+fn gradle_표시_이름의_실패만_다시() {
+    if require("gradle --version") {
+        표시_이름의_실패만_다시(Tool::Gradle);
+    }
+}
+
+/// 보고서는 표시 이름을 적는다(Gradle은 테스트 이름에, Surefire는 클래스 이름에). 결과를 읽으면 소스의
+/// `@DisplayName`으로 진짜 이름을 찾아, 실패만 다시가 그 테스트만 돌린다.
+fn 표시_이름의_실패만_다시(tool: Tool) {
+    let root = temp_dir(&format!("display-name-{tool:?}").to_lowercase());
+    let files = [
+        (
+            "pom.xml",
+            "<project xmlns=\"http://maven.apache.org/POM/4.0.0\"><modelVersion>4.0.0</modelVersion>\
+             <groupId>demo</groupId><artifactId>calc</artifactId><version>1.0</version>\
+             <properties><maven.compiler.release>17</maven.compiler.release>\
+             <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding></properties>\
+             <dependencies><dependency><groupId>org.junit.jupiter</groupId><artifactId>junit-jupiter</artifactId>\
+             <version>5.12.2</version><scope>test</scope></dependency></dependencies>\
+             <build><plugins><plugin><artifactId>maven-surefire-plugin</artifactId><version>3.5.4</version>\
+             </plugin></plugins></build></project>\n",
+        ),
+        ("settings.gradle", "rootProject.name = 'calc'\n"),
+        ("gradle.properties", "org.gradle.daemon=false\n"),
+        (
+            "build.gradle",
+            "plugins { id 'java' }\nrepositories { mavenCentral() }\ndependencies {\n    \
+             testImplementation platform('org.junit:junit-bom:5.12.2')\n    \
+             testImplementation 'org.junit.jupiter:junit-jupiter'\n    \
+             testRuntimeOnly 'org.junit.platform:junit-platform-launcher'\n}\n\
+             tasks.withType(JavaCompile).configureEach { options.release = 17; options.encoding = 'UTF-8' }\n\
+             test { useJUnitPlatform() }\n",
+        ),
+        (
+            "src/test/java/demo/CalcTest.java",
+            "package demo;\n\nimport static org.junit.jupiter.api.Assertions.assertEquals;\n\n\
+             import org.junit.jupiter.api.DisplayName;\nimport org.junit.jupiter.api.Nested;\n\
+             import org.junit.jupiter.api.Test;\n\n@DisplayName(\"계산기\")\nclass CalcTest {\n    \
+             @Test\n    @DisplayName(\"두 수를 더한다\")\n    void adds() {\n        assertEquals(4, 1 + 2);\n    }\n\n    \
+             @Test\n    @DisplayName(\"통과한다\")\n    void passes() {\n        assertEquals(3, 1 + 2);\n    }\n\n    \
+             @Nested\n    @DisplayName(\"안쪽\")\n    class Inner {\n        @Test\n        @DisplayName(\"안에서 더한다\")\n        \
+             void inside() {\n            assertEquals(5, 1 + 2);\n        }\n    }\n}\n",
+        ),
+    ];
+    for (file, text) in files {
+        let path = root.join(file);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+    let command = match tool {
+        Tool::Maven => "mvn -B test",
+        _ => "gradle test",
+    };
+    let ids = |cases: &[Case]| {
+        let mut found: Vec<(String, String, Outcome)> = cases
+            .iter()
+            .map(|c| {
+                (
+                    c.suite.clone(),
+                    c.name.trim_end_matches("()").to_owned(),
+                    c.outcome,
+                )
+            })
+            .collect();
+        found.sort_by(|a, b| (&a.0, &a.1).cmp(&(&b.0, &b.1)));
+        found
+    };
+    let id = |suite: &str, name: &str, outcome| (suite.to_owned(), name.to_owned(), outcome);
+    let since = SystemTime::now();
+    let (ok, output) = run(&root, &test_report::with_report(tool, command, &root));
+    assert!(!ok || tool == Tool::Maven, "{output}");
+    let cases = junit(tool, &root, &root, since);
+    assert_eq!(
+        ids(&cases),
+        [
+            id("demo.CalcTest", "adds", Outcome::Failed),
+            id("demo.CalcTest", "passes", Outcome::Passed),
+            id("demo.CalcTest$Inner", "inside", Outcome::Failed),
+        ],
+        "{output}"
+    );
+
+    let reports = match tool {
+        Tool::Maven => "target/surefire-reports",
+        _ => "build/test-results",
+    };
+    std::fs::remove_dir_all(root.join(reports)).unwrap();
+    let since = SystemTime::now();
+    let line = test_report::rerun(tool, command, &failed(&cases)).unwrap();
+    let (_, output) = run(&root, &test_report::with_report(tool, &line, &root));
+    assert_eq!(
+        ids(&junit(tool, &root, &root, since)),
+        [
+            id("demo.CalcTest", "adds", Outcome::Failed),
+            id("demo.CalcTest$Inner", "inside", Outcome::Failed),
+        ],
+        "{line}\n{output}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
