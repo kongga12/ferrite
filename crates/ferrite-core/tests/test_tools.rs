@@ -1136,6 +1136,8 @@ fn maven_에디터_커서가_든_테스트만_돌린다() {
         integration: false,
         task: None,
         previous: false,
+        label: None,
+        suite_label: None,
     };
     let report = root.join("reports");
     let line = test_report::run_only(Tool::Maven, "mvn -B -q test", &[&case], &root).unwrap();
@@ -2370,6 +2372,8 @@ fn gradle_에디터_커서의_테스트는_그_프로젝트의_테스트_작업�
         integration: false,
         task: test_report::gradle_test_task(&file),
         previous: false,
+        label: None,
+        suite_label: None,
     };
     assert_eq!(case.task.as_deref(), Some(":app:test"));
     // `check`는 `--tests`를 받지 못한다. 작업을 알아 그 작업에만 붙인다(lib은 돌지 않는다).
@@ -3164,6 +3168,8 @@ fn pytest_에디터_커서가_든_테스트만_돌린다() {
         integration: false,
         task: None,
         previous: false,
+        label: None,
+        suite_label: None,
     };
     let report = root.join("reports");
     std::fs::create_dir_all(&report).unwrap();
@@ -3877,6 +3883,26 @@ fn 표시_이름의_실패만_다시(tool: Tool) {
             id("demo.CalcTest$Inner", "inside", Outcome::Failed),
         ],
         "{output}"
+    );
+    // 결과 트리에는 도구와 상관없이 소스의 표시 이름을 보인다.
+    let mut labels: Vec<(String, String)> = cases
+        .iter()
+        .map(|c| {
+            (
+                c.suite_label.clone().unwrap_or_default(),
+                c.label.clone().unwrap_or_default(),
+            )
+        })
+        .collect();
+    labels.sort();
+    let label = |s: &str, n: &str| (s.to_owned(), n.to_owned());
+    assert_eq!(
+        labels,
+        [
+            label("계산기", "두 수를 더한다"),
+            label("계산기", "통과한다"),
+            label("안쪽", "안에서 더한다"),
+        ]
     );
     // 실패의 스택에서 먼저 갈 줄은 그 테스트의 단언 줄이다(`@Nested` 안쪽 클래스도).
     let source = root.join("src/test/java/demo/CalcTest.java");

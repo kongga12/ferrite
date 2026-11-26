@@ -772,6 +772,8 @@ impl TestPanel {
                 .then(|| test_report::gradle_test_task(path))
                 .flatten(),
             previous: false,
+            label: None,
+            suite_label: None,
         };
         self.last = Some((config, tool, dir));
         self.run_only(ctx, root, vec![case], debug);
@@ -837,6 +839,11 @@ impl TestPanel {
                 .iter()
                 .filter(|&&i| self.cases[i].outcome == Outcome::Failed)
                 .count();
+            // 클래스의 `@DisplayName`이 있으면 그것을 보인다(묶음은 진짜 이름으로 가른다).
+            let suite = indices
+                .iter()
+                .find_map(|&i| self.cases[i].suite_label.as_deref())
+                .unwrap_or(suite);
             let title = if failed > 0 {
                 egui::RichText::new(format!("{suite} (실패 {failed}/{})", indices.len()))
                     .color(ui.visuals().error_fg_color)
@@ -858,7 +865,7 @@ impl TestPanel {
                                 .unwrap_or_default();
                             let row = ui.selectable_label(
                                 self.selected == Some(i),
-                                format!("{}{}{time}", case.name, runner_tag(case)),
+                                format!("{}{}{time}", shown_name(case), runner_tag(case)),
                             );
                             if row.clicked() {
                                 picked = Some(i);
@@ -915,8 +922,13 @@ impl TestPanel {
 
     fn detail_ui(&mut self, ui: &mut egui::Ui, root: &Path) -> Option<TestAction> {
         let case = self.selected.and_then(|i| self.cases.get(i))?.clone();
-        ui.strong(format!("{}{}", case.name, runner_tag(&case)));
-        ui.weak(&case.suite);
+        ui.strong(format!("{}{}", shown_name(&case), runner_tag(&case)));
+        // 표시 이름을 보이면 진짜 이름(거르는 이름)도 적는다.
+        match (&case.label, &case.suite_label) {
+            (None, None) => ui.weak(&case.suite),
+            (Some(_), _) => ui.weak(format!("{}.{}", case.suite, case.name)),
+            (None, Some(label)) => ui.weak(format!("{label} · {}", case.suite)),
+        };
         ui.horizontal(|ui| {
             let (word, color) = outcome_label(ui, case.outcome);
             ui.colored_label(color, word);
@@ -1049,6 +1061,11 @@ fn push_limited(output: &mut String, text: &str) {
     }
 }
 
+/// 결과 트리에 보일 테스트 이름: `@DisplayName`이 있으면 그것.
+fn shown_name(case: &Case) -> &str {
+    case.label.as_deref().unwrap_or(&case.name)
+}
+
 /// 결과 트리에서 테스트 이름 뒤에 붙이는 표시: Maven 통합 테스트 단계(Failsafe)에서 돈 것, 이번에 돌지 못해
 /// (빌드가 깨짐) 앞 실행의 결과를 남긴 것.
 fn runner_tag(case: &Case) -> String {
@@ -1092,6 +1109,8 @@ mod tests {
             integration,
             task: task.map(str::to_owned),
             previous: false,
+            label: None,
+            suite_label: None,
             seconds: None,
             message: None,
             detail: String::new(),

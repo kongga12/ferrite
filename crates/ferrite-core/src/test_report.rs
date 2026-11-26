@@ -81,6 +81,11 @@ pub struct Case {
     /// 이번 실행에서 돌지 못해(그 모듈·작업의 빌드가 깨짐) 앞 실행의 결과를 남긴 것(`apply_rerun`,
     /// `apply_whole_rerun`). 보고서에서 읽은 결과는 거짓이다. 같은 테스트인지에는 들지 않는다.
     pub previous: bool,
+    /// 결과 트리에 보일 테스트 이름: 소스의 JUnit 5 `@DisplayName`(매개변수 실행은 `여러 값 [1]`). 거르기는
+    /// `name`으로 한다. 같은 테스트인지에는 들지 않는다.
+    pub label: Option<String>,
+    /// 결과 트리에 보일 묶음 이름: 클래스의 `@DisplayName`.
+    pub suite_label: Option<String>,
 }
 
 impl Case {
@@ -357,6 +362,8 @@ pub fn parse_junit(xml: &str) -> Result<Vec<Case>, String> {
             integration: false,
             task: None,
             previous: false,
+            label: None,
+            suite_label: None,
         });
     }
     Ok(cases)
@@ -419,6 +426,8 @@ pub fn parse_go_json(output: &str) -> Vec<Case> {
                         integration: false,
                         task: None,
                         previous: false,
+                        label: None,
+                        suite_label: None,
                     });
                 }
                 _ => {}
@@ -471,6 +480,8 @@ pub fn parse_go_json(output: &str) -> Vec<Case> {
                     integration: false,
                     task: None,
                     previous: false,
+                    label: None,
+                    suite_label: None,
                 });
             }
             _ => {}
@@ -686,15 +697,19 @@ pub fn read_report(path: &Path) -> Result<Vec<Case>, String> {
         case.integration = integration;
         case.task.clone_from(&task);
     }
-    undo_display_names(path, gradle_task(path).is_some(), &mut cases);
+    display_names(path, gradle_task(path).is_some(), &mut cases);
     Ok(cases)
 }
 
-/// JUnit 5 `@DisplayName`의 표시 이름을 소스에서 찾아 진짜 이름으로 되돌린다. 그래야 다시 돌리기·디버그가 그
-/// 테스트를 거른다. Gradle은 테스트 이름에(`두 수를 더한다` → `adds()`), Surefire는 클래스 이름에(`계산기` →
-/// `demo.CalcTest`, `@Nested`는 `demo.CalcTest$Inner`) 표시 이름을 적는다. 보고서 파일 이름
-/// (`TEST-demo.CalcTest.xml`)의 클래스로 소스를 찾는다. 못 찾은 것(매개변수 실행의 `[1] 5`)은 그대로 둔다.
-fn undo_display_names(path: &Path, gradle: bool, cases: &mut [Case]) {
+/// JUnit 5 `@DisplayName`을 소스에서 찾아 결과에 붙인다.
+/// - 보고서의 표시 이름은 진짜 이름으로 되돌린다. 그래야 다시 돌리기·디버그가 그 테스트를 거른다. Gradle은 테스트
+///   이름에(`두 수를 더한다` → `adds()`), Surefire는 클래스 이름에(`계산기` → `demo.CalcTest`, `@Nested`는
+///   `demo.CalcTest$Inner`) 표시 이름을 적는다. 못 찾은 것(Gradle 매개변수 실행의 `[1] 5`)은 그대로 둔다.
+/// - 결과 트리에 보일 표시 이름(`label`·`suite_label`)은 도구와 상관없이 소스에서 정한다.
+///
+/// 소스는 보고서 파일 이름(`TEST-demo.CalcTest.xml`)의 클래스로 찾는다. 흔한 자리(`src/<소스 세트>/java/<패키지>/`)
+/// 부터 보고, 프로젝트를 뒤지는 것은 보고서에 표시 이름이 보일 때만이다(보고서마다 뒤지면 느리다).
+fn display_names(path: &Path, gradle: bool, cases: &mut [Case]) {
     let Some(class) = path
         .file_name()
         .and_then(|n| n.to_str())
@@ -707,9 +722,6 @@ fn undo_display_names(path: &Path, gradle: bool, cases: &mut [Case]) {
     let in_report = |suite: &str| suite == top || suite.starts_with(&format!("{top}$"));
     let name_display = |case: &Case| gradle && !case.name.is_empty() && !case.name.ends_with(')');
     let is_display = |case: &Case| !in_report(&case.suite) || name_display(case);
-    if !cases.iter().any(is_display) {
-        return;
-    }
     let Some(project) = path
         .ancestors()
         .find(|a| a.file_name().is_some_and(|n| n == "build" || n == "target"))
@@ -717,20 +729,42 @@ fn undo_display_names(path: &Path, gradle: bool, cases: &mut [Case]) {
     else {
         return;
     };
-    let simple = top.rsplit('.').next().unwrap_or(top);
-    let Some(text) = ["java", "kt"].iter().find_map(|ext| {
-        let frame = Frame {
-            text: String::new(),
-            file: format!("{simple}.{ext}"),
-            line: 0,
-            class: Some(top.to_owned()),
-        };
-        std::fs::read_to_string(resolve(project, project, &frame)?).ok()
-    }) else {
+    let (package, simple) = top.rsplit_once('.').unwrap_or(("", top));
+    let package = package.replace('.', "/");
+    let usual = std::fs::read_dir(project.join("src"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .find_map(|set| {
+            [("java", "java"), ("kotlin", "kt")]
+                .iter()
+                .find_map(|(dir, ext)| {
+                    let file = set
+                        .path()
+                        .join(dir)
+                        .join(&package)
+                        .join(format!("{simple}.{ext}"));
+                    std::fs::read_to_string(file).ok()
+                })
+        });
+    let text = usual.or_else(|| {
+        cases.iter().any(is_display).then(|| {
+            ["java", "kt"].iter().find_map(|ext| {
+                let frame = Frame {
+                    text: String::new(),
+                    file: format!("{simple}.{ext}"),
+                    line: 0,
+                    class: Some(top.to_owned()),
+                };
+                std::fs::read_to_string(resolve(project, project, &frame)?).ok()
+            })
+        })?
+    });
+    let Some(text) = text.filter(|t| t.contains("DisplayName")) else {
         return;
     };
     let names = crate::test_at::jvm_display_names(&text);
-    for case in cases.iter_mut().filter(|c| is_display(c)) {
+    for case in cases.iter_mut() {
         // 표시 이름이 겹치면 이 보고서의 클래스의 것을 고른다.
         if !in_report(&case.suite)
             && let Some((_, at)) = names
@@ -746,6 +780,19 @@ fn undo_display_names(path: &Path, gradle: bool, cases: &mut [Case]) {
         {
             case.name = format!("{}()", at.name);
         }
+        case.suite_label = names
+            .iter()
+            .find(|(_, at)| at.name.is_empty() && at.suite == case.suite)
+            .map(|(d, _)| d.clone());
+        // 매개변수 실행(Surefire `many(int)[1]`)은 표시 이름 뒤에 차례를 붙여 가른다.
+        let method = case.name.split(['(', '[']).next().unwrap_or_default();
+        case.label = names
+            .iter()
+            .find(|(_, at)| !method.is_empty() && at.name == method && at.suite == case.suite)
+            .map(|(d, _)| match case.name.find('[') {
+                Some(i) => format!("{d} {}", &case.name[i..]),
+                None => d.clone(),
+            });
     }
 }
 
