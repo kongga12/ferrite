@@ -4337,3 +4337,165 @@ fn gradle_junit4_enclosed_안쪽_클래스만_고른다() {
     );
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// JUnit 4 `@RunWith(Parameterized.class)`: 실행마다 이름이 `adds[1: 2+2]`(이름 꼴 `{index}: {0}+{1}`)다. 이름의
+/// `+`는 Surefire가 메서드 사이로 가르는 글자다.
+const PARAMETERIZED: &str = "package com.example.board;\n\nimport static org.junit.Assert.assertEquals;\nimport static org.junit.Assert.assertTrue;\n\nimport java.util.Arrays;\nimport java.util.Collection;\nimport org.junit.Test;\nimport org.junit.runner.RunWith;\nimport org.junit.runners.Parameterized;\nimport org.junit.runners.Parameterized.Parameters;\n\n@RunWith(Parameterized.class)\npublic class CalcTest {\n    @Parameters(name = \"{index}: {0}+{1}\")\n    public static Collection<Object[]> data() {\n        return Arrays.asList(new Object[][] {{1, 2, 3}, {2, 2, 5}});\n    }\n\n    private final int a;\n    private final int b;\n    private final int sum;\n\n    public CalcTest(int a, int b, int sum) {\n        this.a = a;\n        this.b = b;\n        this.sum = sum;\n    }\n\n    @Test\n    public void adds() {\n        assertEquals(sum, a + b);\n    }\n\n    @Test\n    public void positive() {\n        assertTrue(a > 0);\n    }\n}\n";
+
+/// `PARAMETERIZED`를 `java`에 두고 `tool`로 돌려, 실패 줄·실패만 다시(그 실행만)·결과의 한 실행만·커서의 테스트
+/// (그 메서드의 실행 모두)를 본다. 예전에는 실행 이름을 `adds`로 줄여 두 도구 모두 아무것도 고르지 못했다.
+fn junit4_parameterized_runs(tool: Tool, root: &Path, java: &Path, report: &Path) {
+    std::fs::create_dir_all(java).unwrap();
+    let file = java.join("CalcTest.java");
+    std::fs::write(&file, PARAMETERIZED).unwrap();
+    let command = match tool {
+        Tool::Maven => "mvn -B -q test",
+        _ => "gradle test",
+    };
+    // 보고서는 고친 시각으로 고르고 2초 앞당겨 보므로(FAT) 앞 실행의 보고서가 섞이지 않게 3초 쉬고 돌린다.
+    let run_tests = |line: &str| {
+        std::thread::sleep(std::time::Duration::from_secs(3));
+        let since = SystemTime::now();
+        run(root, &test_report::with_report(tool, line, report));
+        junit(tool, root, report, since)
+    };
+    let owned = |found: &[(&str, Outcome)]| -> Vec<(String, Outcome)> {
+        found.iter().map(|(n, o)| ((*n).to_owned(), *o)).collect()
+    };
+    let cases = run_tests(command);
+    assert_eq!(
+        outcomes(&cases),
+        owned(&[
+            ("adds[0: 1+2]", Outcome::Passed),
+            ("adds[1: 2+2]", Outcome::Failed),
+            ("positive[0: 1+2]", Outcome::Passed),
+            ("positive[1: 2+2]", Outcome::Passed),
+        ])
+    );
+    let wrong = failed(&cases)[0];
+    let line_of = |text: &str| {
+        PARAMETERIZED
+            .lines()
+            .position(|l| l.contains(text))
+            .unwrap()
+    };
+    assert_eq!(
+        test_line(root, root, wrong),
+        (file.clone(), line_of("assertEquals(sum") as u32 + 1)
+    );
+    let line = test_report::rerun(tool, command, &[wrong]).unwrap();
+    assert_eq!(
+        outcomes(&run_tests(&line)),
+        owned(&[("adds[1: 2+2]", Outcome::Failed)]),
+        "실패만 다시({line})"
+    );
+    // 결과에서 고른 통과한 실행 하나만.
+    let first = cases.iter().find(|c| c.name == "positive[0: 1+2]").unwrap();
+    let line = test_report::run_only(tool, command, &[first], root).unwrap();
+    assert_eq!(
+        outcomes(&run_tests(&line)),
+        owned(&[("positive[0: 1+2]", Outcome::Passed)]),
+        "고른 실행만({line})"
+    );
+    // 커서가 `adds`의 몸 안이면 그 메서드의 실행 모두.
+    let at =
+        ferrite_core::test_at::test_at(&file, PARAMETERIZED, line_of("assertEquals(sum"), root)
+            .expect("커서의 테스트");
+    assert_eq!(
+        (at.suite.as_str(), at.name.as_str()),
+        ("com.example.board.CalcTest", "adds[*]")
+    );
+    let case = Case {
+        suite: at.suite,
+        name: at.name,
+        outcome: Outcome::Passed,
+        seconds: None,
+        message: None,
+        detail: String::new(),
+        file: None,
+        line: None,
+        integration: false,
+        task: None,
+        previous: false,
+        label: None,
+        suite_label: None,
+    };
+    let line = test_report::run_only(tool, command, &[&case], root).unwrap();
+    assert_eq!(
+        outcomes(&run_tests(&line)),
+        owned(&[
+            ("adds[0: 1+2]", Outcome::Passed),
+            ("adds[1: 2+2]", Outcome::Failed),
+        ]),
+        "커서의 테스트({line})"
+    );
+}
+
+#[test]
+#[ignore = "Maven으로 JUnit 4 Parameterized 테스트를 돌린다(의존성을 받는다). Java 17 이상과 mvn이 필요하다"]
+fn maven_junit4_parameterized_실행을_그_이름으로_고른다() {
+    if !require("mvn -v") {
+        return;
+    }
+    let root = temp_dir("maven-junit4-parameterized");
+    std::fs::write(
+        root.join("pom.xml"),
+        r#"<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>com.example</groupId>
+  <artifactId>board</artifactId>
+  <version>1.0</version>
+  <properties>
+    <maven.compiler.release>17</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+  </properties>
+  <dependencies>
+    <dependency>
+      <groupId>junit</groupId>
+      <artifactId>junit</artifactId>
+      <version>4.13.2</version>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+  <build>
+    <plugins>
+      <plugin>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <version>3.5.4</version>
+      </plugin>
+    </plugins>
+  </build>
+</project>
+"#,
+    )
+    .unwrap();
+    junit4_parameterized_runs(
+        Tool::Maven,
+        &root,
+        &root.join("src/test/java/com/example/board"),
+        &root.join("reports"),
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+#[ignore = "Gradle로 JUnit 4 Parameterized 테스트를 돌린다(의존성을 받는다). Java 17 이상과 gradle이 필요하다"]
+fn gradle_junit4_parameterized_실행을_그_이름으로_고른다() {
+    if !require("gradle --version") {
+        return;
+    }
+    let root = gradle_project(
+        "gradle-junit4-parameterized",
+        &[(
+            "app",
+            "plugins {\n    java\n}\n\nrepositories {\n    mavenCentral()\n}\n\ndependencies {\n    testImplementation(\"junit:junit:4.13.2\")\n}\n",
+        )],
+    );
+    junit4_parameterized_runs(
+        Tool::Gradle,
+        &root,
+        &root.join("app/src/test/java/com/example/board"),
+        &root,
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}

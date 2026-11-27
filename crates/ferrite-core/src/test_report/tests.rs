@@ -1822,8 +1822,41 @@ fn 보고서_이름에서_메서드_이름만_남긴다() {
         ("adds (big) numbers", "adds (big) numbers"),
         ("adds (big) numbers()", "adds (big) numbers"),
         ("many (big)(int)[1]", "many (big)"),
+        // JUnit 4 `Parameterized`의 실행은 그 이름으로, 커서의 테스트(`adds[*]`)는 그 메서드의 실행 모두로 고른다.
+        ("adds[1]", "adds[1]"),
+        ("adds[1: 2+2]", "adds[1: 2+2]"),
+        ("adds[*]", "adds[*]"),
         ("[1] 5", ""),
     ] {
         assert_eq!(method_name(name), method, "{name}");
     }
+}
+
+/// JUnit 4 `Parameterized`의 실행(`adds[1: 2+2]`)은 메서드 이름(`adds`)으로는 두 도구 모두 고르지 못해 그 이름째
+/// 거른다. Surefire가 가르는 `+`는 한 글자 `?`로 적는다.
+#[test]
+fn junit4_매개변수_실행은_그_이름으로_다시_돌린다() {
+    let case = Case {
+        suite: "com.example.board.CalcTest".into(),
+        name: "adds[1: 2+2]".into(),
+        outcome: Outcome::Failed,
+        seconds: None,
+        message: None,
+        detail: String::new(),
+        file: None,
+        line: None,
+        integration: false,
+        task: Some(":app:test".into()),
+        previous: false,
+        label: None,
+        suite_label: None,
+    };
+    assert_eq!(
+        rerun(Tool::Maven, "mvn test", &[&case]).unwrap(),
+        "mvn test \"-Dtest=CalcTest#adds[1: 2?2]\" -Dsurefire.failIfNoSpecifiedTests=false"
+    );
+    assert_eq!(
+        rerun(Tool::Gradle, "gradle test", &[&case]).unwrap(),
+        "gradle :app:test --tests \"com.example.board.CalcTest.adds[1: 2+2]\""
+    );
 }

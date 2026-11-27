@@ -2673,7 +2673,15 @@
     - 실패만 다시가 둘 다, 한 안쪽 클래스의 것만이면 그것만 돌린다.
     - 커서의 테스트가 메서드 몸 안이면 그것만, 안쪽 클래스 줄이면 그 클래스 전체만 돌린다.
   - 검증: 실제 도구(로컬 Windows cmd, JDK 21, JUnit 4.13.2): Maven 3.10·Surefire 3.5.4, Gradle 9.2 모두 통과. 코드는 고치지 않았다(`@Nested`의 길이 그대로 맞았다). Surefire는 전체 실행의 보고서를 바깥 클래스 파일(`TEST-…CalcTest.xml`)에, 거른 실행은 안쪽 클래스 파일(`TEST-…CalcTest$Adding.xml`)에 적지만 테스트마다 안쪽 클래스를 적어 같게 읽는다. Gradle은 안쪽 클래스마다 파일을 적고 두 번 돌리지 않는다.
-  - 확인하지 못한 것: 실제 앱 창, Enclosed 안의 매개변수 실행(`Parameterized`).
+  - 확인하지 못한 것: 실제 앱 창, Enclosed 안의 매개변수 실행(`Parameterized`. 뒤에 백로그 "JUnit 4 Parameterized"(2026-11-27)에서 단위 시험으로 보았다).
+- [x] JUnit 4 Parameterized(2026-11-27) — 작음
+  - 까닭: `@RunWith(Parameterized.class)`의 실행은 보고서에 `adds[1]`(이름 꼴을 주면 `adds[1: 2+2]`)로 남는다. 실패만 다시·결과에서 고른 것만이 이를 `adds`로 줄였는데, Surefire 3.5.4·Gradle 9.2 모두 `adds`로는 아무것도 고르지 않았다(Gradle은 "No tests found"). 커서의 테스트도 같은 `adds`라 아무것도 돌지 않았다.
+  - 고침
+    - `test_report::method_name`: 매개변수 실행의 차례는 목록 바로 뒤(Surefire JUnit 5 `adds(int)[1]`)나 바로 앞(TestNG `adds[1](2, 2, 5)`)일 때만 뗀다. 목록 없는 차례(JUnit 4 `adds[1: 2+2]`)는 그 이름째 거른다. Maven은 이름의 `+`를 예전처럼 `?`로 적는다(`"-Dtest=CalcTest#adds[1: 2?2]"`). Gradle은 그대로다(`--tests "…CalcTest.adds[1: 2+2]"`).
+    - `test_at`: 커서를 품은 가장 안쪽 클래스(Enclosed의 안쪽 클래스면 그것)의 선언 줄이나 그 위 어노테이션 줄에 `@RunWith(Parameterized.class)`(Kotlin `::class`)가 있으면, 메서드 이름 뒤에 `[*]`를 붙여 그 메서드의 실행 모두를 고른다(`CalcTest#adds[*]`, `--tests "…CalcTest.adds[*]"`). 보고서와 견주는 `jvm_tests`·`jvm_display_names`는 진짜 이름 그대로다.
+  - 검증: 단위 시험(`method_name`의 이름 꼴, Maven·Gradle 다시 돌리기 명령, Java·Kotlin·Enclosed 안쪽 클래스의 커서). 실제 도구(로컬 Windows cmd, JDK 21, JUnit 4.13.2): `test_tools`의 `maven_·gradle_junit4_parameterized_실행을_그_이름으로_고른다`. Maven 3.10·Surefire 3.5.4와 Gradle 9.2 모두 실패 줄, 실패만 다시(그 실행만), 결과의 한 실행만, 커서의 테스트(그 메서드의 실행 모두)가 맞았다. 기본 이름 꼴(`adds[1]`)과 `adds[*]`도 두 도구에서 손으로 거르기를 보았다. 이름 꼴에 기대는 다른 실제 도구 시험(TestNG·Kotlin·표시 이름·JUnit 5 매개변수)도 다시 통과했다.
+  - 한계: 이름 꼴에 큰따옴표가 든 실행(`{0}`이 `"a b"`인 글)은 셸 인자가 깨진다. JUnitParams 등 다른 매개변수 러너는 알아보지 않는다.
+  - 확인하지 못한 것: 실제 앱 창.
 
 - 살폈지만 넣지 않은 것: 임베디드(MCU 플래시·시리얼 모니터·장비 설정 파일), 프레임워크별 지원(React·Vue·Angular 등, JS·TS 언어 서버로 기본은 된다), 린터 개별 연동(언어 서버나 저장 시 작업으로 된다), 원격 개발·컨테이너·SFTP 배포, 로컬 AI 완성 모델, 계정 기반 설정 동기화. egov 개발과 거리가 멀거나 크기에 비해 쓰임이 적다.
 

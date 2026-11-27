@@ -1477,27 +1477,35 @@ fn wildcard_non_ascii(filter: &str) -> String {
     out
 }
 
-/// 보고서 이름의 메서드 이름: 매개변수 실행의 차례(Surefire `adds(int)[1]`, TestNG `adds[1](2, 2, 5)`)와 끝의
-/// 매개변수 목록(`(int)`, Gradle의 `()`)을 뗀다. Kotlin 백틱 이름에는 괄호가 들 수 있어(`adds (big) numbers`, Gradle은
-/// `adds (big) numbers()`) 끝의 묶음만, 그것도 빈칸 뒤가 아닌 것만 뗀다(Surefire `adds (big)`는 그대로).
-/// 빈칸 없이 괄호로 끝나는 백틱 이름(`` `sum(a)` ``)은 매개변수 목록과 가르지 못한다. Gradle의 매개변수 실행
-/// (`[1] 5`)은 빈 글이다(Kotlin JVM 이름에는 `[`가 들지 못한다).
+/// 보고서 이름에서 다시 돌릴 메서드 이름: 끝의 매개변수 목록(`(int)`, Gradle의 `()`)과 그 앞뒤에 붙은 매개변수
+/// 실행의 차례(Surefire JUnit 5 `adds(int)[1]`, TestNG `adds[1](2, 2, 5)`)를 뗀다. 두 도구 모두 메서드 이름으로 그
+/// 실행들을 고른다. JUnit 4 `Parameterized`의 실행(`adds[1: 2+2]`, 목록이 붙지 않은 차례)은 그 이름 그대로다
+/// (Surefire 3.5.4·Gradle 9.2가 그 이름으로 그 실행만, `adds`로는 아무것도 고르지 않았다).
+/// Kotlin 백틱 이름에는 괄호가 들 수 있어(`adds (big) numbers`, Gradle은 `adds (big) numbers()`) 끝의 묶음만, 그것도
+/// 빈칸 뒤가 아닌 것만 뗀다(Surefire `adds (big)`는 그대로). 빈칸 없이 괄호로 끝나는 백틱 이름(`` `sum(a)` ``)은
+/// 매개변수 목록과 가르지 못한다. Gradle의 JUnit 5 매개변수 실행(`[1] 5`)은 빈 글이다(Kotlin JVM 이름에는 `[`가
+/// 들지 못한다).
 fn method_name(name: &str) -> &str {
-    fn index(name: &str) -> &str {
-        match name.rfind('[') {
-            Some(i) if name.ends_with(']') => &name[..i],
-            _ => name,
-        }
-    }
+    let index = |n: &str| n.rfind('[').filter(|_| n.ends_with(']'));
+    let params = |n: &str| {
+        n.strip_suffix(')')
+            .and_then(|s| s.rfind('('))
+            .filter(|&i| !n[..i].ends_with(char::is_whitespace))
+    };
     if name.starts_with('[') {
         return "";
     }
-    let name = index(name);
-    let name = match name.strip_suffix(')').and_then(|n| n.rfind('(')) {
-        Some(i) if !name[..i].ends_with(char::is_whitespace) => &name[..i],
-        _ => name,
-    };
-    index(name)
+    if let Some(i) = index(name).filter(|&i| name[..i].ends_with(')')) {
+        let name = &name[..i];
+        return params(name).map_or(name, |j| &name[..j]);
+    }
+    match params(name) {
+        Some(j) => {
+            let name = &name[..j];
+            index(name).map_or(name, |i| &name[..i])
+        }
+        None => name,
+    }
 }
 
 /// 실패 스택에서 묶음 클래스(`demo.CalcTest`, 안쪽 클래스는 `demo.CalcTest$Inner`) 그대로인 첫 프레임의 메서드.
