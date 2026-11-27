@@ -823,7 +823,7 @@ fn display_names(path: &Path, gradle: bool, cases: &mut [Case]) {
             .find(|(_, at)| at.name.is_empty() && at.suite == case.suite)
             .map(|(d, _)| d.clone());
         // 매개변수 실행(Surefire `many(int)[1]`)은 표시 이름 뒤에 차례를 붙여 가른다.
-        let method = case.name.split(['(', '[']).next().unwrap_or_default();
+        let method = method_name(&case.name);
         case.label = names
             .iter()
             .find(|(_, at)| !method.is_empty() && at.name == method && at.suite == case.suite)
@@ -1227,7 +1227,7 @@ pub fn rerun(tool: Tool, command: &str, failed: &[&Case]) -> Option<String> {
     }
     // JUnit 5의 매개변수 테스트 이름(`adds(int)[1]`)과 Gradle의 `()`를 뺀다. Gradle은 매개변수 실행을 표시
     // 이름(`[1] 5`)으로만 적으므로, 실패했으면 스택에서 그 묶음 클래스의 메서드를 찾는다. 그래도 모르면 빈 글이다.
-    let method = |case: &Case| match case.name.split(['(', '[']).next().unwrap_or_default() {
+    let method = |case: &Case| match method_name(&case.name) {
         "" if !case.name.is_empty() => stack_method(case).unwrap_or_default().to_owned(),
         name => name.to_owned(),
     };
@@ -1394,9 +1394,10 @@ pub struct Frame {
 
 static JAVA_FRAME: LazyLock<Regex> = LazyLock::new(|| {
     // 모듈·로더 앞붙이(`java.base/`, Gradle의 `app//`)는 건너뛴다. Kotlin의 백틱 이름(`adds numbers`)은
-    // 빈칸이 들고, 그 안의 람다는 클래스 이름(`CalcTest$adds numbers$1`)에도 든다.
+    // 빈칸이 들고, 그 안의 람다는 클래스 이름(`CalcTest$adds numbers$1`)에도 든다. 메서드 이름에는 괄호도 든다
+    // (`adds (big) numbers`).
     Regex::new(
-        r"^\s*at\s+(?:[\w.$@-]*/+)?([^\s()/][^()/]*)\.[^.()/]+\(([^:()]+\.(?:java|kt|groovy|scala)):(\d+)\)",
+        r"^\s*at\s+(?:[\w.$@-]*/+)?([^\s()/][^()/]*)\.[^./]+?\(([^:()]+\.(?:java|kt|groovy|scala)):(\d+)\)",
     )
     .unwrap()
 });
@@ -1476,11 +1477,32 @@ fn wildcard_non_ascii(filter: &str) -> String {
     out
 }
 
+/// 보고서 이름의 메서드 이름: 매개변수 실행의 차례(Surefire `adds(int)[1]`)와 끝의 매개변수 목록(`(int)`,
+/// Gradle의 `()`)을 뗀다. Kotlin 백틱 이름에는 괄호가 들 수 있어(`adds (big) numbers`, Gradle은
+/// `adds (big) numbers()`) 끝의 묶음만, 그것도 빈칸 뒤가 아닌 것만 뗀다(Surefire `adds (big)`는 그대로).
+/// 빈칸 없이 괄호로 끝나는 백틱 이름(`` `sum(a)` ``)은 매개변수 목록과 가르지 못한다. Gradle의 매개변수 실행
+/// (`[1] 5`)은 빈 글이다(Kotlin JVM 이름에는 `[`가 들지 못한다).
+fn method_name(name: &str) -> &str {
+    if name.starts_with('[') {
+        return "";
+    }
+    let name = match name.rfind('[') {
+        Some(i) if name.ends_with(']') => &name[..i],
+        _ => name,
+    };
+    match name.strip_suffix(')').and_then(|n| n.rfind('(')) {
+        Some(i) if !name[..i].ends_with(char::is_whitespace) => &name[..i],
+        _ => name,
+    }
+}
+
 /// 실패 스택에서 묶음 클래스(`demo.CalcTest`, 안쪽 클래스는 `demo.CalcTest$Inner`) 그대로인 첫 프레임의 메서드.
 fn stack_method(case: &Case) -> Option<&str> {
     case.detail.lines().find_map(|line| {
-        let class = JAVA_FRAME.captures(line)?.get(1)?;
-        (class.as_str() == case.suite).then(|| line[class.end() + 1..].split('(').next())?
+        let c = JAVA_FRAME.captures(line)?;
+        let (class, file) = (c.get(1)?, c.get(2)?);
+        // 메서드는 클래스 뒤 `.`부터 파일의 `(` 앞까지다(Kotlin 백틱 이름에는 괄호가 든다).
+        (class.as_str() == case.suite).then(|| &line[class.end() + 1..file.start() - 1])
     })
 }
 

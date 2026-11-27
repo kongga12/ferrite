@@ -2693,12 +2693,12 @@ fn gradle_kotlin_scala_테스트의_줄과_실패만_다시() {
         "plugins {{\n    scala\n}}{common}\ndependencies {{\n    implementation(\"org.scala-lang:scala-library:2.13.16\")\n}}\n"
     );
     let root = gradle_project("gradle-jvm", &[("kt", &kotlin), ("sc", &scala)]);
-    // Kotlin 관례대로 공통 루트 패키지(`com.example.board`)를 폴더에서 뺐다. 이름은 백틱으로 빈칸을 넣었다.
+    // Kotlin 관례대로 공통 루트 패키지(`com.example.board`)를 폴더에서 뺐다. 이름은 백틱으로 빈칸과 괄호를 넣었다.
     let kt = root.join("kt/src/test/kotlin");
     std::fs::create_dir_all(&kt).unwrap();
     std::fs::write(
         kt.join("CalcTest.kt"),
-        "package com.example.board\n\nimport org.junit.jupiter.api.Assertions.assertEquals\nimport org.junit.jupiter.api.Test\n\nclass CalcTest {\n    @Test\n    fun `adds numbers`() {\n        assertEquals(3, 1 + 2)\n    }\n\n    @Test\n    fun `adds wrong numbers`() {\n        assertEquals(4, 1 + 2, \"더하기\")\n    }\n}\n",
+        "package com.example.board\n\nimport org.junit.jupiter.api.Assertions.assertEquals\nimport org.junit.jupiter.api.Test\n\nclass CalcTest {\n    @Test\n    fun `adds numbers`() {\n        assertEquals(3, 1 + 2)\n    }\n\n    @Test\n    fun `adds wrong numbers`() {\n        assertEquals(4, 1 + 2, \"더하기\")\n    }\n\n    @Test\n    fun `adds (big) numbers`() {\n        assertEquals(400, 100 + 200, \"큰 수\")\n    }\n}\n",
     )
     .unwrap();
     // Scala는 람다(`$anonfun$`) 안에서 실패한다.
@@ -2723,6 +2723,7 @@ fn gradle_kotlin_scala_테스트의_줄과_실패만_다시() {
     assert_eq!(
         outcomes(&cases),
         [
+            ("adds (big) numbers()".to_owned(), Outcome::Failed),
             ("adds numbers()".to_owned(), Outcome::Passed),
             ("adds wrong numbers()".to_owned(), Outcome::Failed),
             ("adds()".to_owned(), Outcome::Passed),
@@ -2731,6 +2732,7 @@ fn gradle_kotlin_scala_테스트의_줄과_실패만_다시() {
     );
     let line = |name: &str| test_line(&root, &root, cases.iter().find(|c| c.name == name).unwrap());
     assert_eq!(line("adds wrong numbers()"), (kt.join("CalcTest.kt"), 14));
+    assert_eq!(line("adds (big) numbers()"), (kt.join("CalcTest.kt"), 19));
     assert_eq!(line("addsWrong()"), (sc.join("CalcSuite.scala"), 12));
 
     // 실패만 다시(앱처럼 보고서 옵션을 붙인다). 빈칸 든 이름도 `--tests`로 걸러진다.
@@ -2752,10 +2754,20 @@ fn gradle_kotlin_scala_테스트의_줄과_실패만_다시() {
     assert_eq!(
         again(&failed(&cases)),
         [
+            ("adds (big) numbers()".to_owned(), Outcome::Failed),
             ("adds wrong numbers()".to_owned(), Outcome::Failed),
             ("addsWrong()".to_owned(), Outcome::Failed),
         ],
         "실패한 것만 다시"
+    );
+    // 이름 안의 괄호는 메서드 이름이라 그 테스트만 돈다(예전에는 `adds `까지 잘라 아무것도 고르지 못했다).
+    let big: Vec<&Case> = failed(&cases)
+        .into_iter()
+        .filter(|c| c.name == "adds (big) numbers()")
+        .collect();
+    assert_eq!(
+        again(&big),
+        [("adds (big) numbers()".to_owned(), Outcome::Failed)]
     );
     // 한 하위 프로젝트에만 실패가 있으면 그 작업(`:sc:test`)만 돈다.
     let scala: Vec<&Case> = failed(&cases)

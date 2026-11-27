@@ -2592,7 +2592,7 @@
     - `test_at`: `fun` 뒤의 백틱 이름도 테스트 메서드로 알아본다(이름 안의 중괄호는 세지 않는다).
     - `rerun`(Maven): 이름의 `,`·`+`(Surefire가 가르는 글자)는 아무 한 글자인 `?`로 적는다. `*`는 `adds_two_numbers`까지 고른다. 빈칸이 든 거르기는 인자째 감싼다(`"-Dtest=CalcTest#adds two numbers? again"`, 통합 테스트는 `"-Dit.test=…"`). Gradle은 이미 `--tests "…"`로 감싸 그대로 고른다.
   - 검증: 단위 시험(백틱 이름, 이름 안 중괄호, Maven 단위·통합 테스트의 감싸기와 디버그 속성, Gradle). 실제 도구(로컬, JDK 21, Kotlin 2.3.0): `adds two numbers`·`adds two numbers, again`·`adds_two_numbers`가 든 클래스에서 Gradle 9.2는 `--tests "demo.CalcTest.adds two numbers"`가 그것만, `adds*two*numbers`는 `adds_two_numbers`까지 돌렸다. Maven 3.10·Surefire 3.5.4(Gradle이 컴파일한 클래스)는 `"-Dtest=CalcTest#adds two numbers? again"`가 그것만, `, again`을 그대로 두면 `adds two numbers`를 돌렸다. Windows `cmd`와 `sh` 모두 같았다.
-  - 확인하지 못한 것: 앱 화면, Kotlin 메이븐 플러그인으로 컴파일한 프로젝트, 이름에 `(`가 든 것(Gradle 보고서의 `()`를 떼는 자리와 겹친다).
+  - 확인하지 못한 것: 앱 화면, Kotlin 메이븐 플러그인으로 컴파일한 프로젝트, 이름에 `(`가 든 것(Gradle 보고서의 `()`를 떼는 자리와 겹친다. 뒤에 백로그 "Kotlin 이름의 괄호"(2026-11-27)에서 고쳤다).
 - [x] Gradle 테스트 디버그 검증(2026-11-26) — 작음
   - 까닭: 커서의 테스트 디버그는 Maven만 실제 java-debug로 붙어 보았다. Gradle(`--debug-jvm`)은 로컬 jdb로만 확인했다.
   - 한 일: `adapters`의 Maven 시험을 도구를 받는 몸(`java_debug로_커서의_테스트에_붙는다`)으로 나누고 Gradle 시험(`java_debug로_커서의_gradle_테스트에_붙는다`)을 더했다. 앱처럼 jdt.ls가 Gradle 프로젝트를 읽은 뒤 테스트 창과 같은 명령(`gradle --no-daemon :test --tests "demo.CalcTest.adds" --debug-jvm --rerun-tasks`, 작업은 `gradle_test_task`)을 띄우고 5005를 연결해 본 뒤 java-debug로 붙어 `add`의 a=41·b=1·total=42를 읽고, 보고서에 `adds()`만 있는지 본다. `adapters.yml`은 ci.yml과 같은 Gradle 9.2.0을 둔다(받는 것은 JUnit뿐이라 Gradle 홈은 캐시하지 않는다).
@@ -2656,6 +2656,16 @@
   - 고침(시험만): `debugpy로_·delve로_커서와_묶음의_…_테스트를_디버그한다`가 커서의 테스트 뒤에, 결과 묶음(pytest 보고서의 `classname` `tests.test_calc`, go test의 패키지 `example.com/demo/calc`)에서 이름이 빈 것을 앱과 같은 `debug_target`·`debug_config`로 띄워 중단점의 변수를 읽는다. 인자는 pytest가 파일 전체(`tests/test_calc.py`), Go가 거르기 없음(패키지 전체)이다.
   - 검증: CI의 실제 어댑터(`adapters`, 3개 OS: 그 워크플로가 pytest·Go를 설치한다). 로컬 PC에는 Go·pytest가 없어 돌리지 못했다(시험은 `require`로 건너뛴다).
   - 확인하지 못한 것: 실제 앱 창.
+- [x] Kotlin 이름의 괄호(2026-11-27) — 작음
+  - 까닭: 백틱 이름에 괄호가 들면(``fun `adds (big) numbers`()``) 실패만 다시·고른 것만이 이름을 첫 `(`에서 잘라(`adds `) 그 테스트를 고르지 못했다. 실패 스택의 그 프레임(`CalcTest.adds (big) numbers(CalcTest.kt:19)`)도 읽지 못해 결과의 테스트 줄로 가지 못했다.
+  - 고침(`test_report`)
+    - `method_name`: 보고서 이름에서 매개변수 실행의 차례(`[1]`)와 끝의 매개변수 목록(Surefire `(int)`, Gradle `()`)만 뗀다. 빈칸 뒤의 괄호(Surefire `adds (big)`)는 이름의 것으로 둔다. 다시 돌리기, 표시 이름 붙이기, 스택에서 메서드 찾기가 함께 쓴다.
+    - Java 프레임 정규식: 메서드 이름에 괄호가 들어도 마지막 `(파일:줄)` 앞까지를 메서드로 읽는다.
+  - 검증: 단위 시험(Maven·Gradle 거르기, Surefire 매개변수 실행 `adds (big)(int)[1]`, Gradle 매개변수 실행의 스택, 괄호 든 프레임). 실제 도구(로컬 Windows, JDK 21, Kotlin 2.3.0):
+    - Gradle 9.2: `test_tools`의 `gradle_kotlin_scala_테스트의_줄과_실패만_다시`에 괄호 이름을 더했다. 보고서 `adds (big) numbers()`, 테스트 줄 19, 실패만 다시와 그 테스트만 다시가 그것만 돌렸다. 예전 코드로는 그 프레임을 읽지 못해 시험이 깨진다.
+    - Maven 3.10·Surefire 3.5.4(Gradle이 컴파일한 클래스): 보고서 이름은 `adds (big) numbers`, `many (big)(int)[1]`이다. `-Dtest=CalcTest#adds (big) numbers`는 그것만, `#many (big)`는 두 실행만 골랐다. `cmd`로 띄운 감싼 인자(`"-Dtest=…"`)도 같았다.
+  - 한계: 빈칸 없이 괄호로 끝나는 백틱 이름(`` `sum(a)` ``)은 매개변수 목록과 가르지 못해 괄호를 뗀다.
+  - 확인하지 못한 것: 실제 앱 창, Kotlin 메이븐 플러그인으로 컴파일한 프로젝트.
 
 - 살폈지만 넣지 않은 것: 임베디드(MCU 플래시·시리얼 모니터·장비 설정 파일), 프레임워크별 지원(React·Vue·Angular 등, JS·TS 언어 서버로 기본은 된다), 린터 개별 연동(언어 서버나 저장 시 작업으로 된다), 원격 개발·컨테이너·SFTP 배포, 로컬 AI 완성 모델, 계정 기반 설정 동기화. egov 개발과 거리가 멀거나 크기에 비해 쓰임이 적다.
 
