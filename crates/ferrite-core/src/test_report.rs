@@ -701,11 +701,20 @@ pub fn read_report(path: &Path) -> Result<Vec<Case>, String> {
     Ok(cases)
 }
 
+/// Gradle 보고서의 메서드 이름 꼴: JUnit 5 `adds()`·`many(int)`, JUnit 4·TestNG는 괄호 없는 `adds`, TestNG
+/// 매개변수 실행 `adds[0](1, 2, 3)`. 아니면 표시 이름이다(Kotlin 백틱 이름도 여기 든다).
+static GRADLE_METHOD: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[\p{L}_$][\p{L}\p{N}_$]*(?:\[\d+\])?(?:\([^()]*\))?$").unwrap());
+
 /// JUnit 5 `@DisplayName`을 소스에서 찾아 결과에 붙인다.
 /// - 보고서의 표시 이름은 진짜 이름으로 되돌린다. 그래야 다시 돌리기·디버그가 그 테스트를 거른다. Gradle은 테스트
 ///   이름에(`두 수를 더한다` → `adds()`), Surefire는 클래스 이름에(`계산기` → `demo.CalcTest`, `@Nested`는
 ///   `demo.CalcTest$Inner`) 표시 이름을 적는다. 못 찾은 것(Gradle 매개변수 실행의 `[1] 5`)은 그대로 둔다.
-/// - 결과 트리에 보일 표시 이름(`label`·`suite_label`)은 도구와 상관없이 소스에서 정한다.
+/// - Gradle은 이름 생성기(`@DisplayNameGeneration`)의 이름도 적는다. 소스에 글이 없으니 생성기의 꼴을 거꾸로
+///   맞춘다: `ReplaceUnderscores`(`두 수를 더한다` → `두_수를_더한다`, 빈 `()`는 뗀다), `IndicativeSentences`
+///   (`SentenceTest, 문장_이름()`). Surefire는 생성기의 이름을 적지 않는다(3.5.4).
+/// - 결과 트리에 보일 표시 이름(`label`·`suite_label`)은 도구와 상관없이 소스에서 정한다. 생성기의 이름은 보고서의
+///   것을 그대로 보인다.
 ///
 /// 소스는 보고서 파일 이름(`TEST-demo.CalcTest.xml`)의 클래스로 찾는다. 흔한 자리(`src/<소스 세트>/java/<패키지>/`)
 /// 부터 보고, 프로젝트를 뒤지는 것은 보고서에 표시 이름이 보일 때만이다(보고서마다 뒤지면 느리다).
@@ -720,7 +729,8 @@ fn display_names(path: &Path, gradle: bool, cases: &mut [Case]) {
     let top = class.split('$').next().unwrap_or(class);
     // 이 보고서의 클래스나 그 안쪽 클래스.
     let in_report = |suite: &str| suite == top || suite.starts_with(&format!("{top}$"));
-    let name_display = |case: &Case| gradle && !case.name.is_empty() && !case.name.ends_with(')');
+    let name_display =
+        |case: &Case| gradle && !case.name.is_empty() && !GRADLE_METHOD.is_match(&case.name);
     let is_display = |case: &Case| !in_report(&case.suite) || name_display(case);
     let Some(project) = path
         .ancestors()
@@ -760,11 +770,34 @@ fn display_names(path: &Path, gradle: bool, cases: &mut [Case]) {
             })
         })?
     });
-    let Some(text) = text.filter(|t| t.contains("DisplayName")) else {
+    // 생성기는 `junit-platform.properties`로도 정하므로 어노테이션이 없어도 Gradle의 표시 이름이면 본다.
+    let Some(text) = text.filter(|t| t.contains("DisplayName") || cases.iter().any(name_display))
+    else {
         return;
     };
     let names = crate::test_at::jvm_display_names(&text);
+    let tests = crate::test_at::jvm_tests(&text);
+    // 생성기의 이름에 맞는 테스트 메서드: 끝의 `(…)`를 떼고, 그대로나 마지막 `, ` 뒤(`IndicativeSentences`)가
+    // 메서드 이름이거나 그 `_`를 빈칸으로 바꾼 것(`ReplaceUnderscores`)이다.
+    let generated = |case: &Case| {
+        let name = case.name.as_str();
+        let base = match name.rfind('(') {
+            Some(i) if name.ends_with(')') => name[..i].trim_end(),
+            _ => name,
+        };
+        let last = base.rsplit(", ").next().unwrap_or(base);
+        tests
+            .iter()
+            .filter(|t| t.suite == case.suite)
+            .find(|t| {
+                [base, last]
+                    .iter()
+                    .any(|b| t.name == *b || t.name.replace('_', " ") == *b)
+            })
+            .map(|t| t.name.clone())
+    };
     for case in cases.iter_mut() {
+        let reported = case.name.clone();
         // 표시 이름이 겹치면 이 보고서의 클래스의 것을 고른다.
         if !in_report(&case.suite)
             && let Some((_, at)) = names
@@ -773,12 +806,17 @@ fn display_names(path: &Path, gradle: bool, cases: &mut [Case]) {
         {
             case.suite.clone_from(&at.suite);
         }
-        if name_display(case)
-            && let Some((_, at)) = names
+        // 한 낱말의 표시 이름(`통과한다`)은 JUnit 4·TestNG의 괄호 없는 이름과 꼴이 같다. `@DisplayName` 글과 같으면
+        // 되돌리고, 생성기의 꼴로 맞추는 것은 메서드 이름 꼴이 아닌 것만이다(`lists`를 `lists()`로 바꾸지 않게).
+        if gradle && !case.name.is_empty() && (!case.name.ends_with(')') || name_display(case)) {
+            let found = names
                 .iter()
                 .find(|(d, at)| *d == case.name && at.suite == case.suite && !at.name.is_empty())
-        {
-            case.name = format!("{}()", at.name);
+                .map(|(_, at)| at.name.clone())
+                .or_else(|| name_display(case).then(|| generated(case)).flatten());
+            if let Some(method) = found {
+                case.name = format!("{method}()");
+            }
         }
         case.suite_label = names
             .iter()
@@ -792,7 +830,8 @@ fn display_names(path: &Path, gradle: bool, cases: &mut [Case]) {
             .map(|(d, _)| match case.name.find('[') {
                 Some(i) => format!("{d} {}", &case.name[i..]),
                 None => d.clone(),
-            });
+            })
+            .or_else(|| (reported != case.name).then_some(reported));
     }
 }
 
@@ -1198,9 +1237,17 @@ pub fn rerun(tool: Tool, command: &str, failed: &[&Case]) -> Option<String> {
     let nested = |class: &str| class.replace('$', "*");
     // Gradle `--tests`의 거르기. 이름이 빈 것(묶음 전체, `run_only`)은 클래스만. 메서드를 모르는 이름(통과한
     // Gradle 매개변수 실행 `[1] 5`)도 클래스째 돌린다.
-    let gradle_test = |case: &Case| match method(case) {
-        name if name.is_empty() => nested(&case.suite),
-        name => format!("{}.{name}", nested(&case.suite)),
+    let keeps_non_ascii = command_line_keeps_non_ascii();
+    let gradle_test = |case: &Case| {
+        let filter = match method(case) {
+            name if name.is_empty() => nested(&case.suite),
+            name => format!("{}.{name}", nested(&case.suite)),
+        };
+        if keeps_non_ascii {
+            filter
+        } else {
+            wildcard_non_ascii(&filter)
+        }
     };
     Some(match tool {
         Tool::Maven => {
@@ -1395,6 +1442,38 @@ pub fn frames(case: &Case) -> Vec<Frame> {
         }
     }
     frames
+}
+
+/// 명령 줄의 ASCII 밖 글자(한글 테스트 이름)가 테스트 도구에 그대로 가는지. Windows의 Java는 명령 줄을 ANSI 코드
+/// 페이지로 읽어, 거기 없는 글자는 `?`가 된다(영문 Windows의 1252에서 한글. Maven은 `?`가 한 글자 와일드카드라
+/// 거르기가 되지만 Gradle은 그렇지 않아 "No tests found"로 깨진다).
+fn command_line_keeps_non_ascii() -> bool {
+    #[cfg(windows)]
+    {
+        unsafe extern "system" {
+            safe fn GetACP() -> u32;
+        }
+        // ponytail: UTF-8(65001)과 한국어(949)만 본다. 다른 코드 페이지에서는 그 나라 글자도 별표로 넓힌다.
+        matches!(GetACP(), 65001 | 949)
+    }
+    #[cfg(not(windows))]
+    {
+        true
+    }
+}
+
+/// Gradle 거르기의 ASCII 밖 글자 묶음을 `*`로 바꾼다(`demo.Calc_Test.두_수를_더한다` → `demo.Calc_Test.*_*_*`).
+/// 그 글자를 담지 못하는 명령 줄에서 쓴다. 같은 꼴의 다른 테스트도 고를 수 있다(더 돌 뿐 빠지지는 않는다).
+fn wildcard_non_ascii(filter: &str) -> String {
+    let mut out = String::with_capacity(filter.len());
+    for c in filter.chars() {
+        if c.is_ascii() {
+            out.push(c);
+        } else if !out.ends_with('*') {
+            out.push('*');
+        }
+    }
+    out
 }
 
 /// 실패 스택에서 묶음 클래스(`demo.CalcTest`, 안쪽 클래스는 `demo.CalcTest$Inner`) 그대로인 첫 프레임의 메서드.

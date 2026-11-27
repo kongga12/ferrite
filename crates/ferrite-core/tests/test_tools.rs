@@ -4014,3 +4014,133 @@ fn gradle_매개변수_실행의_실패만_다시() {
     );
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[test]
+#[ignore = "Gradle로 @DisplayNameGeneration을 붙인 JUnit 5 테스트를 돌린다(의존성을 받는다). Java 17 이상과 gradle이 필요하다"]
+fn gradle_이름_생성기의_실패만_다시와_한글_커서의_테스트() {
+    if !require("gradle --version") {
+        return;
+    }
+    let root = temp_dir("gradle-display-gen");
+    let calc = "package demo;\n\nimport static org.junit.jupiter.api.Assertions.assertEquals;\n\n\
+         import org.junit.jupiter.api.DisplayNameGeneration;\nimport org.junit.jupiter.api.DisplayNameGenerator;\n\
+         import org.junit.jupiter.api.Nested;\nimport org.junit.jupiter.api.Test;\n\n\
+         @DisplayNameGeneration(DisplayNameGenerator.ReplaceUnderscores.class)\nclass Calc_Test {\n    \
+         @Test\n    void 두_수를_더한다() {\n        assertEquals(4, 1 + 2); // 커서\n    }\n\n    \
+         @Test\n    void plain() {\n        assertEquals(2, 1 + 1);\n    }\n\n    \
+         @Nested\n    class 안쪽_묶음 {\n        @Test\n        void 안에서_더한다() {\n            assertEquals(5, 1 + 2);\n        }\n    }\n}\n";
+    let files = [
+        ("settings.gradle", "rootProject.name = 'calc'\n"),
+        ("gradle.properties", "org.gradle.daemon=false\n"),
+        (
+            "build.gradle",
+            "plugins { id 'java' }\nrepositories { mavenCentral() }\ndependencies {\n    \
+             testImplementation platform('org.junit:junit-bom:5.12.2')\n    \
+             testImplementation 'org.junit.jupiter:junit-jupiter'\n    \
+             testRuntimeOnly 'org.junit.platform:junit-platform-launcher'\n}\n\
+             tasks.withType(JavaCompile).configureEach { options.release = 17; options.encoding = 'UTF-8' }\n\
+             test { useJUnitPlatform() }\n",
+        ),
+        ("src/test/java/demo/Calc_Test.java", calc),
+        (
+            "src/test/java/demo/SentenceTest.java",
+            "package demo;\n\nimport static org.junit.jupiter.api.Assertions.assertEquals;\n\n\
+             import org.junit.jupiter.api.DisplayNameGeneration;\nimport org.junit.jupiter.api.DisplayNameGenerator;\n\
+             import org.junit.jupiter.api.Test;\n\n\
+             @DisplayNameGeneration(DisplayNameGenerator.IndicativeSentences.class)\nclass SentenceTest {\n    \
+             @Test\n    void 문장_이름() {\n        assertEquals(2, 1);\n    }\n\n    \
+             @Test\n    void 통과() {\n        assertEquals(1, 1);\n    }\n}\n",
+        ),
+    ];
+    for (file, text) in files {
+        let path = root.join(file);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+    let command = "gradle test";
+    let ids = |cases: &[Case]| {
+        let mut found: Vec<(String, String, Outcome)> = cases
+            .iter()
+            .map(|c| (c.suite.clone(), c.name.clone(), c.outcome))
+            .collect();
+        found.sort_by(|a, b| (&a.0, &a.1).cmp(&(&b.0, &b.1)));
+        found
+    };
+    let id = |s: &str, n: &str, o| (s.to_owned(), n.to_owned(), o);
+    let since = SystemTime::now();
+    let (ok, output) = run(
+        &root,
+        &test_report::with_report(Tool::Gradle, command, &root),
+    );
+    assert!(!ok, "{output}");
+    let cases = junit(Tool::Gradle, &root, &root, since);
+    // 보고서의 생성기 이름(`두 수를 더한다`, `SentenceTest, 문장_이름()`)을 메서드로 되돌린다.
+    assert_eq!(
+        ids(&cases),
+        [
+            id("demo.Calc_Test", "plain", Outcome::Passed),
+            id("demo.Calc_Test", "두_수를_더한다()", Outcome::Failed),
+            id(
+                "demo.Calc_Test$안쪽_묶음",
+                "안에서_더한다()",
+                Outcome::Failed
+            ),
+            id("demo.SentenceTest", "문장_이름()", Outcome::Failed),
+            id("demo.SentenceTest", "통과()", Outcome::Passed),
+        ],
+        "{output}"
+    );
+
+    // 실패만 다시: 실패한 세 테스트만 돈다.
+    std::fs::remove_dir_all(root.join("build/test-results")).unwrap();
+    let since = SystemTime::now();
+    let line = test_report::rerun(Tool::Gradle, command, &failed(&cases)).unwrap();
+    let (_, output) = run(&root, &test_report::with_report(Tool::Gradle, &line, &root));
+    let again: Vec<String> = ids(&junit(Tool::Gradle, &root, &root, since))
+        .into_iter()
+        .map(|(s, n, _)| format!("{s}.{n}"))
+        .collect();
+    assert_eq!(
+        again,
+        [
+            "demo.Calc_Test.두_수를_더한다()",
+            "demo.Calc_Test$안쪽_묶음.안에서_더한다()",
+            "demo.SentenceTest.문장_이름()",
+        ],
+        "{line}\n{output}"
+    );
+
+    // 한글 메서드에서 커서의 테스트: 그 테스트만 돈다.
+    std::fs::remove_dir_all(root.join("build/test-results")).unwrap();
+    let file = root.join("src/test/java/demo/Calc_Test.java");
+    let line_no = calc.lines().position(|l| l.contains("// 커서")).unwrap();
+    let at = ferrite_core::test_at::test_at(&file, calc, line_no, &root).expect("커서의 테스트");
+    assert_eq!(
+        (at.suite.as_str(), at.name.as_str()),
+        ("demo.Calc_Test", "두_수를_더한다")
+    );
+    let case = Case {
+        suite: at.suite,
+        name: at.name,
+        outcome: Outcome::Passed,
+        seconds: None,
+        message: None,
+        detail: String::new(),
+        file: None,
+        line: None,
+        integration: false,
+        task: test_report::gradle_test_task(&file),
+        previous: false,
+        label: None,
+        suite_label: None,
+    };
+    let since = SystemTime::now();
+    let line = test_report::run_only(Tool::Gradle, command, &[&case], &root).unwrap();
+    let (_, output) = run(&root, &test_report::with_report(Tool::Gradle, &line, &root));
+    let only: Vec<String> = junit(Tool::Gradle, &root, &root, since)
+        .iter()
+        .map(|c| c.name.clone())
+        .collect();
+    assert_eq!(only, ["두_수를_더한다()"], "{line}\n{output}");
+    let _ = std::fs::remove_dir_all(&root);
+}
