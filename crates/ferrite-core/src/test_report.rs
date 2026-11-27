@@ -1477,23 +1477,27 @@ fn wildcard_non_ascii(filter: &str) -> String {
     out
 }
 
-/// 보고서 이름의 메서드 이름: 매개변수 실행의 차례(Surefire `adds(int)[1]`)와 끝의 매개변수 목록(`(int)`,
-/// Gradle의 `()`)을 뗀다. Kotlin 백틱 이름에는 괄호가 들 수 있어(`adds (big) numbers`, Gradle은
+/// 보고서 이름의 메서드 이름: 매개변수 실행의 차례(Surefire `adds(int)[1]`, TestNG `adds[1](2, 2, 5)`)와 끝의
+/// 매개변수 목록(`(int)`, Gradle의 `()`)을 뗀다. Kotlin 백틱 이름에는 괄호가 들 수 있어(`adds (big) numbers`, Gradle은
 /// `adds (big) numbers()`) 끝의 묶음만, 그것도 빈칸 뒤가 아닌 것만 뗀다(Surefire `adds (big)`는 그대로).
 /// 빈칸 없이 괄호로 끝나는 백틱 이름(`` `sum(a)` ``)은 매개변수 목록과 가르지 못한다. Gradle의 매개변수 실행
 /// (`[1] 5`)은 빈 글이다(Kotlin JVM 이름에는 `[`가 들지 못한다).
 fn method_name(name: &str) -> &str {
+    fn index(name: &str) -> &str {
+        match name.rfind('[') {
+            Some(i) if name.ends_with(']') => &name[..i],
+            _ => name,
+        }
+    }
     if name.starts_with('[') {
         return "";
     }
-    let name = match name.rfind('[') {
-        Some(i) if name.ends_with(']') => &name[..i],
-        _ => name,
-    };
-    match name.strip_suffix(')').and_then(|n| n.rfind('(')) {
+    let name = index(name);
+    let name = match name.strip_suffix(')').and_then(|n| n.rfind('(')) {
         Some(i) if !name[..i].ends_with(char::is_whitespace) => &name[..i],
         _ => name,
-    }
+    };
+    index(name)
 }
 
 /// 실패 스택에서 묶음 클래스(`demo.CalcTest`, 안쪽 클래스는 `demo.CalcTest$Inner`) 그대로인 첫 프레임의 메서드.

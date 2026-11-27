@@ -1811,3 +1811,19 @@ fn 명령_줄이_담지_못하는_글자는_gradle_거르기에서_별표로() {
         "demo.CalcTest.adds"
     );
 }
+
+#[test]
+fn 보고서_이름에서_메서드_이름만_남긴다() {
+    for (name, method) in [
+        ("adds", "adds"),
+        ("adds()", "adds"),
+        ("adds(int)[1]", "adds"),
+        ("adds[1](2, 2, 5)", "adds"),
+        ("adds (big) numbers", "adds (big) numbers"),
+        ("adds (big) numbers()", "adds (big) numbers"),
+        ("many (big)(int)[1]", "many (big)"),
+        ("[1] 5", ""),
+    ] {
+        assert_eq!(method_name(name), method, "{name}");
+    }
+}

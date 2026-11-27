@@ -2659,9 +2659,9 @@
 - [x] Kotlin 이름의 괄호(2026-11-27) — 작음
   - 까닭: 백틱 이름에 괄호가 들면(``fun `adds (big) numbers`()``) 실패만 다시·고른 것만이 이름을 첫 `(`에서 잘라(`adds `) 그 테스트를 고르지 못했다. 실패 스택의 그 프레임(`CalcTest.adds (big) numbers(CalcTest.kt:19)`)도 읽지 못해 결과의 테스트 줄로 가지 못했다.
   - 고침(`test_report`)
-    - `method_name`: 보고서 이름에서 매개변수 실행의 차례(`[1]`)와 끝의 매개변수 목록(Surefire `(int)`, Gradle `()`)만 뗀다. 빈칸 뒤의 괄호(Surefire `adds (big)`)는 이름의 것으로 둔다. 다시 돌리기, 표시 이름 붙이기, 스택에서 메서드 찾기가 함께 쓴다.
+    - `method_name`: 보고서 이름에서 매개변수 실행의 차례(`[1]`)와 끝의 매개변수 목록(Surefire `(int)`, Gradle `()`)만 뗀다. 차례는 목록의 앞뒤 어디든 뗀다(JUnit 5 Surefire `adds(int)[1]`, TestNG `adds[1](2, 2, 5)`. 처음엔 뒤의 것만 떼어 CI의 Maven·Gradle TestNG 매개변수 시험이 깨졌다). 빈칸 뒤의 괄호(Surefire `adds (big)`)는 이름의 것으로 둔다. 다시 돌리기, 표시 이름 붙이기, 스택에서 메서드 찾기가 함께 쓴다.
     - Java 프레임 정규식: 메서드 이름에 괄호가 들어도 마지막 `(파일:줄)` 앞까지를 메서드로 읽는다.
-  - 검증: 단위 시험(Maven·Gradle 거르기, Surefire 매개변수 실행 `adds (big)(int)[1]`, Gradle 매개변수 실행의 스택, 괄호 든 프레임). 실제 도구(로컬 Windows, JDK 21, Kotlin 2.3.0):
+  - 검증: 단위 시험(`method_name`의 이름 꼴들, Maven·Gradle 거르기, Surefire 매개변수 실행 `adds (big)(int)[1]`, Gradle 매개변수 실행의 스택, 괄호 든 프레임). 실제 도구(로컬 Windows, JDK 21, Kotlin 2.3.0):
     - Gradle 9.2: `test_tools`의 `gradle_kotlin_scala_테스트의_줄과_실패만_다시`에 괄호 이름을 더했다. 보고서 `adds (big) numbers()`, 테스트 줄 19, 실패만 다시와 그 테스트만 다시가 그것만 돌렸다. 예전 코드로는 그 프레임을 읽지 못해 시험이 깨진다.
     - Maven 3.10·Surefire 3.5.4(Gradle이 컴파일한 클래스): 보고서 이름은 `adds (big) numbers`, `many (big)(int)[1]`이다. `-Dtest=CalcTest#adds (big) numbers`는 그것만, `#many (big)`는 두 실행만 골랐다. `cmd`로 띄운 감싼 인자(`"-Dtest=…"`)도 같았다.
   - 한계: 빈칸 없이 괄호로 끝나는 백틱 이름(`` `sum(a)` ``)은 매개변수 목록과 가르지 못해 괄호를 뗀다.
