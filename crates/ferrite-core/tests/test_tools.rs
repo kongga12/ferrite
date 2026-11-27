@@ -4499,3 +4499,141 @@ fn gradle_junit4_parameterized_실행을_그_이름으로_고른다() {
     );
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// JUnit 4 `Parameterized`의 실행 이름이 매개변수 글 그대로(`{0}`)라 셸 글자가 든다. `ok`만 통과한다.
+const SHELL_NAMES: &str = r#"package com.example.board;
+
+import static org.junit.Assert.assertEquals;
+
+import java.util.Arrays;
+import java.util.Collection;
+import org.junit.Test;
+import org.junit.runner.RunWith;
+import org.junit.runners.Parameterized;
+import org.junit.runners.Parameterized.Parameters;
+
+@RunWith(Parameterized.class)
+public class EchoTest {
+    @Parameters(name = "{0}")
+    public static Collection<Object[]> data() {
+        return Arrays.asList(new Object[][] {
+            {"ok"}, {"say \"hi\""}, {"a|b"}, {"%OS%"}, {"$HOME"}, {"wow!"}, {"x(y)"}
+        });
+    }
+
+    private final String word;
+
+    public EchoTest(String word) {
+        this.word = word;
+    }
+
+    @Test
+    public void echo() {
+        assertEquals("ok", word);
+    }
+}
+"#;
+
+/// `SHELL_NAMES`를 `tool`로 돌린 뒤 실패만 다시가 셸(Windows cmd, 그 밖 sh)에서 깨지지 않고 실패한 실행만 돌리는지 본다.
+fn shell_names_rerun(tool: Tool, root: &Path, java: &Path, report: &Path) {
+    std::fs::create_dir_all(java).unwrap();
+    std::fs::write(java.join("EchoTest.java"), SHELL_NAMES).unwrap();
+    let command = match tool {
+        Tool::Maven => "mvn -B -q test",
+        _ => "gradle test",
+    };
+    // 보고서는 고친 시각으로 고르고 2초 앞당겨 보므로(FAT) 앞 실행의 보고서가 섞이지 않게 3초 쉬고 돌린다.
+    let run_tests = |line: &str| {
+        std::thread::sleep(std::time::Duration::from_secs(3));
+        let since = SystemTime::now();
+        run(root, &test_report::with_report(tool, line, report));
+        junit(tool, root, report, since)
+    };
+    let wrong: Vec<(String, Outcome)> = [
+        "echo[$HOME]",
+        "echo[%OS%]",
+        "echo[a|b]",
+        "echo[say \"hi\"]",
+        "echo[wow!]",
+        "echo[x(y)]",
+    ]
+    .iter()
+    .map(|n| ((*n).to_owned(), Outcome::Failed))
+    .collect();
+    let cases = run_tests(command);
+    let mut all = wrong.clone();
+    all.push(("echo[ok]".to_owned(), Outcome::Passed));
+    all.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(outcomes(&cases), all);
+    let line = test_report::rerun(tool, command, &failed(&cases)).unwrap();
+    assert_eq!(outcomes(&run_tests(&line)), wrong, "실패만 다시({line})");
+}
+
+#[test]
+#[ignore = "Maven으로 셸 글자가 든 JUnit 4 매개변수 실행을 돌린다(의존성을 받는다). Java 17 이상과 mvn이 필요하다"]
+fn maven_셸_글자가_든_실행_이름도_실패만_다시() {
+    if !require("mvn -v") {
+        return;
+    }
+    let root = temp_dir("maven-shell-names");
+    std::fs::write(
+        root.join("pom.xml"),
+        r#"<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>com.example</groupId>
+  <artifactId>board</artifactId>
+  <version>1.0</version>
+  <properties>
+    <maven.compiler.release>17</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+  </properties>
+  <dependencies>
+    <dependency>
+      <groupId>junit</groupId>
+      <artifactId>junit</artifactId>
+      <version>4.13.2</version>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+  <build>
+    <plugins>
+      <plugin>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <version>3.5.4</version>
+      </plugin>
+    </plugins>
+  </build>
+</project>
+"#,
+    )
+    .unwrap();
+    shell_names_rerun(
+        Tool::Maven,
+        &root,
+        &root.join("src/test/java/com/example/board"),
+        &root.join("reports"),
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+#[ignore = "Gradle로 셸 글자가 든 JUnit 4 매개변수 실행을 돌린다(의존성을 받는다). Java 17 이상과 gradle이 필요하다"]
+fn gradle_셸_글자가_든_실행_이름도_실패만_다시() {
+    if !require("gradle --version") {
+        return;
+    }
+    let root = gradle_project(
+        "gradle-shell-names",
+        &[(
+            "app",
+            "plugins {\n    java\n}\n\nrepositories {\n    mavenCentral()\n}\n\ndependencies {\n    testImplementation(\"junit:junit:4.13.2\")\n}\n",
+        )],
+    );
+    shell_names_rerun(
+        Tool::Gradle,
+        &root,
+        &root.join("app/src/test/java/com/example/board"),
+        &root,
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}

@@ -1241,7 +1241,8 @@ pub fn rerun(tool: Tool, command: &str, failed: &[&Case]) -> Option<String> {
     let gradle_test = |case: &Case| {
         let filter = match method(case) {
             name if name.is_empty() => nested(&case.suite),
-            name => format!("{}.{name}", nested(&case.suite)),
+            // `--tests`에는 한 글자 와일드카드가 없어 셸 글자는 `*`로 적는다.
+            name => format!("{}.{}", nested(&case.suite), shell_safe(&name, '*')),
         };
         if keeps_non_ascii {
             filter
@@ -1257,8 +1258,8 @@ pub fn rerun(tool: Tool, command: &str, failed: &[&Case]) -> Option<String> {
                 for case in cases {
                     let class = nested(case.suite.rsplit('.').next().unwrap_or(&case.suite));
                     // Kotlin 백틱 이름(`adds two numbers, again`): Surefire는 `,`(클래스 사이)·`+`(메서드
-                    // 사이)로 가르므로 아무 한 글자인 `?`로 적는다.
-                    let name = method(case).replace([',', '+'], "?");
+                    // 사이)로 가르므로 아무 한 글자인 `?`로 적는다. 셸 글자도 그렇다.
+                    let name = shell_safe(&method(case), '?').replace([',', '+'], "?");
                     match classes.iter_mut().find(|(c, _)| *c == class) {
                         Some((_, names)) if !names.contains(&name) => names.push(name),
                         Some(_) => {}
@@ -1289,9 +1290,13 @@ pub fn rerun(tool: Tool, command: &str, failed: &[&Case]) -> Option<String> {
             } else {
                 filter(&unit)
             };
-            // 공백이 든 거르기(Kotlin 백틱 이름)는 셸이 가르지 않게 인자째 감싼다.
+            // 공백이나 셸 글자(`|`·`&`·괄호·`[`, JUnit 4 매개변수 실행 `echo[a|b]`)가 든 거르기는 셸이 가르거나
+            // 풀지 않게 인자째 감싼다.
             let property = |key: &str, filter: String| {
-                if filter.contains(' ') {
+                if filter
+                    .chars()
+                    .any(|c| !(c.is_alphanumeric() || "_.#*?,+-".contains(c)))
+                {
                     format!("\"-D{key}={filter}\"")
                 } else {
                     format!("-D{key}={filter}")
@@ -1365,6 +1370,16 @@ pub fn rerun(tool: Tool, command: &str, failed: &[&Case]) -> Option<String> {
             format!("go test -json{run} {}", packages.join(" "))
         }
     })
+}
+
+/// 거르기에 든 셸 글자를 와일드카드(`wildcard`)로 바꾼다. 명령은 sh·cmd로 띄우고 인자는 큰따옴표로 감싸는데,
+/// 그 안에서도 sh는 `$`·`` ` ``·`\`를, cmd는 `%…%`·`!`(지연된 변수 확장)를 풀고 `"`는 감싸기를 끝낸다. 매개변수
+/// 실행의 이름(JUnit 4 `echo[say "hi"]`, `echo[%OS%]`)에 든다.
+fn shell_safe(name: &str, wildcard: char) -> String {
+    name.replace(
+        ['"', '$', '`', '\\', '%', '!'],
+        wildcard.encode_utf8(&mut [0; 4]),
+    )
 }
 
 /// 실패한 통합 테스트만 다시 돌릴 때 Surefire에 주는 거르기(맞는 단위 테스트 클래스가 없는 이름).
