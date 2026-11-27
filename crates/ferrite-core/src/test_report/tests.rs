@@ -608,6 +608,19 @@ fn kotlin_scala_스택의_테스트_줄을_찾는다() {
     );
     assert_eq!(test_frame(&kotlin, &found), Some(1));
     assert_eq!((found[2].file.as_str(), found[2].line), ("CalcTest.kt", 14));
+    // 이름에 괄호가 든 백틱 이름(`adds (big) numbers`)도 프레임이다.
+    let found = frames(&failed(
+        "com.example.board.CalcTest",
+        "org.opentest4j.AssertionFailedError: 더하기\n\tat app//com.example.board.CalcTest.adds (big) numbers(CalcTest.kt:20)\n",
+    ));
+    assert_eq!(
+        (
+            found[0].class.as_deref(),
+            found[0].file.as_str(),
+            found[0].line
+        ),
+        (Some("com.example.board.CalcTest"), "CalcTest.kt", 20)
+    );
     // `@Nested` 안쪽 클래스의 묶음(`CalcTest$Inner`)도 바깥 클래스의 프레임으로 간다.
     let nested = failed(
         "demo.CalcTest$Inner",
@@ -1504,6 +1517,43 @@ fn kotlin_백틱_이름은_인자째_감싼다() {
         .unwrap(),
         "gradle :test --tests \"demo.CalcTest.adds two numbers, again\""
     );
+    // 이름 안의 괄호(`adds (big) numbers`)는 메서드 이름이다. 끝의 매개변수 목록·Gradle의 `()`만 뗀다.
+    assert_eq!(
+        rerun(
+            Tool::Maven,
+            "mvn test",
+            &[&case("adds (big) numbers", false)]
+        )
+        .unwrap(),
+        "mvn test \"-Dtest=CalcTest#adds (big) numbers\" -Dsurefire.failIfNoSpecifiedTests=false"
+    );
+    assert_eq!(
+        rerun(
+            Tool::Maven,
+            "mvn test",
+            &[&case("adds (big)(int)[1]", false)]
+        )
+        .unwrap(),
+        "mvn test \"-Dtest=CalcTest#adds (big)\" -Dsurefire.failIfNoSpecifiedTests=false"
+    );
+    assert_eq!(
+        rerun(
+            Tool::Gradle,
+            "gradle test",
+            &[&case("adds (big) numbers()", false)]
+        )
+        .unwrap(),
+        "gradle :test --tests \"demo.CalcTest.adds (big) numbers\""
+    );
+    // Gradle의 매개변수 실행(`[1] 5`)은 스택에서 메서드를 찾는다.
+    let mut run = case("[1] 5", false);
+    run.detail =
+        "org.opentest4j.AssertionFailedError\n\tat app//demo.CalcTest.adds (big)(CalcTest.kt:9)\n"
+            .into();
+    assert_eq!(
+        rerun(Tool::Gradle, "gradle test", &[&run]).unwrap(),
+        "gradle :test --tests \"demo.CalcTest.adds (big)\""
+    );
 }
 
 /// Windows·JDK 21에서 `@DisplayName`을 붙인 예제를 실제로 돌린 보고서(Gradle 9.2.0·Surefire 3.5.4)를 줄였다.
@@ -1760,4 +1810,20 @@ fn 명령_줄이_담지_못하는_글자는_gradle_거르기에서_별표로() {
         wildcard_non_ascii("demo.CalcTest.adds"),
         "demo.CalcTest.adds"
     );
+}
+
+#[test]
+fn 보고서_이름에서_메서드_이름만_남긴다() {
+    for (name, method) in [
+        ("adds", "adds"),
+        ("adds()", "adds"),
+        ("adds(int)[1]", "adds"),
+        ("adds[1](2, 2, 5)", "adds"),
+        ("adds (big) numbers", "adds (big) numbers"),
+        ("adds (big) numbers()", "adds (big) numbers"),
+        ("many (big)(int)[1]", "many (big)"),
+        ("[1] 5", ""),
+    ] {
+        assert_eq!(method_name(name), method, "{name}");
+    }
 }
