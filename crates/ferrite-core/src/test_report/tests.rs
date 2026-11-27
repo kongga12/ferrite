@@ -1728,9 +1728,24 @@ fn gradle_이름_생성기의_표시_이름은_메서드로_되돌린다() {
         ]
     );
     let all: Vec<&Case> = found.iter().collect();
+    // 한글을 담지 못하는 명령 줄(영문 Windows)에서는 거르기의 한글이 별표가 된다.
+    let filters = [
+        "demo.Calc_Test.두_수를_더한다",
+        "demo.Calc_Test.plain",
+        "demo.Calc_Test",
+        "demo.Calc_Test*안쪽_묶음.안에서_더한다",
+        "demo.SentenceTest.문장_이름",
+    ];
+    let expected: Vec<String> = filters
+        .iter()
+        .map(|f| match command_line_keeps_non_ascii() {
+            true => format!("--tests \"{f}\""),
+            false => format!("--tests \"{}\"", wildcard_non_ascii(f)),
+        })
+        .collect();
     assert_eq!(
         rerun(Tool::Gradle, "gradle test", &all).unwrap(),
-        "gradle :test --tests \"demo.Calc_Test.두_수를_더한다\" --tests \"demo.Calc_Test.plain\" --tests \"demo.Calc_Test\" --tests \"demo.Calc_Test*안쪽_묶음.안에서_더한다\" --tests \"demo.SentenceTest.문장_이름\""
+        format!("gradle :test {}", expected.join(" "))
     );
     std::fs::remove_dir_all(&root).unwrap();
 }
