@@ -2585,7 +2585,7 @@
     - `test_at`: 커서를 품은 클래스들을 바깥부터 `$`로 이어 묶음으로 쓴다(`demo.CalcTest$Inner$Deeper`, 보고서의 `classname`과 같다). 몸(`{`)이 없는 선언(Kotlin `data class Point(val x: Int)`)은 뒤 선언의 몸을 제 것으로 세지 않는다. 품은 클래스가 없으면 예전처럼 위로 가장 가까운 클래스, 없으면 파일의 첫 클래스.
     - `rerun`(실패만 다시·고른 것만·커서의 테스트): Maven·Gradle 모두 안쪽 클래스의 `$`를 `*`로 적는다(`-Dtest=CalcTest*Inner#adds`, `--tests "demo.CalcTest*Inner.adds"`). 셸이 풀지 않고 두 도구 모두 안쪽 클래스만 고른다.
   - 검증: 단위 시험(두 겹 `@Nested`, 안쪽 클래스의 메서드 밖, 바깥 클래스로 돌아온 줄, Kotlin 몸 없는 선언, Maven·Gradle 거르기). 실제 도구(로컬, JDK 21): 바깥 `adds`(실패)·안쪽 `adds`·안쪽 `other`(실패)가 든 클래스에서 Maven 3.10·Surefire 3.5.4는 `CalcTest$Inner#adds`·`CalcTest*Inner#adds`가 안쪽 `adds`만, `CalcTest#adds`(예전)는 바깥 것을 돌렸고 `CalcTest.Inner#adds`는 아무것도 돌리지 않았다. Gradle 9.2도 `$`·`*`는 안쪽 것만, `.`은 아무것도. `*` 꼴을 Windows `cmd`와 `sh`로 띄워 두 도구 모두 안쪽 `adds`만 돌았다.
-  - 확인하지 못한 것: 앱 화면, JUnit 4 `Enclosed`, Kotlin 테스트를 실제 도구로.
+  - 확인하지 못한 것: 앱 화면, JUnit 4 `Enclosed`(뒤에 백로그 "JUnit 4 Enclosed"(2026-11-27)에서 보았다), Kotlin 테스트를 실제 도구로.
 - [x] Kotlin 백틱 테스트 이름(2026-11-26) — 작음
   - 까닭: 커서의 테스트가 Kotlin의 백틱 이름(``fun `adds two numbers`()``)을 알아보지 못해 그 메서드 안에서도 클래스 전체를 돌렸다. 결과 트리의 실패만 다시·고른 것만도 Maven은 이름의 빈칸에서 셸이 인자를 갈라 `-Dtest`가 깨졌고, 이름의 `,`는 Surefire가 클래스 사이로 읽어 다른 테스트를 돌렸다.
   - 한 일:
@@ -2666,6 +2666,14 @@
     - Maven 3.10·Surefire 3.5.4(Gradle이 컴파일한 클래스): 보고서 이름은 `adds (big) numbers`, `many (big)(int)[1]`이다. `-Dtest=CalcTest#adds (big) numbers`는 그것만, `#many (big)`는 두 실행만 골랐다. `cmd`로 띄운 감싼 인자(`"-Dtest=…"`)도 같았다.
   - 한계: 빈칸 없이 괄호로 끝나는 백틱 이름(`` `sum(a)` ``)은 매개변수 목록과 가르지 못해 괄호를 뗀다.
   - 확인하지 못한 것: 실제 앱 창, Kotlin 메이븐 플러그인으로 컴파일한 프로젝트.
+- [x] JUnit 4 Enclosed(2026-11-27) — 작음
+  - 까닭: "JUnit 5 @Nested 테스트"(2026-11-24)의 안쪽 클래스 처리(`CalcTest$Inner`, 거르기 `CalcTest*Inner`)를 JUnit 4 `@RunWith(Enclosed.class)`의 안쪽 정적 클래스로는 보지 않았다.
+  - 고침(시험만): `test_tools`의 `maven_·gradle_junit4_enclosed_안쪽_클래스만_고른다`. 두 안쪽 클래스(`Adding`, `Subtracting`)에 같은 이름의 실패 테스트(`wrong`)를 두고 아래를 본다.
+    - 보고서의 묶음이 안쪽 클래스(`com.example.board.CalcTest$Adding`)이고, 실패 줄로 간다.
+    - 실패만 다시가 둘 다, 한 안쪽 클래스의 것만이면 그것만 돌린다.
+    - 커서의 테스트가 메서드 몸 안이면 그것만, 안쪽 클래스 줄이면 그 클래스 전체만 돌린다.
+  - 검증: 실제 도구(로컬 Windows cmd, JDK 21, JUnit 4.13.2): Maven 3.10·Surefire 3.5.4, Gradle 9.2 모두 통과. 코드는 고치지 않았다(`@Nested`의 길이 그대로 맞았다). Surefire는 전체 실행의 보고서를 바깥 클래스 파일(`TEST-…CalcTest.xml`)에, 거른 실행은 안쪽 클래스 파일(`TEST-…CalcTest$Adding.xml`)에 적지만 테스트마다 안쪽 클래스를 적어 같게 읽는다. Gradle은 안쪽 클래스마다 파일을 적고 두 번 돌리지 않는다.
+  - 확인하지 못한 것: 실제 앱 창, Enclosed 안의 매개변수 실행(`Parameterized`).
 
 - 살폈지만 넣지 않은 것: 임베디드(MCU 플래시·시리얼 모니터·장비 설정 파일), 프레임워크별 지원(React·Vue·Angular 등, JS·TS 언어 서버로 기본은 된다), 린터 개별 연동(언어 서버나 저장 시 작업으로 된다), 원격 개발·컨테이너·SFTP 배포, 로컬 AI 완성 모델, 계정 기반 설정 동기화. egov 개발과 거리가 멀거나 크기에 비해 쓰임이 적다.
 
