@@ -4156,3 +4156,184 @@ fn gradle_이름_생성기의_실패만_다시와_한글_커서의_테스트() {
     assert_eq!(only, ["두_수를_더한다()"], "{line}\n{output}");
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// JUnit 4 `@RunWith(Enclosed.class)`: 안쪽 정적 클래스마다 테스트를 묶는다. 두 안쪽 클래스에 같은 이름(`wrong`)을
+/// 두어 다른 쪽의 것이 섞이지 않는지 본다.
+const ENCLOSED: &str = "package com.example.board;\n\nimport static org.junit.Assert.assertEquals;\n\nimport org.junit.Test;\nimport org.junit.experimental.runners.Enclosed;\nimport org.junit.runner.RunWith;\n\n@RunWith(Enclosed.class)\npublic class CalcTest {\n    public static class Adding {\n        @Test\n        public void adds() {\n            assertEquals(3, 1 + 2);\n        }\n\n        @Test\n        public void wrong() {\n            assertEquals(4, 1 + 2);\n        }\n    }\n\n    public static class Subtracting {\n        @Test\n        public void wrong() {\n            assertEquals(0, 2 - 1);\n        }\n    }\n}\n";
+
+/// `ENCLOSED`를 `java`에 두고 `tool`로 돌려, 보고서의 안쪽 클래스(`CalcTest$Adding`)·실패 줄·실패만 다시·커서의
+/// 테스트(메서드, 안쪽 클래스 줄)가 그 안쪽 클래스의 것만 고르는지 본다. `report`는 보고서를 받을 폴더(Gradle은
+/// 루트)다.
+fn enclosed_inner_classes(tool: Tool, root: &Path, java: &Path, report: &Path) {
+    std::fs::create_dir_all(java).unwrap();
+    let file = java.join("CalcTest.java");
+    std::fs::write(&file, ENCLOSED).unwrap();
+    let command = match tool {
+        Tool::Maven => "mvn -B -q test",
+        _ => "gradle test",
+    };
+    // 보고서는 고친 시각으로 고르고 2초 앞당겨 보므로(FAT) 앞 실행의 보고서가 섞이지 않게 3초 쉬고 돌린다.
+    let run_tests = |line: &str| {
+        std::thread::sleep(std::time::Duration::from_secs(3));
+        let since = SystemTime::now();
+        run(root, &test_report::with_report(tool, line, report));
+        junit(tool, root, report, since)
+    };
+    let tests = |cases: &[Case]| {
+        let mut tests: Vec<(String, String, Outcome)> = cases
+            .iter()
+            .map(|c| (c.suite.clone(), c.name.clone(), c.outcome))
+            .collect();
+        tests.sort_by(|a, b| (&a.0, &a.1).cmp(&(&b.0, &b.1)));
+        tests
+    };
+    let test = |class: &str, name: &str, outcome| {
+        (
+            format!("com.example.board.CalcTest${class}"),
+            name.to_owned(),
+            outcome,
+        )
+    };
+    let cases = run_tests(command);
+    assert_eq!(
+        tests(&cases),
+        [
+            test("Adding", "adds", Outcome::Passed),
+            test("Adding", "wrong", Outcome::Failed),
+            test("Subtracting", "wrong", Outcome::Failed),
+        ]
+    );
+    let line_of = |text: &str| ENCLOSED.lines().position(|l| l.contains(text)).unwrap();
+    let subtracting = cases
+        .iter()
+        .find(|c| c.suite.ends_with("$Subtracting"))
+        .unwrap();
+    assert_eq!(
+        test_line(root, root, subtracting),
+        (file.clone(), line_of("assertEquals(0") as u32 + 1)
+    );
+    // 실패만 다시: 둘 다, 한 안쪽 클래스의 것만이면 그것만.
+    let line = test_report::rerun(tool, command, &failed(&cases)).unwrap();
+    assert_eq!(
+        tests(&run_tests(&line)),
+        [
+            test("Adding", "wrong", Outcome::Failed),
+            test("Subtracting", "wrong", Outcome::Failed),
+        ],
+        "실패만 다시({line})"
+    );
+    let line = test_report::rerun(tool, command, &[subtracting]).unwrap();
+    assert_eq!(
+        tests(&run_tests(&line)),
+        [test("Subtracting", "wrong", Outcome::Failed)],
+        "한 안쪽 클래스의 실패만({line})"
+    );
+    // 커서의 테스트: `Adding.wrong`의 몸 안, `Subtracting` 클래스 줄(그 안쪽 클래스 전체).
+    for (cursor, suite, name, expected) in [
+        (
+            "assertEquals(4",
+            "Adding",
+            "wrong",
+            vec![test("Adding", "wrong", Outcome::Failed)],
+        ),
+        (
+            "class Subtracting",
+            "Subtracting",
+            "",
+            vec![test("Subtracting", "wrong", Outcome::Failed)],
+        ),
+    ] {
+        let at = ferrite_core::test_at::test_at(&file, ENCLOSED, line_of(cursor), root)
+            .expect("커서의 테스트");
+        assert_eq!(
+            (at.suite.as_str(), at.name.as_str()),
+            (format!("com.example.board.CalcTest${suite}").as_str(), name)
+        );
+        let case = Case {
+            suite: at.suite,
+            name: at.name,
+            outcome: Outcome::Passed,
+            seconds: None,
+            message: None,
+            detail: String::new(),
+            file: None,
+            line: None,
+            integration: false,
+            task: None,
+            previous: false,
+            label: None,
+            suite_label: None,
+        };
+        let line = test_report::run_only(tool, command, &[&case], root).unwrap();
+        assert_eq!(tests(&run_tests(&line)), expected, "커서의 테스트({line})");
+    }
+}
+
+#[test]
+#[ignore = "Maven으로 JUnit 4 Enclosed 테스트를 돌린다(의존성을 받는다). Java 17 이상과 mvn이 필요하다"]
+fn maven_junit4_enclosed_안쪽_클래스만_고른다() {
+    if !require("mvn -v") {
+        return;
+    }
+    let root = temp_dir("maven-junit4-enclosed");
+    std::fs::write(
+        root.join("pom.xml"),
+        r#"<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>com.example</groupId>
+  <artifactId>board</artifactId>
+  <version>1.0</version>
+  <properties>
+    <maven.compiler.release>17</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+  </properties>
+  <dependencies>
+    <dependency>
+      <groupId>junit</groupId>
+      <artifactId>junit</artifactId>
+      <version>4.13.2</version>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+  <build>
+    <plugins>
+      <plugin>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <version>3.5.4</version>
+      </plugin>
+    </plugins>
+  </build>
+</project>
+"#,
+    )
+    .unwrap();
+    enclosed_inner_classes(
+        Tool::Maven,
+        &root,
+        &root.join("src/test/java/com/example/board"),
+        &root.join("reports"),
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+#[ignore = "Gradle로 JUnit 4 Enclosed 테스트를 돌린다(의존성을 받는다). Java 17 이상과 gradle이 필요하다"]
+fn gradle_junit4_enclosed_안쪽_클래스만_고른다() {
+    if !require("gradle --version") {
+        return;
+    }
+    let root = gradle_project(
+        "gradle-junit4-enclosed",
+        &[(
+            "app",
+            "plugins {\n    java\n}\n\nrepositories {\n    mavenCentral()\n}\n\ndependencies {\n    testImplementation(\"junit:junit:4.13.2\")\n}\n",
+        )],
+    );
+    enclosed_inner_classes(
+        Tool::Gradle,
+        &root,
+        &root.join("app/src/test/java/com/example/board"),
+        &root,
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
