@@ -342,9 +342,20 @@ fn test_debug_arguments(file: &Path, marker: &str, dir: &Path) -> Value {
         .arguments
 }
 
+/// 결과 트리의 "이 묶음 디버그"와 같은 구성: 보고서의 묶음(`suite`)에서 이름이 빈 것(묶음 전체)의 소스를
+/// 찾고(`debug_target`) 디버거로 띄울 인자를 만든다(`debug_config`).
+fn suite_debug_arguments(lang: ferrite_core::test_at::TestLang, suite: &str, dir: &Path) -> Value {
+    let (at, file) =
+        ferrite_core::test_at::debug_target(lang, suite, "", dir).expect("묶음의 소스");
+    ferrite_core::test_at::debug_config(&at, &file, dir)
+        .expect("디버그 구성")
+        .arguments
+}
+
 #[test]
 #[ignore = "PyPI에서 debugpy(약 5MB)를 받아 가상환경에 설치한다. Python과 pytest가 필요하다"]
-fn debugpy로_커서의_pytest_테스트를_디버그한다() {
+fn debugpy로_커서와_묶음의_pytest_테스트를_디버그한다() {
+    use ferrite_core::test_at::TestLang;
     let python = if cfg!(windows) { "python" } else { "python3" };
     let pytest = Command::new(python)
         .args(["-m", "pytest", "--version"])
@@ -368,13 +379,20 @@ fn debugpy로_커서의_pytest_테스트를_디버그한다() {
     assert_locals(&locals_at_breakpoint(
         &adapter, "debugpy", arguments, &source, 3,
     ));
+    // 결과 묶음(pytest 보고서의 `classname`)이면 그 파일 전체를 띄운다.
+    let arguments = suite_debug_arguments(TestLang::Python, "tests.test_calc", &project);
+    assert_eq!(arguments["args"], json!(["tests/test_calc.py"]));
+    assert_locals(&locals_at_breakpoint(
+        &adapter, "debugpy", arguments, &source, 3,
+    ));
     let _ = std::fs::remove_dir_all(&servers);
     let _ = std::fs::remove_dir_all(&project);
 }
 
 #[test]
 #[ignore = "go install로 delve를 받아 빌드한다. Go가 필요하다"]
-fn delve로_커서의_go_테스트를_디버그한다() {
+fn delve로_커서와_묶음의_go_테스트를_디버그한다() {
+    use ferrite_core::test_at::TestLang;
     if !require("Go", find_program("go").is_some()) {
         return;
     }
@@ -395,12 +413,18 @@ fn delve로_커서의_go_테스트를_디버그한다() {
     std::fs::write(
         &test,
         // 이어 간 뒤에도 잠시 돌아야 실행 중에 보낸 식의 답을 받는다(다른 예제와 같다).
-        "package calc\n\nimport (\n\t\"testing\"\n\t\"time\"\n)\n\nfunc TestAdd(t *testing.T) {\n\tif add(41, 1) != 42 { // 커서\n\t\tt.Fatal(\"add\")\n\t}\n\ttime.Sleep(4 * time.Second)\n}\n\nfunc TestOther(t *testing.T) {\n\tt.Fatal(\"돌면 안 된다\")\n}\n",
+        "package calc\n\nimport (\n\t\"testing\"\n\t\"time\"\n)\n\nfunc TestAdd(t *testing.T) {\n\tif add(41, 1) != 42 { // 커서\n\t\tt.Fatal(\"add\")\n\t}\n\ttime.Sleep(4 * time.Second)\n}\n\nfunc TestOther(t *testing.T) {\n\tt.Fatal(\"묶음 전체일 때만 돈다\")\n}\n",
     )
     .unwrap();
     let arguments = test_debug_arguments(&test, "// 커서", &project);
     assert_eq!(arguments["args"], json!(["-test.run", "^TestAdd$"]));
     let adapter = install_adapter(&servers, "delve", &project);
+    assert_locals(&locals_at_breakpoint(
+        &adapter, "delve", arguments, &source, 5,
+    ));
+    // 결과 묶음(go test의 패키지)이면 거르지 않고 그 패키지 전체를 띄운다(`TestOther`도 돈다).
+    let arguments = suite_debug_arguments(TestLang::Go, "example.com/demo/calc", &project);
+    assert_eq!(arguments.get("args"), None, "{arguments}");
     assert_locals(&locals_at_breakpoint(
         &adapter, "delve", arguments, &source, 5,
     ));
