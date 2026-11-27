@@ -638,6 +638,7 @@ fn java_debug로_커서의_gradle_테스트에_붙는다() {
 
 /// 테스트 창의 "커서의 테스트 디버그"처럼 커서의 테스트만 테스트 JVM이 디버거를 기다리게 띄우고(Maven
 /// `-Dmaven.surefire.debug`, Gradle `--debug-jvm`), 기다리기 시작하면 java-debug로 붙어 중단점의 변수를 읽는다.
+/// 이어 결과 묶음의 "이 묶음 디버그"처럼 클래스 전체를 같은 식으로 띄운다.
 fn java_debug로_커서의_테스트에_붙는다(tool: ferrite_core::test_report::Tool) {
     use ferrite_core::test_report::{self, Case, Outcome, Tool};
     let name = format!("java-test-{tool:?}").to_lowercase();
@@ -752,81 +753,95 @@ fn java_debug로_커서의_테스트에_붙는다(tool: ferrite_core::test_repor
 
     // 테스트 창의 "커서의 테스트 디버그"와 같은 명령: 커서의 테스트만 고르고(`run_only`, Gradle은 파일의 테스트
     // 작업에만), 테스트 JVM이 디버거를 기다리게 하고(`with_jvm_debug`), 보고서 옵션을 붙인다(`with_report`).
+    // 이어 결과 묶음의 "이 묶음 디버그"처럼 이름이 빈 것(클래스 전체)으로 같은 jdt.ls에서 다시 띄운다.
     let line = text.lines().position(|l| l.contains("// 커서")).unwrap();
     let at = ferrite_core::test_at::test_at(&test, text, line, &project).expect("커서의 테스트");
-    let case = Case {
-        suite: at.suite,
-        name: at.name,
-        outcome: Outcome::Passed,
-        seconds: None,
-        message: None,
-        detail: String::new(),
-        file: None,
-        line: None,
-        integration: false,
-        task: (tool == Tool::Gradle)
-            .then(|| test_report::gradle_test_task(&test))
-            .flatten(),
-        previous: false,
-        label: None,
-        suite_label: None,
-    };
-    // Gradle 데몬이 남으면 Windows에서 프로젝트 폴더를 지우지 못한다.
-    let configured = match tool {
-        Tool::Maven => "mvn -B test",
-        _ => "gradle --no-daemon test",
-    };
-    let only = test_report::run_only(tool, configured, &[&case], &project).unwrap();
-    let debug = test_report::with_jvm_debug(tool, &only).unwrap();
-    let command = test_report::with_report(tool, &debug, &project);
-    eprintln!("> {command}");
-    let mut tool_run = shell(&command).current_dir(&project).spawn().unwrap();
+    for whole in [false, true] {
+        let case = Case {
+            suite: at.suite.clone(),
+            name: if whole {
+                String::new()
+            } else {
+                at.name.clone()
+            },
+            outcome: Outcome::Passed,
+            seconds: None,
+            message: None,
+            detail: String::new(),
+            file: None,
+            line: None,
+            integration: false,
+            task: (tool == Tool::Gradle)
+                .then(|| test_report::gradle_test_task(&test))
+                .flatten(),
+            previous: false,
+            label: None,
+            suite_label: None,
+        };
+        // Gradle 데몬이 남으면 Windows에서 프로젝트 폴더를 지우지 못한다.
+        let configured = match tool {
+            Tool::Maven => "mvn -B test",
+            _ => "gradle --no-daemon test",
+        };
+        let only = test_report::run_only(tool, configured, &[&case], &project).unwrap();
+        let debug = test_report::with_jvm_debug(tool, &only).unwrap();
+        let command = test_report::with_report(tool, &debug, &project);
+        eprintln!("> {command}");
+        let mut tool_run = shell(&command).current_dir(&project).spawn().unwrap();
 
-    // 앱처럼 테스트 JVM이 기다리기 시작할 때까지 연결해 본다(Surefire는 기다리는 줄을 붙은 뒤에야 낸다).
-    let address = ([127, 0, 0, 1], ferrite_core::run::JDWP_PORT).into();
-    let started = Instant::now();
-    while std::net::TcpStream::connect_timeout(&address, Duration::from_millis(200)).is_err() {
-        assert!(
-            tool_run.try_wait().unwrap().is_none(),
-            "{tool:?}이 디버거를 기다리지 않고 끝났다"
-        );
-        assert!(
-            started.elapsed() < Duration::from_secs(300),
-            "테스트 JVM이 기다리지 않는다"
-        );
-        std::thread::sleep(Duration::from_millis(250));
-    }
-
-    let config = ferrite_core::test_at::jvm_attach_config();
-    assert!(config.attach());
-    let mut start = ferrite_dap::java::JavaStart::new(config.arguments, true, Some(&source));
-    let (port, arguments) = java_debug_port(&mut lsp, &mut start);
-    let adapter = Adapter::Tcp(([127, 0, 0, 1], port).into());
-    assert_locals(&locals_at(&adapter, "java", arguments, true, &source, 6));
-
-    let started = Instant::now();
-    let status = loop {
-        if let Some(status) = tool_run.try_wait().unwrap() {
-            break status;
+        // 앱처럼 테스트 JVM이 기다리기 시작할 때까지 연결해 본다(Surefire는 기다리는 줄을 붙은 뒤에야 낸다).
+        let address = ([127, 0, 0, 1], ferrite_core::run::JDWP_PORT).into();
+        let started = Instant::now();
+        while std::net::TcpStream::connect_timeout(&address, Duration::from_millis(200)).is_err() {
+            assert!(
+                tool_run.try_wait().unwrap().is_none(),
+                "{tool:?}이 디버거를 기다리지 않고 끝났다"
+            );
+            assert!(
+                started.elapsed() < Duration::from_secs(300),
+                "테스트 JVM이 기다리지 않는다"
+            );
+            std::thread::sleep(Duration::from_millis(250));
         }
-        assert!(
-            started.elapsed() < Duration::from_secs(120),
-            "{tool:?}이 끝나지 않는다"
-        );
-        std::thread::sleep(Duration::from_millis(200));
-    };
-    assert!(status.success(), "{tool:?} 종료: {status}");
-    // 커서의 테스트만 돌았다(Gradle 보고서는 이름에 `()`를 붙인다).
-    let report = match tool {
-        Tool::Maven => "target/surefire-reports/TEST-demo.CalcTest.xml",
-        _ => "build/test-results/test/TEST-demo.CalcTest.xml",
-    };
-    let cases = test_report::read_report(&project.join(report)).unwrap();
-    assert_eq!(cases.len(), 1, "{cases:?}");
-    assert_eq!(
-        (cases[0].name.trim_end_matches("()"), cases[0].outcome),
-        ("adds", Outcome::Passed)
-    );
+
+        let config = ferrite_core::test_at::jvm_attach_config();
+        assert!(config.attach());
+        let mut start = ferrite_dap::java::JavaStart::new(config.arguments, true, Some(&source));
+        let (port, arguments) = java_debug_port(&mut lsp, &mut start);
+        let adapter = Adapter::Tcp(([127, 0, 0, 1], port).into());
+        assert_locals(&locals_at(&adapter, "java", arguments, true, &source, 6));
+
+        let started = Instant::now();
+        let status = loop {
+            if let Some(status) = tool_run.try_wait().unwrap() {
+                break status;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(120),
+                "{tool:?}이 끝나지 않는다"
+            );
+            std::thread::sleep(Duration::from_millis(200));
+        };
+        // 묶음이면 `other`가 실패한다. Maven은 보고서 옵션(`-Dmaven.test.failure.ignore`) 때문에 그래도 0으로
+        // 끝나므로 종료 코드는 커서의 테스트만 본다.
+        assert!(whole || status.success(), "{tool:?} 종료: {status}");
+        // 커서의 테스트만 돌았거나, 묶음이면 클래스의 두 테스트가 돌았다(Gradle 보고서는 이름에 `()`를 붙인다).
+        let report = match tool {
+            Tool::Maven => "target/surefire-reports/TEST-demo.CalcTest.xml",
+            _ => "build/test-results/test/TEST-demo.CalcTest.xml",
+        };
+        let cases = test_report::read_report(&project.join(report)).unwrap();
+        let mut got: Vec<_> = cases
+            .iter()
+            .map(|c| (c.name.trim_end_matches("()"), c.outcome))
+            .collect();
+        got.sort_by_key(|(name, _)| name.to_string());
+        let mut expected = vec![("adds", Outcome::Passed)];
+        if whole {
+            expected.push(("other", Outcome::Failed));
+        }
+        assert_eq!(got, expected, "{cases:?}");
+    }
     drop(lsp);
     // 데몬이 프로젝트 폴더를 쥐고 있으면 지우지 못한다.
     drop(daemons);
