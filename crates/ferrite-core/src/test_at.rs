@@ -51,7 +51,14 @@ pub fn test_at(path: &Path, text: &str, line: usize, dir: &Path) -> Option<TestA
         return None;
     }
     match TestLang::of(path)? {
-        TestLang::Jvm => jvm(&lines, line),
+        // JUnit 4 `Parameterized`의 실행은 보고서에 `adds[1]`로 남고 두 도구 모두 `adds`로는 고르지 못한다. 메서드의
+        // 실행 모두를 고르는 `adds[*]`로 적는다(Surefire 3.5.4·Gradle 9.2가 그것만 골랐다).
+        TestLang::Jvm => jvm(&lines, line).map(|mut at| {
+            if !at.name.is_empty() && junit4_parameterized(&lines, line) {
+                at.name.push_str("[*]");
+            }
+            at
+        }),
         TestLang::Python => python(path, &lines, line, dir),
         TestLang::Go => go(path, &lines, line),
     }
@@ -79,7 +86,10 @@ fn jvm(lines: &[&str], line: usize) -> Option<TestAt> {
     }
     // 품은 클래스들. 없으면(클래스 밖) 위로 가장 가까운 클래스, 그것도 없으면(import 줄) 파일의 첫 클래스.
     let class_at = |at: usize| {
-        let nested = enclosing_classes(lines, at);
+        let nested: Vec<String> = enclosing_classes(lines, at)
+            .into_iter()
+            .map(|(_, name)| name)
+            .collect();
         if !nested.is_empty() {
             return Some(nested.join("$"));
         }
@@ -154,9 +164,9 @@ pub fn jvm_tests(text: &str) -> Vec<TestAt> {
     tests
 }
 
-/// `line` 줄을 품은 클래스 이름들(바깥부터). JUnit 5 `@Nested` 안쪽 클래스는 보고서(`CalcTest$Inner`)처럼 이어
+/// `line` 줄을 품은 클래스들(선언 줄, 이름. 바깥부터). JUnit 5 `@Nested` 안쪽 클래스는 보고서(`CalcTest$Inner`)처럼 이어
 /// 묶음이 된다. 몸(`{`)이 없는 선언(Kotlin `data class P(val x: Int)`)은 뒤 선언의 몸을 제 것으로 세지 않는다.
-fn enclosing_classes(lines: &[&str], line: usize) -> Vec<String> {
+fn enclosing_classes(lines: &[&str], line: usize) -> Vec<(usize, String)> {
     (0..=line)
         .filter_map(|i| CLASS.captures(lines[i]).map(|c| (i, c[1].to_owned())))
         .filter(|&(i, _)| {
@@ -168,8 +178,26 @@ fn enclosing_classes(lines: &[&str], line: usize) -> Vec<String> {
             !lines[i + 1..=open].iter().any(declares)
                 && block_end(lines, i).is_some_and(|end| end >= line)
         })
-        .map(|(_, name)| name)
         .collect()
+}
+
+static RUN_WITH_PARAMETERIZED: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"@(?:[\w.]+\.)?RunWith\s*\(\s*(?:[\w.]+\.)?Parameterized(?:\.class|::class)\s*\)")
+        .unwrap()
+});
+
+/// `line`이 JUnit 4 `@RunWith(Parameterized.class)` 클래스 안인지: 그 줄을 품은 가장 안쪽 클래스(Enclosed의 안쪽
+/// 클래스면 그것)의 선언 줄이나 그 위의 어노테이션·주석 줄(앞 선언이나 import가 끝난 곳까지)에 있다.
+fn junit4_parameterized(lines: &[&str], line: usize) -> bool {
+    let Some(&(class, _)) = enclosing_classes(lines, line).last() else {
+        return false;
+    };
+    lines[..=class]
+        .iter()
+        .rev()
+        .enumerate()
+        .take_while(|(k, l)| *k == 0 || !l.trim_end().ends_with([';', '{', '}']))
+        .any(|(_, l)| RUN_WITH_PARAMETERIZED.is_match(l))
 }
 
 /// 커서를 품은 테스트 메서드의 (시작 줄, 이름). 커서 위로 가장 가까운 메서드가 중괄호로 커서를 품고 그 줄이나 위의
@@ -557,6 +585,40 @@ class CalcTest {
                 dir
             ),
             None
+        );
+    }
+
+    #[test]
+    fn junit4_parameterized_메서드는_실행_모두로_고른다() {
+        let at = |text: &str, path: &str, marker: &str| {
+            let line = text.lines().position(|l| l.contains(marker)).unwrap();
+            let at = test_at(Path::new(path), text, line, Path::new(".")).unwrap();
+            (at.suite, at.name)
+        };
+        let java = "package demo;\n\nimport org.junit.runners.Parameterized;\n\n@RunWith(Parameterized.class)\npublic class CalcTest {\n    @Test\n    public void adds() {\n        // A\n    }\n}\n";
+        assert_eq!(
+            at(java, "CalcTest.java", "// A"),
+            ("demo.CalcTest".into(), "adds[*]".into())
+        );
+        // 클래스 줄이면 클래스 전체(이름이 빈 것)다.
+        assert_eq!(
+            at(java, "CalcTest.java", "class CalcTest"),
+            ("demo.CalcTest".into(), String::new())
+        );
+        // Enclosed의 안쪽 클래스는 그 클래스에 붙은 것만 본다.
+        let enclosed = "package demo;\n\n@RunWith(Enclosed.class)\npublic class CalcTest {\n    @RunWith(Parameterized.class)\n    public static class Many {\n        @Test\n        public void adds() {\n            // A\n        }\n    }\n\n    public static class One {\n        @Test\n        public void adds() {\n            // B\n        }\n    }\n}\n";
+        assert_eq!(
+            at(enclosed, "CalcTest.java", "// A"),
+            ("demo.CalcTest$Many".into(), "adds[*]".into())
+        );
+        assert_eq!(
+            at(enclosed, "CalcTest.java", "// B"),
+            ("demo.CalcTest$One".into(), "adds".into())
+        );
+        let kotlin = "package demo\n\n@RunWith(org.junit.runners.Parameterized::class)\nclass CalcTest(val a: Int) {\n    @Test\n    fun adds() {\n        // A\n    }\n}\n";
+        assert_eq!(
+            at(kotlin, "CalcTest.kt", "// A"),
+            ("demo.CalcTest".into(), "adds[*]".into())
         );
     }
 
