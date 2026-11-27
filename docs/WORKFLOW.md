@@ -2680,7 +2680,13 @@
     - `test_report::method_name`: 매개변수 실행의 차례는 목록 바로 뒤(Surefire JUnit 5 `adds(int)[1]`)나 바로 앞(TestNG `adds[1](2, 2, 5)`)일 때만 뗀다. 목록 없는 차례(JUnit 4 `adds[1: 2+2]`)는 그 이름째 거른다. Maven은 이름의 `+`를 예전처럼 `?`로 적는다(`"-Dtest=CalcTest#adds[1: 2?2]"`). Gradle은 그대로다(`--tests "…CalcTest.adds[1: 2+2]"`).
     - `test_at`: 커서를 품은 가장 안쪽 클래스(Enclosed의 안쪽 클래스면 그것)의 선언 줄이나 그 위 어노테이션 줄에 `@RunWith(Parameterized.class)`(Kotlin `::class`)가 있으면, 메서드 이름 뒤에 `[*]`를 붙여 그 메서드의 실행 모두를 고른다(`CalcTest#adds[*]`, `--tests "…CalcTest.adds[*]"`). 보고서와 견주는 `jvm_tests`·`jvm_display_names`는 진짜 이름 그대로다.
   - 검증: 단위 시험(`method_name`의 이름 꼴, Maven·Gradle 다시 돌리기 명령, Java·Kotlin·Enclosed 안쪽 클래스의 커서). 실제 도구(로컬 Windows cmd, JDK 21, JUnit 4.13.2): `test_tools`의 `maven_·gradle_junit4_parameterized_실행을_그_이름으로_고른다`. Maven 3.10·Surefire 3.5.4와 Gradle 9.2 모두 실패 줄, 실패만 다시(그 실행만), 결과의 한 실행만, 커서의 테스트(그 메서드의 실행 모두)가 맞았다. 기본 이름 꼴(`adds[1]`)과 `adds[*]`도 두 도구에서 손으로 거르기를 보았다. 이름 꼴에 기대는 다른 실제 도구 시험(TestNG·Kotlin·표시 이름·JUnit 5 매개변수)도 다시 통과했다.
-  - 한계: 이름 꼴에 큰따옴표가 든 실행(`{0}`이 `"a b"`인 글)은 셸 인자가 깨진다. JUnitParams 등 다른 매개변수 러너는 알아보지 않는다.
+  - 한계: 이름 꼴에 큰따옴표가 든 실행(`{0}`이 `"a b"`인 글)은 셸 인자가 깨진다(뒤에 백로그 "이름의 셸 글자"(2026-11-27)에서 고쳤다). JUnitParams 등 다른 매개변수 러너는 알아보지 않는다.
+  - 확인하지 못한 것: 실제 앱 창.
+- [x] 이름의 셸 글자(2026-11-27) — 작음
+  - 까닭: 다시 돌리기 명령은 셸(Windows cmd, 그 밖 sh)로 띄우고 거르기를 큰따옴표로 감싼다. 그 안에서도 cmd는 `%…%`·`!`를, sh는 `$`·`` ` ``·`\`를 풀고, `"`는 감싸기를 끝낸다. Maven은 공백이 있을 때만 감싸 `|`·`&`·괄호가 든 이름은 셸이 갈랐다. 매개변수 실행의 이름(JUnit 4 `@Parameters(name = "{0}")`의 `echo[say "hi"]`, `echo[%OS%]`, `echo[a|b]`)에 든다.
+  - 고침(`test_report::rerun`): 메서드 이름의 `"`·`$`·`` ` ``·`\`·`%`·`!`를 와일드카드로 적는다(Maven은 한 글자 `?`, Gradle `--tests`는 한 글자 와일드카드가 없어 `*`). Maven은 영숫자와 `_.#*?,+-` 밖의 글자가 들면 인자째 감싼다(`"-Dtest=EchoTest#echo[a|b]"`).
+  - 검증: 단위 시험(두 도구의 명령). 실제 도구(로컬 Windows cmd, JDK 21, JUnit 4.13.2): `test_tools`의 `maven_·gradle_셸_글자가_든_실행_이름도_실패만_다시`에서 `"`·`|`·`%OS%`·`$HOME`·`!`·괄호가 든 여섯 실패만 다시 돌았다(통과한 `echo[ok]`는 돌지 않았다). 예전 코드로는 두 도구 모두 `%OS%`·`say "hi"`가 빠졌다. sh는 CI(`full`의 Linux·macOS)가 본다.
+  - 한계: Gradle의 `*`는 같은 꼴의 다른 실행도 고를 수 있다(`echo[*HOME]`). 줄바꿈이 든 이름은 다루지 않는다.
   - 확인하지 못한 것: 실제 앱 창.
 
 - 살폈지만 넣지 않은 것: 임베디드(MCU 플래시·시리얼 모니터·장비 설정 파일), 프레임워크별 지원(React·Vue·Angular 등, JS·TS 언어 서버로 기본은 된다), 린터 개별 연동(언어 서버나 저장 시 작업으로 된다), 원격 개발·컨테이너·SFTP 배포, 로컬 AI 완성 모델, 계정 기반 설정 동기화. egov 개발과 거리가 멀거나 크기에 비해 쓰임이 적다.

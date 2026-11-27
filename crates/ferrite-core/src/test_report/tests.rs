@@ -1860,3 +1860,45 @@ fn junit4_매개변수_실행은_그_이름으로_다시_돌린다() {
         "gradle :app:test --tests \"com.example.board.CalcTest.adds[1: 2+2]\""
     );
 }
+
+/// 셸 글자가 든 실행 이름(JUnit 4 `@Parameters(name = "{0}")`)은 그 글자를 와일드카드로 적고, Maven은 인자째 감싼다.
+#[test]
+fn 이름의_셸_글자는_와일드카드로_적고_감싼다() {
+    let case = |name: &str| Case {
+        suite: "com.example.board.EchoTest".into(),
+        name: name.into(),
+        outcome: Outcome::Failed,
+        seconds: None,
+        message: None,
+        detail: String::new(),
+        file: None,
+        line: None,
+        integration: false,
+        task: Some(":app:test".into()),
+        previous: false,
+        label: None,
+        suite_label: None,
+    };
+    let names = [
+        "echo[say \"hi\"]",
+        "echo[a|b]",
+        "echo[%OS%]",
+        "echo[$HOME]",
+        "echo[wow!]",
+    ];
+    let cases: Vec<Case> = names.iter().map(|n| case(n)).collect();
+    let failed: Vec<&Case> = cases.iter().collect();
+    assert_eq!(
+        rerun(Tool::Maven, "mvn test", &failed).unwrap(),
+        "mvn test \"-Dtest=EchoTest#echo[say ?hi?]+echo[a|b]+echo[?OS?]+echo[?HOME]+echo[wow?]\" -Dsurefire.failIfNoSpecifiedTests=false"
+    );
+    assert_eq!(
+        rerun(Tool::Gradle, "gradle test", &failed[..2]).unwrap(),
+        "gradle :app:test --tests \"com.example.board.EchoTest.echo[say *hi*]\" --tests \"com.example.board.EchoTest.echo[a|b]\""
+    );
+    // 공백이 없어도 셸 글자(`|`)가 들면 감싼다.
+    assert_eq!(
+        rerun(Tool::Maven, "mvn test", &[&case("echo[a|b]")]).unwrap(),
+        "mvn test \"-Dtest=EchoTest#echo[a|b]\" -Dsurefire.failIfNoSpecifiedTests=false"
+    );
+}
