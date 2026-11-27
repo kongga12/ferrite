@@ -2650,7 +2650,12 @@
   - 까닭: "결과 묶음 디버그"(2026-11-26)는 묶음 전체를 jdb로만 보았다. 실제 어댑터 시험(`adapters`)은 커서의 테스트 하나만 java-debug로 붙었다.
   - 고침(시험만): `java_debug로_커서의_maven_·gradle_테스트에_붙는다`가 커서의 테스트 뒤에, 같은 jdt.ls로 이름이 빈 것(클래스 전체, [이 묶음 디버그]와 같은 `run_only`·`with_jvm_debug`)을 다시 띄워 java-debug로 붙는다. 중단점의 변수를 읽고, 보고서에 클래스의 두 테스트가 돌아 `other`가 실패했는지 본다(커서의 테스트만일 때는 `adds` 하나).
   - 검증: 실제 어댑터(로컬 Windows cmd, JDK 21, Maven 3.10·Surefire 3.5.4, Gradle 9.2, jdt.ls·java-debug): 두 도구 모두 클래스 전체로 띄운 JVM에 java-debug로 붙어 중단점의 변수(`a = 41`)를 읽었고, 보고서에 `adds` 통과·`other` 실패가 있다. Maven은 보고서 옵션(`-Dmaven.test.failure.ignore`) 때문에 실패해도 0으로 끝나 종료 코드는 커서의 테스트만 본다.
-  - 확인하지 못한 것: 실제 앱 창, pytest·Go 묶음을 실제 어댑터로.
+  - 확인하지 못한 것: 실제 앱 창, pytest·Go 묶음을 실제 어댑터로(뒤에 백로그 "pytest·Go 결과 묶음 디버그"(2026-11-27)에서).
+- [x] pytest·Go 결과 묶음 디버그(2026-11-27) — 작음
+  - 까닭: [이 묶음 디버그]의 pytest(debugpy)·Go(delve) 길은 단위 시험(`debug_target`·`debug_config`의 인자)만 보았다. 실제 어댑터 시험은 커서의 테스트 하나만 띄웠다.
+  - 고침(시험만): `debugpy로_·delve로_커서와_묶음의_…_테스트를_디버그한다`가 커서의 테스트 뒤에, 결과 묶음(pytest 보고서의 `classname` `tests.test_calc`, go test의 패키지 `example.com/demo/calc`)에서 이름이 빈 것을 앱과 같은 `debug_target`·`debug_config`로 띄워 중단점의 변수를 읽는다. 인자는 pytest가 파일 전체(`tests/test_calc.py`), Go가 거르기 없음(패키지 전체)이다.
+  - 검증: CI의 실제 어댑터(`adapters`, 3개 OS: 그 워크플로가 pytest·Go를 설치한다). 로컬 PC에는 Go·pytest가 없어 돌리지 못했다(시험은 `require`로 건너뛴다).
+  - 확인하지 못한 것: 실제 앱 창.
 
 - 살폈지만 넣지 않은 것: 임베디드(MCU 플래시·시리얼 모니터·장비 설정 파일), 프레임워크별 지원(React·Vue·Angular 등, JS·TS 언어 서버로 기본은 된다), 린터 개별 연동(언어 서버나 저장 시 작업으로 된다), 원격 개발·컨테이너·SFTP 배포, 로컬 AI 완성 모델, 계정 기반 설정 동기화. egov 개발과 거리가 멀거나 크기에 비해 쓰임이 적다.
 
